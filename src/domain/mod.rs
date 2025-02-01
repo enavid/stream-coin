@@ -1,2 +1,3 @@
-mod product;
-mod user;
+// Domain layer (Entities, Traits)
+mod entities;
+mod repositories;
