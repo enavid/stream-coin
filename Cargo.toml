@@ -7,3 +7,4 @@ license = "GPL-3"
 
 [dependencies]
 actix-web = "4.9.0"
+serde = { version = "1.0.217", features = ["derive"] }
