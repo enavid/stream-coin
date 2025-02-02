@@ -1,3 +1,3 @@
 // Domain layer (Entities, Traits)
-mod entities;
-mod repositories;
+pub mod entities;
+pub mod repositories;
