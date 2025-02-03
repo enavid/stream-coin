@@ -27,6 +27,6 @@ pub fn validation_errors_to_json(err: &actix_web_validator::Error) -> serde_json
     serde_json::json!({
         "code": 400,
         "message": "Invalid JSON format",
-        "errors": [{"field": "unknown", "message": err.to_string()}]
+        "error": err.to_string()
     })
 }
