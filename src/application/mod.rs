@@ -1,3 +1,4 @@
 // Use cases layer
-pub mod use_cases;
+pub mod models;
 pub mod services;
+pub mod use_cases;
