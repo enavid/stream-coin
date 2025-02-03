@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use utoipa::{ToSchema, IntoParams};
 use validator::{Validate, ValidationError};
 
 fn validate_exchange_name(exchange_name: &str) -> Result<(), ValidationError> {
@@ -10,7 +11,7 @@ fn validate_exchange_name(exchange_name: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ExchangeRequest {
     #[validate(custom(function = "validate_exchange_name"))]
     pub exchange_name: String,
