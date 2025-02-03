@@ -1,4 +1,5 @@
 // API logic (Actix, Controllers)
+mod dto;
 mod routers;
 mod handlers;
 mod responses;
