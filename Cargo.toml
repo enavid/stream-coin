@@ -1,7 +1,7 @@
 [package]
 name = "stream-coin"
 version = "0.1.0"
-authors = ["Navid Sadeghi navidsadeghi0021@gmail.com, navidsadeghi2@outlook.com"]
+#authors = ["Navid Sadeghi navidsadeghi0021@gmail.com, navidsadeghi2@outlook.com"]
 edition = "2021"
 license = "GPL-3"
 
@@ -16,8 +16,14 @@ nutype = { version = "0.5.1", features = ["serde"] }
 validator = {version =  "0.18.0",features = ["derive"]  }
 actix-web-validator = { version = "6.0.0" }
 dotenv = "0.15.0"
+env_logger = "0.11.6"
+
+[lib]
+name = "stream_coin"
+path = "src/lib.rs"
 
 
 [[bin]]
 name = "stream-coin"
 path = "bin/api.rs"
+
