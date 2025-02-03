@@ -2,7 +2,7 @@ use std::env;
 use dotenv::dotenv;
 use actix_web_validator::JsonConfig;
 use actix_web::{error, HttpResponse};
-use stream_coin::presentation::http_server::start_server;
+use stream_coin::presentation::server::http::start_server;
 use stream_coin::config::actix_web_validator::validation_errors_to_json;
 
 #[actix_web::main]

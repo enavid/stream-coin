@@ -5,4 +5,4 @@ mod routers;
 mod handlers;
 mod responses;
 mod middlewares;
-pub mod http_server;
+pub mod server;
