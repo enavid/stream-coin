@@ -1,6 +1,6 @@
 // API logic (Actix, Controllers)
-
-pub mod routers;
-pub mod middlewares;
-pub mod responses;
+mod routers;
 mod handlers;
+mod responses;
+mod middlewares;
+pub mod http_server;
