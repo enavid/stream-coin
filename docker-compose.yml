@@ -1,0 +1,52 @@
+services:
+  stream-coin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: 'stream-coin'
+    container_name: stream-coin
+    environment:
+      - RUST_LOG=info
+      - APP_ENV=production
+    expose:
+      - '8080'
+    ports:
+      - '8080:8080'
+    depends_on:
+      - mariadb
+    networks:
+      - stream-coin
+  phpmyadmin:
+    container_name: phpmyadmin
+    image: phpmyadmin
+    restart: always
+    expose:
+      - '80'
+    ports:
+      - '8081:80'
+    environment:
+      - PMA_HOST=mariadb
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+    depends_on:
+      - mariadb
+    networks:
+      - stream-coin
+  mariadb:
+    image: 'mariadb:latest'
+    container_name: mariadb
+    environment:
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    expose:
+      - '3306'
+    ports:
+      - '3306:3306'
+    volumes:
+      - './docker-volumes/mariadb:/var/lib/mysql'
+    networks:
+      - stream-coin
+networks:
+  stream-coin:
+    name: stream-coin
