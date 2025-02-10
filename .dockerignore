@@ -1,5 +1,6 @@
 # Ignore the target directory (compiled artifacts)
 target/
+docker-volumes
 
 # Ignore Cargo dependencies (except `Cargo.lock` for reproducible builds)
 **/Cargo.lock
