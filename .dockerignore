@@ -1,0 +1,39 @@
+# Ignore the target directory (compiled artifacts)
+target/
+
+# Ignore Cargo dependencies (except `Cargo.lock` for reproducible builds)
+**/Cargo.lock
+!Cargo.lock
+
+# Ignore build scripts output
+**/build/
+
+# Ignore intermediate build files
+**/*.rs.bk
+**/*.o
+**/*.so
+**/*.dylib
+**/*.dll
+**/*.rlib
+**/*.a
+
+# Ignore temporary files
+**/*~
+**/#*
+**/*.swp
+**/*.swo
+**/.DS_Store
+**/Thumbs.db
+
+# Ignore local environment settings and tools
+**/.env
+**/.idea/
+**/.vscode/
+**/.git/
+**/.github/
+**/.gitignore
+
+# Ignore logs and debug dumps
+**/*.log
+**/*.trace
+
