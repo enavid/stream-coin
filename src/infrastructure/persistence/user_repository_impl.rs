@@ -1,18 +1,29 @@
-use crate::domain::entities::User;
-use crate::domain::repositories::UserRepository;
+use sea_orm::*;
+use crate::infrastructure::persistence::models::user::ActiveModel;
+use crate::infrastructure::persistence::models::user::{Entity as User, Model as UserModel};
 
-pub struct UserRepositoryImpl;
+#[derive(Clone)]
+pub struct UserRepository {
+    pub db: DatabaseConnection,
+}
 
-impl UserRepository for UserRepositoryImpl {
-    fn save(&self, user: User) {
-        println!("Saving user: {:?}", user);
+impl UserRepository {
+    pub async fn new(db: DatabaseConnection) -> Self {
+        Self { db }
     }
 
-    fn find_by_id(&self, id: i32) -> Option<User> {
-        todo!()
+    pub async fn find_by_id(&self, id: i32) -> Result<Option<UserModel>, DbErr> {
+        User::find_by_id(id).one(&self.db).await
     }
 
-    fn find_by_username(&self, username: &str) -> Option<User> {
-        todo!()
+    pub async fn create_user(&self, username: String, email: String) -> Result<UserModel, DbErr> {
+        let new_user = ActiveModel {
+            username: Set(username),
+            email: Set(email),
+            created_at: Set(chrono::Utc::now().naive_utc()),
+            ..Default::default()
+        };
+
+        new_user.insert(&self.db).await
     }
 }
