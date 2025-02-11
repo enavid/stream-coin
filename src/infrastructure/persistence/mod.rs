@@ -1,5 +1,6 @@
 // Repository implementations
 mod models;
-mod user_repository_impl;
+mod repositories;
+pub mod database;
 
-pub use user_repository_impl::UserRepository;
+pub use repositories::user_repository_impl::UserRepository;
