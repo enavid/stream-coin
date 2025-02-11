@@ -1,6 +1,7 @@
 // Implementations for DB, Kafka, Redis
 
-pub mod persistence;
-pub mod messaging;
 pub mod cache;
+pub mod database;
 pub mod websocket;
+pub mod messaging;
+pub mod persistence;
