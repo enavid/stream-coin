@@ -21,6 +21,9 @@ utoipa = { version = "5.4.0", features = ["actix_extras", "uuid", "chrono"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
 sea-orm = { version = "1.1.15", features = ["sqlx-mysql", "runtime-tokio-rustls", "macros"] }
 chrono = "0.4.42"
+rdkafka = "0.38.0"
+futures = "0.3.31"
+uuid = { version = "1.11.0", features = ["v4"] }
 
 [lib]
 name = "stream_coin"
@@ -29,5 +32,5 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "stream-coin"
-path = "bin/api.rs"
+path = "bin/http.rs"
 
