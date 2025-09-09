@@ -16,35 +16,99 @@ services:
       - mariadb
     networks:
       - stream-coin
-  phpmyadmin:
-    container_name: phpmyadmin
-    image: phpmyadmin
+  postgres-db:
+    image: postgres:15
+    container_name: postgres-db
     restart: always
-    expose:
-      - '80'
-    ports:
-      - '8081:80'
     environment:
-      - PMA_HOST=mariadb
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
-    depends_on:
-      - mariadb
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - '5432:5432'
+    volumes:
+      - ./docker-volumes/postgres:/var/lib/postgresql/data
     networks:
       - stream-coin
-  mariadb:
-    image: 'mariadb:latest'
-    container_name: mariadb
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    restart: always
     environment:
-      - MYSQL_DATABASE=${MYSQL_DATABASE}
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
-      - MYSQL_USER=${MYSQL_USER}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
-    expose:
-      - '3306'
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
     ports:
-      - '3306:3306'
+      - '8081:80'
+    depends_on:
+      - postgres-db
+    networks:
+      - stream-coin
+  redis:
+    image: redis:latest
+    container_name: redis
+    restart: always
     volumes:
-      - './docker-volumes/mariadb:/var/lib/mysql'
+      - ./docker-volumes/redis:/data
+    expose:
+      - '6379'
+    ports:
+      - '6379:6379'
+    networks:
+      - stream-coin
+
+  redis-insight:
+    image: redislabs/redisinsight:1.14.0
+    container_name: redis-insight
+    restart: always
+    volumes:
+      - ./docker-volumes/redis-insight:/db
+    ports:
+      - '8082:8001'
+    depends_on:
+      - redis
+    networks:
+      - gap-trade
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.1
+    container_name: zookeeper
+    ports:
+      - "${ZOOKEEPER_CLIENT_PORT}:${ZOOKEEPER_CLIENT_PORT}"
+    environment:
+      - ZOOKEEPER_CLIENT_PORT=${ZOOKEEPER_CLIENT_PORT}
+      - ZOOKEEPER_SERVER_ID=${ZOOKEEPER_SERVER_ID}
+    networks:
+      - stream-coin
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.1
+    container_name: kafka
+    ports:
+      - '9092:9092'
+      - '29092:29092'
+    environment:
+      - KAFKA_BROKER_ID=${KAFKA_BROKER_ID}
+      - KAFKA_ZOOKEEPER_CONNECT=${KAFKA_ZOOKEEPER_CONNECT}
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=${KAFKA_LISTENER_SECURITY_PROTOCOL_MAP}
+      - KAFKA_ADVERTISED_LISTENERS=${KAFKA_ADVERTISED_LISTENERS}
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=${KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR}
+    depends_on:
+      - zookeeper
+    networks:
+      - stream-coin
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - '8083:8080'
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=${KAFKA_UI_CLUSTER_NAME}
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=${KAFKA_UI_BOOTSTRAP_SERVERS}
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=${KAFKA_UI_ZOOKEEPER}
+      - KAFKA_CLUSTERS_0_METRICS_PORT=${KAFKA_UI_METRICS_PORT}
+    depends_on:
+      - kafka
     networks:
       - stream-coin
 networks:
