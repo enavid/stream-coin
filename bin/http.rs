@@ -33,17 +33,17 @@ async fn main() -> std::io::Result<()> {
     // let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     // let db = postgres::establish_db_connection(&database_url).await;
 
-    // let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL must be set");
-    // let redis = redis::establish_redis_connection(&redis_url).await;
+    let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL must be set");
+    let redis = redis::establish_redis_connection(&redis_url).await;
 
-    // let kafka_broker = std::env::var("KAFKA_BROKER").expect("KAFKA_BROKER must be set");
-    // let kafka = establish_kafka_producer(&kafka_broker);
+    let kafka_broker = std::env::var("KAFKA_BROKER").expect("KAFKA_BROKER must be set");
+    let kafka = establish_kafka_producer(&kafka_broker);
 
     let app_state = web::Data::new(AppState {
         // db: Arc::new(db.expect("REASON")),
-        // kafka: Arc::new(kafka.expect("REASON")),
-        clients: Arc::new(Mutex::new(HashMap::new()))
-        // redis: Arc::new(tokio::sync::Mutex::new(redis.expect("REASON"))),
+        kafka: Arc::new(kafka.expect("REASON")),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        redis: Arc::new(tokio::sync::Mutex::new(redis.expect("REASON"))),
     });
 
     HttpServer::new(move || {

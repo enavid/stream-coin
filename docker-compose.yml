@@ -1,48 +1,48 @@
 services:
-  stream-coin:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: 'stream-coin'
-    container_name: stream-coin
-    environment:
-      - RUST_LOG=info
-      - APP_ENV=production
-    expose:
-      - '8080'
-    ports:
-      - '8080:8080'
-    depends_on:
-      - mariadb
-    networks:
-      - stream-coin
-  postgres-db:
-    image: postgres:15
-    container_name: postgres-db
-    restart: always
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
-    ports:
-      - '5432:5432'
-    volumes:
-      - ./docker-volumes/postgres:/var/lib/postgresql/data
-    networks:
-      - stream-coin
-  pgadmin:
-    image: dpage/pgadmin4
-    container_name: pgadmin
-    restart: always
-    environment:
-      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
-      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
-    ports:
-      - '8081:80'
-    depends_on:
-      - postgres-db
-    networks:
-      - stream-coin
+#  stream-coin:
+#    build:
+#      context: .
+#      dockerfile: Dockerfile
+#    image: 'stream-coin'
+#    container_name: stream-coin
+#    environment:
+#      - RUST_LOG=info
+#      - APP_ENV=production
+#    expose:
+#      - '8080'
+#    ports:
+#      - '8080:8080'
+#    depends_on:
+#      - mariadb
+#    networks:
+#      - stream-coin
+#  postgres-db:
+#    image: postgres:15
+#    container_name: postgres-db
+#    restart: always
+#    environment:
+#      - POSTGRES_USER=${POSTGRES_USER}
+#      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+#      - POSTGRES_DB=${POSTGRES_DB}
+#    ports:
+#      - '5432:5432'
+#    volumes:
+#      - ./docker-volumes/postgres:/var/lib/postgresql/data
+#    networks:
+#      - stream-coin
+#  pgadmin:
+#    image: dpage/pgadmin4
+#    container_name: pgadmin
+#    restart: always
+#    environment:
+#      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
+#      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
+#    ports:
+#      - '8081:80'
+#    depends_on:
+#      - postgres-db
+#    networks:
+#      - stream-coin
   redis:
     image: redis:latest
     container_name: redis
@@ -55,7 +55,6 @@ services:
       - '6379:6379'
     networks:
       - stream-coin
-
   redis-insight:
     image: redislabs/redisinsight:1.14.0
     container_name: redis-insight
@@ -67,8 +66,7 @@ services:
     depends_on:
       - redis
     networks:
-      - gap-trade
-
+      - stream-coin
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.1
     container_name: zookeeper
@@ -79,7 +77,6 @@ services:
       - ZOOKEEPER_SERVER_ID=${ZOOKEEPER_SERVER_ID}
     networks:
       - stream-coin
-
   kafka:
     image: confluentinc/cp-kafka:7.4.1
     container_name: kafka
@@ -96,7 +93,6 @@ services:
       - zookeeper
     networks:
       - stream-coin
-
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui

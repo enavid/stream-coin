@@ -11,8 +11,8 @@ pub type StreamKey = String;
 
 #[derive(Clone)]
 pub struct AppState {
-    // pub kafka: Arc<FutureProducer>,
+    pub kafka: Arc<FutureProducer>,
     // pub db: Arc<DatabaseConnection>,
-    // pub redis: Arc<tokio::sync::Mutex<MultiplexedConnection>>,
+    pub redis: Arc<tokio::sync::Mutex<MultiplexedConnection>>,
     pub clients: Arc<Mutex<HashMap<ClientKey, Arc<Mutex<Box<dyn WebSocketClient>>>>>>
 }
