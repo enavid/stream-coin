@@ -2,5 +2,5 @@
 
 pub mod cache;
 pub mod websocket;
-pub mod messaging;
+pub mod brokers;
 pub mod persistence;

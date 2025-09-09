@@ -1,1 +1,3 @@
-pub mod kucoin_ws;
+pub mod ws_client_trait;
+
+pub use ws_client_trait::WebSocketClient;

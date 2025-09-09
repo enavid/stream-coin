@@ -1,3 +1,3 @@
 // Redis Client implementation
 
-mod redis_client;
+pub mod redis;
