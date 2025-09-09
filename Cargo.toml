@@ -6,21 +6,21 @@ edition = "2021"
 license = "GPL-3"
 
 [dependencies]
-actix-web = "4.9.0"
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.138"
-tokio = { version = "1.43.0"}
-async-trait = "0.1.86"
+actix-web = "4.11.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+tokio = { version = "1.47.1"}
+async-trait = "0.1.89"
 redis = { version = "0.28.2", features = ["aio", "tokio-comp"]  }
 nutype = { version = "0.5.1", features = ["serde"] }
-validator = {version =  "0.18.0",features = ["derive"]  }
+validator = {version =  "0.18.1",features = ["derive"]  }
 actix-web-validator = { version = "6.0.0" }
 dotenv = "0.15.0"
-env_logger = "0.11.6"
-utoipa = { version = "5.3.1", features = ["actix_extras", "uuid", "chrono"] }
-utoipa-swagger-ui = { version = "9.0.0", features = ["actix-web"] }
-sea-orm = { version = "1.1.4", features = ["sqlx-mysql", "runtime-tokio-rustls", "macros"] }
-chrono = "0.4.39"
+env_logger = "0.11.8"
+utoipa = { version = "5.4.0", features = ["actix_extras", "uuid", "chrono"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
+sea-orm = { version = "1.1.15", features = ["sqlx-mysql", "runtime-tokio-rustls", "macros"] }
+chrono = "0.4.42"
 
 [lib]
 name = "stream_coin"
