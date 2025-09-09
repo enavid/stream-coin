@@ -7,5 +7,3 @@ pub fn health_router(cfg: &mut web::ServiceConfig){
             .route("/health", web::get().to(health_handler::health))
     );
 }
-
-

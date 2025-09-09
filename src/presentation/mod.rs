@@ -1,8 +1,9 @@
 // API logic (Actix, Controllers)
 mod dto;
-mod swagger;
-mod routers;
 mod handlers;
 mod responses;
-mod middlewares;
-pub mod server;
+pub mod shared;
+pub mod routers;
+pub mod swagger;
+pub mod middlewares;
+

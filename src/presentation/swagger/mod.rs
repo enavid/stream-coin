@@ -1,19 +1,24 @@
 mod exchange_api;
-
 use utoipa::OpenApi;
-use exchange_api::start_exchange;
-use crate::presentation::dto::exchange_request::ExchangeRequest;
-use crate::presentation::swagger::exchange_api::__path_start_exchange;
+use exchange_api::{get_exchange_names};
+use crate::presentation::responses::ApiSuccess;
+use crate::presentation::dto::exchange::{ExchangeNameList};
 
+
+use crate::presentation::swagger::exchange_api::{
+    __path_get_exchange_names
+};
 
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        start_exchange,
+        get_exchange_names
     ),
-    components(schemas(ExchangeRequest)),
+    components(
+        schemas(ExchangeNameList, ApiSuccess<ExchangeNameList>)
+    ),
     tags(
-        (name = "Exchange", description = "APIs related to exchange management")
+        (name = "Exchanges", description = "APIs for retrieving exchange data")
     )
 )]
 pub struct ApiDoc;

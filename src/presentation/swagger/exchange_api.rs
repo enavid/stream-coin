@@ -1,25 +1,13 @@
-use crate::presentation::dto::exchange_request::ExchangeRequest;
+use crate::presentation::responses::ApiSuccess;
+use crate::presentation::dto::exchange::ExchangeNameList;
 
 #[utoipa::path(
-    post,
-    path = "/exchange/connect",
-    request_body = ExchangeRequest,
+    get,
+    path = "/v1/exchanges/names",
+    tag = "Exchanges",
     responses(
-        (status = 200, description = "Exchange started successfully"),
-        (status = 400, description = "Invalid request")
-    ),
-    tag = "Exchange"
+        (status = 200, description = "List of exchange names", body = ApiSuccess<ExchangeNameList>),
+        (status = 500, description = "Internal server error")
+    )
 )]
-pub async fn start_exchange() {}
-
-#[utoipa::path(
-    post,
-    path = "/exchange/disconnect",
-    request_body = ExchangeRequest,
-    responses(
-        (status = 200, description = "Exchange stopped successfully"),
-        (status = 400, description = "Invalid request")
-    ),
-    tag = "Exchange"
-)]
-pub async fn stop_exchange() {}
+pub async fn get_exchange_names(){}
