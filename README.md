@@ -35,3 +35,5 @@ https://docs.bit24.cash/#api-24
 todo:
 - create output variable
 - fix redis insight
+- add postman api docs
+- add swagger for apis
