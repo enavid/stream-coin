@@ -37,3 +37,4 @@ todo:
 - fix redis insight
 - add postman api docs
 - add swagger for apis
+- create readme
