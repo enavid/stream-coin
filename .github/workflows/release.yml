@@ -140,11 +140,222 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.*
 
-  release:
-    needs: build
+  build-deb:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-deb-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build .deb package
+        run: cargo deb
+
+      - name: Rename .deb file
+        run: |
+          DEB_FILE=$(find target/debian -name "*.deb")
+          mv $DEB_FILE target/debian/stream-coin-${{ steps.get_version.outputs.version }}-amd64.deb
+          sha256sum target/debian/stream-coin-${{ steps.get_version.outputs.version }}-amd64.deb > target/debian/stream-coin-${{ steps.get_version.outputs.version }}-amd64.deb.sha256
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-coin-deb-${{ steps.get_version.outputs.version }}
+          path: target/debian/*.deb*
+
+  build-rpm:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-rpm-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Strip binary
+        run: strip target/release/stream-coin
+
+      - name: Build .rpm package
+        run: cargo generate-rpm
+
+      - name: Rename .rpm file
+        run: |
+          RPM_FILE=$(find target/generate-rpm -name "*.rpm")
+          mv $RPM_FILE target/generate-rpm/stream-coin-${{ steps.get_version.outputs.version }}-1.x86_64.rpm
+          sha256sum target/generate-rpm/stream-coin-${{ steps.get_version.outputs.version }}-1.x86_64.rpm > target/generate-rpm/stream-coin-${{ steps.get_version.outputs.version }}-1.x86_64.rpm.sha256
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-coin-rpm-${{ steps.get_version.outputs.version }}
+          path: target/generate-rpm/*.rpm*
+
+  build-msi:
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        shell: bash
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-wix-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build .msi installer
+        run: cargo wix --nocapture
+
+      - name: Rename .msi file
+        shell: pwsh
+        run: |
+          $MSI_FILE = Get-ChildItem -Path target\wix -Filter *.msi | Select-Object -First 1
+          Move-Item $MSI_FILE.FullName "target\wix\stream-coin-${{ steps.get_version.outputs.version }}-x64.msi"
+          (Get-FileHash "target\wix\stream-coin-${{ steps.get_version.outputs.version }}-x64.msi" -Algorithm SHA256).Hash | Out-File -FilePath "target\wix\stream-coin-${{ steps.get_version.outputs.version }}-x64.msi.sha256" -NoNewline
+
+      - name: Upload .msi artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-coin-msi-${{ steps.get_version.outputs.version }}
+          path: target/wix/*.msi*
+
+  build-appimage:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-appimage-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Download AppImage tools
+        run: |
+          wget -c https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+
+      - name: Create AppDir structure
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp target/release/stream-coin AppDir/usr/bin/
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+
+      - name: Create .desktop file
+        run: |
+          cat > AppDir/usr/share/applications/stream-coin.desktop << EOF
+          [Desktop Entry]
+          Type=Application
+          Name=Stream Coin
+          Exec=stream-coin
+          Icon=stream-coin
+          Categories=Utility;
+          EOF
+
+      - name: Create AppImage
+        run: |
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
+          mv Stream_Coin*.AppImage stream-coin-${{ steps.get_version.outputs.version }}-x86_64.AppImage
+          sha256sum stream-coin-${{ steps.get_version.outputs.version }}-x86_64.AppImage > stream-coin-${{ steps.get_version.outputs.version }}-x86_64.AppImage.sha256
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-coin-appimage-${{ steps.get_version.outputs.version }}
+          path: |
+            stream-coin-${{ steps.get_version.outputs.version }}-x86_64.AppImage*
+
+  release:
+    needs: [build, build-deb, build-rpm, build-msi, build-appimage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -172,17 +383,13 @@ jobs:
 
   build-and-push-image:
     runs-on: ubuntu-latest
-    needs: test
+    needs: release
     permissions:
       packages: write
       contents: read
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
-
-      - name: Get version
-        id: get_version
-        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -200,10 +407,10 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/stream-coin
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.get_version.outputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.get_version.outputs.version }}
-            type=semver,pattern={{major}},value=${{ steps.get_version.outputs.version }}
-            type=raw,value=latest,enable=${{ !contains(steps.get_version.outputs.version, '-') }}
+            type=semver,pattern={{version}},value=${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}},value=${{ needs.release.outputs.version }}
+            type=raw,value=latest,enable=${{ !contains(needs.release.outputs.version, '-') }}
 
       - name: Build and push image
         uses: docker/build-push-action@v5
@@ -215,4 +422,4 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            VERSION=${{ steps.get_version.outputs.version }}
+            VERSION=${{ needs.release.outputs.version }}
