@@ -1,5 +1,4 @@
 name: Release Pipeline
-
 on:
   push:
     tags:
@@ -14,6 +13,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      packages: write 
+      contents: read
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -44,8 +46,6 @@ jobs:
         with:
           files: target/release/stream-coin
           tag_name: ${{ github.event.inputs.version || github.ref_name }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   docker:
     runs-on: ubuntu-latest
