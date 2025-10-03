@@ -239,6 +239,7 @@ cargo build --release
 
 ### Current Tasks
 
+- [ ] Update readme
 - [ ] Create output variable standardization
 - [ ] Fix Redis Insight configuration
 - [ ] Add Postman API collection
