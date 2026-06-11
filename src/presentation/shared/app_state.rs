@@ -3,17 +3,18 @@ use std::sync::Arc;
 
 use redis::aio::MultiplexedConnection;
 use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 
-use crate::infrastructure::websocket::ws_client_trait::WebSocketClient;
+use crate::exchange::port::ExchangeAdapter;
 use crate::ticker::port::TickerRepository;
 
 pub type ClientKey = String;
-pub type WsClient = Arc<Mutex<Box<dyn WebSocketClient>>>;
-pub type ClientMap = Arc<Mutex<HashMap<ClientKey, WsClient>>>;
+pub type ClientMap = Arc<Mutex<HashMap<ClientKey, AbortHandle>>>;
 
 #[derive(Clone)]
 pub struct AppState {
     pub redis: Option<MultiplexedConnection>,
     pub ticker_repository: Option<Arc<dyn TickerRepository>>,
+    pub exchange_adapters: Arc<HashMap<String, Arc<dyn ExchangeAdapter>>>,
     pub clients: ClientMap,
 }
