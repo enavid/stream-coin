@@ -1,9 +1,10 @@
 [package]
 name = "stream-coin"
 version = "0.1.0"
-#authors = ["Navid Sadeghi navidsadeghi0021@gmail.com, navidsadeghi2@outlook.com"]
+authors = ["Navid Sadeghi <navidsadeghi0021@gmail.com>"]
 edition = "2021"
-license = "GPL-3"
+license = "GPL-3.0"
+description = "Arbitrage engine for Iranian cryptocurrency exchanges"
 
 [dependencies]
 actix-web = "4.11.0"
@@ -18,6 +19,17 @@ utoipa = { version = "5.4.0", features = ["actix_extras"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
 chrono = { version = "0.4.42", features = ["serde"] }
 log = "0.4.28"
+
+[package.metadata.deb]
+maintainer = "Navid Sadeghi <navidsadeghi0021@gmail.com>"
+copyright = "2025, Navid Sadeghi"
+extended-description = "Arbitrage engine for Iranian cryptocurrency exchanges"
+depends = "$auto, ca-certificates"
+section = "utility"
+priority = "optional"
+assets = [
+    { source = "target/release/stream-coin", dest = "usr/bin/", mode = "755" },
+]
 
 [lib]
 name = "stream_coin"
