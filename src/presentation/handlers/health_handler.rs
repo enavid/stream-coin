@@ -1,15 +1,31 @@
 use actix_web::{web, Responder};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::presentation::responses::success_response;
 use crate::presentation::shared::app_state::AppState;
 
-#[derive(Serialize)]
-struct HealthStatus {
-    status: &'static str,
+#[derive(Serialize, ToSchema)]
+pub(crate) struct Dependencies {
     redis: &'static str,
 }
 
+#[derive(Serialize, ToSchema)]
+pub(crate) struct HealthStatus {
+    name: &'static str,
+    version: &'static str,
+    status: &'static str,
+    dependencies: Dependencies,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/check/health",
+    tag = "Health",
+    responses(
+        (status = 200, description = "Service is up", body = HealthStatus)
+    )
+)]
 pub async fn health(state: web::Data<AppState>) -> impl Responder {
     let redis_status = if state.redis.is_some() {
         "connected"
@@ -22,8 +38,12 @@ pub async fn health(state: web::Data<AppState>) -> impl Responder {
     success_response(
         "ok",
         HealthStatus {
+            name: env!("CARGO_PKG_NAME"),
+            version: env!("CARGO_PKG_VERSION"),
             status: "up",
-            redis: redis_status,
+            dependencies: Dependencies {
+                redis: redis_status,
+            },
         },
     )
 }
@@ -41,7 +61,7 @@ mod tests {
     use super::health;
     use crate::presentation::shared::app_state::AppState;
 
-    fn app_state_disconnected() -> web::Data<AppState> {
+    fn disconnected_state() -> web::Data<AppState> {
         web::Data::new(AppState {
             redis: None,
             ticker_repository: None,
@@ -50,35 +70,79 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn health_returns_200_when_services_disconnected() {
-        let state = app_state_disconnected();
+    async fn health_returns_200() {
         let app = test::init_service(
             App::new()
-                .app_data(state)
+                .app_data(disconnected_state())
                 .route("/health", web::get().to(health)),
         )
         .await;
-        let req = test::TestRequest::get().uri("/health").to_request();
-        let resp = test::call_service(&app, req).await;
-
+        let resp =
+            test::call_service(&app, test::TestRequest::get().uri("/health").to_request()).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[actix_web::test]
-    async fn health_reports_redis_disconnected() {
-        let state = app_state_disconnected();
+    async fn health_returns_project_name() {
         let app = test::init_service(
             App::new()
-                .app_data(state)
+                .app_data(disconnected_state())
                 .route("/health", web::get().to(health)),
         )
         .await;
-        let req = test::TestRequest::get().uri("/health").to_request();
-        let resp = test::call_service(&app, req).await;
-        let body: serde_json::Value = test::read_body_json(resp).await;
+        let body: serde_json::Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get().uri("/health").to_request(),
+        )
+        .await;
+        assert_eq!(body["data"]["name"], "stream-coin");
+    }
 
-        assert_eq!(body["success"], true);
+    #[actix_web::test]
+    async fn health_returns_project_version() {
+        let app = test::init_service(
+            App::new()
+                .app_data(disconnected_state())
+                .route("/health", web::get().to(health)),
+        )
+        .await;
+        let body: serde_json::Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get().uri("/health").to_request(),
+        )
+        .await;
+        assert!(!body["data"]["version"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[actix_web::test]
+    async fn health_returns_status_up() {
+        let app = test::init_service(
+            App::new()
+                .app_data(disconnected_state())
+                .route("/health", web::get().to(health)),
+        )
+        .await;
+        let body: serde_json::Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get().uri("/health").to_request(),
+        )
+        .await;
         assert_eq!(body["data"]["status"], "up");
-        assert_eq!(body["data"]["redis"], "disconnected");
+    }
+
+    #[actix_web::test]
+    async fn health_reports_redis_disconnected_in_dependencies() {
+        let app = test::init_service(
+            App::new()
+                .app_data(disconnected_state())
+                .route("/health", web::get().to(health)),
+        )
+        .await;
+        let body: serde_json::Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get().uri("/health").to_request(),
+        )
+        .await;
+        assert_eq!(body["data"]["dependencies"]["redis"], "disconnected");
     }
 }
