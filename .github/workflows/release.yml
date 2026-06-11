@@ -17,8 +17,42 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Integration tests
+        run: cargo test --tests
+
   docker:
     name: Build Docker Image
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -61,6 +95,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   build:
+    needs: test
     strategy:
       matrix:
         include:
@@ -150,6 +185,7 @@ jobs:
             target/${{ matrix.target }}/release/${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.*
 
   build-deb:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -194,6 +230,7 @@ jobs:
           path: target/debian/*.deb*
 
   build-rpm:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -244,6 +281,7 @@ jobs:
           path: target/generate-rpm/*.rpm*
 
   build-msi:
+    needs: test
     runs-on: windows-latest
     permissions:
       contents: write
@@ -290,6 +328,7 @@ jobs:
           path: target/wix/*.msi*
 
   build-appimage:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
