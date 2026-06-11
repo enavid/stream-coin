@@ -3,7 +3,6 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::time::{interval, Duration};
 
-use crate::infrastructure::brokers::kafka_producer::send_to_kafka;
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::AppState;
 
@@ -47,34 +46,16 @@ pub async fn start_kline_symbol_ticker(
         Err(_) => return ApiError::new("Redis error", vec![]).to_response(),
     }
 
-    let kafka_producer = state.kafka.clone();
     let redis = state.redis.clone();
-    let symbol = request.symbol.clone();
-    let exchange = request.exchange.clone();
     let redis_key_clone = redis_key.clone();
 
     tokio::spawn(async move {
-        let mut tick = interval(Duration::from_secs(1));
         let mut heartbeat = interval(Duration::from_secs(60));
-        let topic = "kline-symbol-ticker";
 
         loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    if let Some(producer) = &kafka_producer {
-                        let payload = serde_json::json!({
-                            "exchange": exchange,
-                            "symbol": symbol,
-                            "timestamp": chrono::Utc::now().timestamp_millis()
-                        }).to_string();
-                        let _ = send_to_kafka(producer, topic, "ticker-update", &payload).await;
-                    }
-                }
-                _ = heartbeat.tick() => {
-                    if let Some(mut conn) = redis.clone() {
-                        let _: Result<(), _> = conn.expire(&redis_key_clone, 120).await;
-                    }
-                }
+            heartbeat.tick().await;
+            if let Some(mut conn) = redis.clone() {
+                let _: Result<(), _> = conn.expire(&redis_key_clone, 120).await;
             }
         }
     });

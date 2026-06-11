@@ -7,7 +7,6 @@ use crate::presentation::shared::app_state::AppState;
 #[derive(Serialize)]
 struct HealthStatus {
     status: &'static str,
-    kafka: &'static str,
     redis: &'static str,
 }
 
@@ -16,11 +15,6 @@ pub async fn health(state: web::Data<AppState>) -> impl Responder {
         "ok",
         HealthStatus {
             status: "up",
-            kafka: if state.kafka.is_some() {
-                "connected"
-            } else {
-                "disconnected"
-            },
             redis: if state.redis.is_some() {
                 "connected"
             } else {
@@ -45,7 +39,6 @@ mod tests {
 
     fn app_state_disconnected() -> web::Data<AppState> {
         web::Data::new(AppState {
-            kafka: None,
             redis: None,
             clients: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -67,7 +60,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn health_reports_disconnected_services() {
+    async fn health_reports_redis_disconnected() {
         let state = app_state_disconnected();
         let app = test::init_service(
             App::new()
@@ -81,7 +74,6 @@ mod tests {
 
         assert_eq!(body["success"], true);
         assert_eq!(body["data"]["status"], "up");
-        assert_eq!(body["data"]["kafka"], "disconnected");
         assert_eq!(body["data"]["redis"], "disconnected");
     }
 }
