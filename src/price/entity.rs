@@ -2,6 +2,8 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 
+use crate::exchange::entity::ExchangeId;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TradingPair {
     pub base: String,
@@ -25,7 +27,7 @@ impl fmt::Display for TradingPair {
 
 #[derive(Debug, Clone)]
 pub struct Price {
-    pub exchange: String,
+    pub exchange: ExchangeId,
     pub pair: TradingPair,
     pub ask: u64,
     pub bid: u64,
@@ -50,9 +52,21 @@ mod tests {
     }
 
     #[test]
+    fn price_exchange_is_exchange_id() {
+        let price = Price {
+            exchange: ExchangeId::new("Tabdeal"),
+            pair: TradingPair::new("USDT", "IRR"),
+            ask: 63_000_000,
+            bid: 62_500_000,
+            timestamp: Utc::now(),
+        };
+        assert_eq!(price.exchange.to_string(), "tabdeal");
+    }
+
+    #[test]
     fn price_spread_is_ask_minus_bid() {
         let price = Price {
-            exchange: "nobitex".to_string(),
+            exchange: ExchangeId::new("tabdeal"),
             pair: TradingPair::new("USDT", "IRR"),
             ask: 63_000_000,
             bid: 62_500_000,

@@ -28,14 +28,14 @@ mod tests {
 
     #[test]
     fn exchange_id_display_is_lowercase_name() {
-        let id = ExchangeId::new("Nobitex");
-        assert_eq!(id.to_string(), "nobitex");
+        let id = ExchangeId::new("Tabdeal");
+        assert_eq!(id.to_string(), "tabdeal");
     }
 
     #[test]
     fn exchange_id_equality() {
-        let a = ExchangeId::new("nobitex");
-        let b = ExchangeId::new("Nobitex");
+        let a = ExchangeId::new("tabdeal");
+        let b = ExchangeId::new("Tabdeal");
         assert_eq!(a, b);
     }
 

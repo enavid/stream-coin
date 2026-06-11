@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse, Responder};
+use actix_web::{web, Responder};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::time::{interval, Duration};
@@ -23,15 +23,16 @@ pub async fn start_kline_symbol_ticker(
     state: web::Data<AppState>,
     request: web::Json<SymbolRequest>,
 ) -> impl Responder {
-    let redis_key = format!("ticker:{}:{}", request.exchange, request.symbol);
+    let mut redis_conn = match state.redis.clone() {
+        Some(conn) => conn,
+        None => return ApiError::new("Redis unavailable", vec![]).to_response(),
+    };
 
-    let mut redis_conn = state.redis.lock().await;
+    let redis_key = format!("ticker:{}:{}", request.exchange, request.symbol);
     let exists: Result<bool, _> = redis_conn.exists(&redis_key).await;
 
     match exists {
-        Ok(true) => {
-            return ApiError::new("Ticker already running", vec![]).to_response();
-        }
+        Ok(true) => return ApiError::new("Ticker already running", vec![]).to_response(),
         Ok(false) => {
             let ticker_info = serde_json::json!({
                 "exchange": request.exchange,
@@ -43,15 +44,11 @@ pub async fn start_kline_symbol_ticker(
                 .set_ex(&redis_key, ticker_info.to_string(), 120)
                 .await;
         }
-        Err(_) => {
-            return HttpResponse::InternalServerError().finish();
-        }
+        Err(_) => return ApiError::new("Redis error", vec![]).to_response(),
     }
 
-    drop(redis_conn);
-
     let kafka_producer = state.kafka.clone();
-    let redis_client = state.redis.clone();
+    let redis = state.redis.clone();
     let symbol = request.symbol.clone();
     let exchange = request.exchange.clone();
     let redis_key_clone = redis_key.clone();
@@ -64,16 +61,19 @@ pub async fn start_kline_symbol_ticker(
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    let payload = serde_json::json!({
-                        "exchange": exchange,
-                        "symbol": symbol,
-                        "timestamp": chrono::Utc::now().timestamp_millis()
-                    }).to_string();
-                    let _ = send_to_kafka(&kafka_producer, topic, "ticker-update", &payload).await;
+                    if let Some(producer) = &kafka_producer {
+                        let payload = serde_json::json!({
+                            "exchange": exchange,
+                            "symbol": symbol,
+                            "timestamp": chrono::Utc::now().timestamp_millis()
+                        }).to_string();
+                        let _ = send_to_kafka(producer, topic, "ticker-update", &payload).await;
+                    }
                 }
                 _ = heartbeat.tick() => {
-                    let mut conn = redis_client.lock().await;
-                    let _: Result<(), _> = conn.expire(&redis_key_clone, 120).await;
+                    if let Some(mut conn) = redis.clone() {
+                        let _: Result<(), _> = conn.expire(&redis_key_clone, 120).await;
+                    }
                 }
             }
         }

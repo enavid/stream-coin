@@ -13,7 +13,7 @@ pub type ClientMap = Arc<Mutex<HashMap<ClientKey, WsClient>>>;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub kafka: Arc<FutureProducer>,
-    pub redis: Arc<Mutex<MultiplexedConnection>>,
+    pub kafka: Option<Arc<FutureProducer>>,
+    pub redis: Option<MultiplexedConnection>,
     pub clients: ClientMap,
 }
