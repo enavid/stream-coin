@@ -11,15 +11,19 @@ struct HealthStatus {
 }
 
 pub async fn health(state: web::Data<AppState>) -> impl Responder {
+    let redis_status = if state.redis.is_some() {
+        "connected"
+    } else {
+        "disconnected"
+    };
+
+    tracing::debug!(redis = %redis_status, "health check");
+
     success_response(
         "ok",
         HealthStatus {
             status: "up",
-            redis: if state.redis.is_some() {
-                "connected"
-            } else {
-                "disconnected"
-            },
+            redis: redis_status,
         },
     )
 }

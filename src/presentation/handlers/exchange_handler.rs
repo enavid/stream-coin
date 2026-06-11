@@ -24,14 +24,29 @@ pub async fn start_kline_symbol_ticker(
 ) -> impl Responder {
     let mut redis_conn = match state.redis.clone() {
         Some(conn) => conn,
-        None => return ApiError::new("Redis unavailable", vec![]).to_response(),
+        None => {
+            tracing::warn!(
+                exchange = %request.exchange,
+                symbol = %request.symbol,
+                "ticker request rejected: redis unavailable"
+            );
+            return ApiError::new("Redis unavailable", vec![]).to_response();
+        }
     };
 
     let redis_key = format!("ticker:{}:{}", request.exchange, request.symbol);
     let exists: Result<bool, _> = redis_conn.exists(&redis_key).await;
 
     match exists {
-        Ok(true) => return ApiError::new("Ticker already running", vec![]).to_response(),
+        Ok(true) => {
+            tracing::warn!(
+                exchange = %request.exchange,
+                symbol = %request.symbol,
+                redis_key = %redis_key,
+                "ticker already running"
+            );
+            return ApiError::new("Ticker already running", vec![]).to_response();
+        }
         Ok(false) => {
             let ticker_info = serde_json::json!({
                 "exchange": request.exchange,
@@ -43,7 +58,15 @@ pub async fn start_kline_symbol_ticker(
                 .set_ex(&redis_key, ticker_info.to_string(), 120)
                 .await;
         }
-        Err(_) => return ApiError::new("Redis error", vec![]).to_response(),
+        Err(e) => {
+            tracing::error!(
+                exchange = %request.exchange,
+                symbol = %request.symbol,
+                error = %e,
+                "redis error while checking ticker"
+            );
+            return ApiError::new("Redis error", vec![]).to_response();
+        }
     }
 
     let redis = state.redis.clone();
@@ -51,7 +74,6 @@ pub async fn start_kline_symbol_ticker(
 
     tokio::spawn(async move {
         let mut heartbeat = interval(Duration::from_secs(60));
-
         loop {
             heartbeat.tick().await;
             if let Some(mut conn) = redis.clone() {
@@ -59,6 +81,13 @@ pub async fn start_kline_symbol_ticker(
             }
         }
     });
+
+    tracing::info!(
+        exchange = %request.exchange,
+        symbol = %request.symbol,
+        redis_key = %redis_key,
+        "ticker started"
+    );
 
     success_response(
         "Ticker started",

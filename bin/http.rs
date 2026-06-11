@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 
-use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpResponse, HttpServer};
 use dotenv::dotenv;
 use serde_json::json;
 use tokio::sync::Mutex;
+use tracing_actix_web::TracingLogger;
+use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -19,7 +20,21 @@ use stream_coin::presentation::swagger::ApiDoc;
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match env::var("LOG_FORMAT").as_deref() {
+        Ok("json") => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(env_filter)
+                .with_current_span(false)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt().with_env_filter(env_filter).init();
+        }
+    }
 
     let (host, port) = (
         env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
@@ -29,16 +44,16 @@ async fn main() -> std::io::Result<()> {
     let redis = match env::var("REDIS_URL") {
         Ok(url) => match redis::establish_redis_connection(&url).await {
             Ok(conn) => {
-                log::info!("Redis connected: {}", url);
+                tracing::info!(url = %url, "redis connected");
                 Some(conn)
             }
             Err(e) => {
-                log::warn!("Redis unavailable: {}", e);
+                tracing::warn!(error = %e, "redis unavailable, starting without cache");
                 None
             }
         },
         Err(_) => {
-            log::warn!("REDIS_URL not set, running without Redis");
+            tracing::warn!("REDIS_URL not set, starting without cache");
             None
         }
     };
@@ -48,10 +63,12 @@ async fn main() -> std::io::Result<()> {
         clients: Arc::new(Mutex::new(HashMap::new())),
     });
 
+    tracing::info!(host = %host, port = %port, "server starting");
+
     HttpServer::new(move || {
         App::new()
             .configure(init_routes)
-            .wrap(Logger::default())
+            .wrap(TracingLogger::default())
             .app_data(app_state.clone())
             .app_data(json_error_handler_config())
             .default_service(web::route().to(|| async {
