@@ -1,8 +1,8 @@
 use utoipa::openapi::OpenApi as OpenApiSpec;
 use utoipa::{Modify, OpenApi};
 
-use crate::presentation::handlers::exchange_handler::{SymbolRequest, TickerStarted};
-use crate::presentation::handlers::health_handler::{Dependencies, HealthStatus};
+use crate::presentation::dto::health::{Dependencies, HealthStatus};
+use crate::presentation::dto::ticker::{SymbolRequest, TickerStarted};
 use crate::presentation::responses::ApiError;
 
 #[derive(OpenApi)]

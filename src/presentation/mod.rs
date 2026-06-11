@@ -1,3 +1,4 @@
+pub mod dto;
 mod handlers;
 pub mod middlewares;
 mod responses;

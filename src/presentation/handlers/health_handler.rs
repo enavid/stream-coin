@@ -1,22 +1,8 @@
 use actix_web::{web, Responder};
-use serde::Serialize;
-use utoipa::ToSchema;
 
+use crate::presentation::dto::health::{Dependencies, HealthStatus};
 use crate::presentation::responses::success_response;
 use crate::presentation::shared::app_state::AppState;
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct Dependencies {
-    redis: &'static str,
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct HealthStatus {
-    name: &'static str,
-    version: &'static str,
-    status: &'static str,
-    dependencies: Dependencies,
-}
 
 #[utoipa::path(
     get,

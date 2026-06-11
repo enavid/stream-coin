@@ -16,18 +16,24 @@ fmt-check:
 lint:
     cargo clippy -- -D warnings
 
-# Run all tests
+# Run unit tests
 test:
     cargo test --lib
 
-# Full quality cycle: fmt → lint → test
+# Run integration tests
+test-integration:
+    cargo test --tests
+
+# Full quality cycle: fmt → lint → unit tests → integration tests
 check:
     @echo "→ Formatting..."
     cargo fmt
     @echo "→ Linting..."
     cargo clippy -- -D warnings
-    @echo "→ Testing..."
+    @echo "→ Testing (unit)..."
     cargo test --lib
+    @echo "→ Testing (integration)..."
+    cargo test --tests
     @echo "✓ All checks passed"
 
 # Build debug

@@ -1,24 +1,11 @@
 use std::sync::Arc;
 
 use actix_web::{web, Responder};
-use serde::{Deserialize, Serialize};
 use tokio::time::{interval, Duration};
-use utoipa::ToSchema;
 
+use crate::presentation::dto::ticker::{SymbolRequest, TickerStarted};
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::AppState;
-
-#[derive(Serialize, Deserialize, ToSchema)]
-pub struct SymbolRequest {
-    pub exchange: String,
-    pub symbol: String,
-}
-
-#[derive(Serialize, ToSchema)]
-pub(crate) struct TickerStarted {
-    exchange: String,
-    symbol: String,
-}
 
 #[utoipa::path(
     post,
