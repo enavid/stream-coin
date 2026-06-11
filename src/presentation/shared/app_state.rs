@@ -1,18 +1,19 @@
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::collections::HashMap;
-use sea_orm::{DatabaseConnection};
-use redis::aio::MultiplexedConnection;
+use std::sync::Arc;
+
 use rdkafka::producer::FutureProducer;
+use redis::aio::MultiplexedConnection;
+use tokio::sync::Mutex;
+
 use crate::infrastructure::websocket::ws_client_trait::WebSocketClient;
 
 pub type ClientKey = String;
-pub type StreamKey = String;
+pub type WsClient = Arc<Mutex<Box<dyn WebSocketClient>>>;
+pub type ClientMap = Arc<Mutex<HashMap<ClientKey, WsClient>>>;
 
 #[derive(Clone)]
 pub struct AppState {
     pub kafka: Arc<FutureProducer>,
-    // pub db: Arc<DatabaseConnection>,
-    pub redis: Arc<tokio::sync::Mutex<MultiplexedConnection>>,
-    pub clients: Arc<Mutex<HashMap<ClientKey, Arc<Mutex<Box<dyn WebSocketClient>>>>>>
+    pub redis: Arc<Mutex<MultiplexedConnection>>,
+    pub clients: ClientMap,
 }

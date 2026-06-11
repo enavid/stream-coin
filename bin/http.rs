@@ -1,23 +1,19 @@
+use actix_web::middleware::Logger;
+use actix_web::{web, App, HttpResponse, HttpServer};
+use dotenv::dotenv;
+use serde_json::json;
+use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
-use dotenv::dotenv;
-use utoipa::OpenApi;
-use serde_json::json;
-use tokio::sync::Mutex;
-use std::collections::HashMap;
-use utoipa_swagger_ui::SwaggerUi;
-use actix_web::middleware::Logger;
-use stream_coin::infrastructure::cache::redis;
-use stream_coin::presentation::swagger::ApiDoc;
-use stream_coin::presentation::routers::init_routes;
-use actix_web::{web, App, HttpResponse, HttpServer};
-use stream_coin::presentation::shared::app_state::AppState;
-use stream_coin::infrastructure::persistence::database::postgres;
 use stream_coin::infrastructure::brokers::kafka_producer::establish_kafka_producer;
+use stream_coin::infrastructure::cache::redis;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
-
-use stream_coin::infrastructure::websocket::ws_client_trait::WebSocketClient;
-
+use stream_coin::presentation::routers::init_routes;
+use stream_coin::presentation::shared::app_state::AppState;
+use stream_coin::presentation::swagger::ApiDoc;
+use tokio::sync::Mutex;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -52,18 +48,19 @@ async fn main() -> std::io::Result<()> {
             .wrap(Logger::default())
             .app_data(app_state.clone())
             .app_data(json_error_handler_config())
-            .default_service(
-                web::route().to(|| async {
-                    HttpResponse::NotFound().json(json!({
-                        "success": false,
-                        "code": 404,
-                        "message": "Resource not found"
-                    }))
-                }),
+            .default_service(web::route().to(|| async {
+                HttpResponse::NotFound().json(json!({
+                    "success": false,
+                    "code": 404,
+                    "message": "Resource not found"
+                }))
+            }))
+            .service(
+                SwaggerUi::new("/swagger-ui/{_:.*}")
+                    .url("/api-docs/openapi.json", ApiDoc::openapi()),
             )
-            .service(SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", ApiDoc::openapi()))
     })
-        .bind(format!("{}:{}", host, port))?
-        .run()
-        .await
+    .bind(format!("{}:{}", host, port))?
+    .run()
+    .await
 }

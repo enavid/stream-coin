@@ -1,6 +1,6 @@
+use actix_web::HttpResponse;
 use serde::Serialize;
 use utoipa::ToSchema;
-use actix_web::HttpResponse;
 
 #[derive(Serialize, ToSchema)]
 pub struct ApiSuccess<T: Serialize> {

@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use rdkafka::Message;
 use futures::StreamExt;
-use rdkafka::error::KafkaError;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::error::KafkaError;
+use rdkafka::Message;
+use std::sync::Arc;
 
 pub async fn start_kafka_consumer<H>(
     broker_url: &str,
@@ -31,7 +31,7 @@ where
     while let Some(result) = stream.next().await {
         match result {
             Ok(message) => {
-                if let Some(Ok(payload))= message.payload_view::<str>() {
+                if let Some(Ok(payload)) = message.payload_view::<str>() {
                     handler(payload.to_string());
                 }
             }

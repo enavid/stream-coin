@@ -1,5 +1,5 @@
-use serde_json::Value;
 use async_trait::async_trait;
+use serde_json::Value;
 
 #[async_trait]
 pub trait WebSocketClient: Send + Sync {

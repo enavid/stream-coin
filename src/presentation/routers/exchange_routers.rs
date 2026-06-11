@@ -1,9 +1,9 @@
-use actix_web::web;
 use crate::presentation::handlers::exchange_handler;
+use actix_web::web;
 
 pub fn exchange_router(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/exchanges/futures")
-            .route("/start_kline_symbol_tricker", web::get().to(exchange_handler::start_kline_symbol_tricker))
-    );
+    cfg.service(web::scope("/exchanges/futures").route(
+        "/start_kline_symbol_ticker",
+        web::post().to(exchange_handler::start_kline_symbol_ticker),
+    ));
 }

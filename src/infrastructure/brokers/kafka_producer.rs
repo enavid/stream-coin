@@ -1,9 +1,10 @@
-use std::time::Duration;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use std::time::Duration;
 
-
-pub fn establish_kafka_producer(broker_url: &str) -> Result<FutureProducer, rdkafka::error::KafkaError> {
+pub fn establish_kafka_producer(
+    broker_url: &str,
+) -> Result<FutureProducer, rdkafka::error::KafkaError> {
     ClientConfig::new()
         .set("bootstrap.servers", broker_url)
         .set("message.timeout.ms", "5000")
@@ -19,9 +20,7 @@ pub async fn send_to_kafka(
     key: &str,
     payload: &str,
 ) -> Result<(), rdkafka::error::KafkaError> {
-    let record = FutureRecord::to(topic)
-        .key(key)
-        .payload(payload);
+    let record = FutureRecord::to(topic).key(key).payload(payload);
 
     producer
         .send(record, Duration::from_secs(0))

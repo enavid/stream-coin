@@ -1,6 +1,6 @@
-use uuid::Uuid;
 use chrono::NaiveDateTime;
 use sea_orm::entity::prelude::*;
+use uuid::Uuid;
 
 #[derive(Clone, Debug, DeriveEntityModel)]
 #[sea_orm(table_name = "exchange")]
