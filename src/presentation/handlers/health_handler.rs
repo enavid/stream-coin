@@ -44,6 +44,7 @@ mod tests {
     fn app_state_disconnected() -> web::Data<AppState> {
         web::Data::new(AppState {
             redis: None,
+            ticker_repository: None,
             clients: Arc::new(Mutex::new(HashMap::new())),
         })
     }

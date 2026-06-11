@@ -12,10 +12,12 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use stream_coin::infrastructure::cache::redis;
+use stream_coin::infrastructure::cache::ticker_repository::RedisTickerRepository;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::AppState;
 use stream_coin::presentation::swagger::ApiDoc;
+use stream_coin::ticker::port::TickerRepository;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -41,25 +43,28 @@ async fn main() -> std::io::Result<()> {
         env::var("PORT").unwrap_or_else(|_| "8080".to_string()),
     );
 
-    let redis = match env::var("REDIS_URL") {
+    let (redis_conn, ticker_repository) = match env::var("REDIS_URL") {
         Ok(url) => match redis::establish_redis_connection(&url).await {
             Ok(conn) => {
                 tracing::info!(url = %url, "redis connected");
-                Some(conn)
+                let repo: Arc<dyn TickerRepository> =
+                    Arc::new(RedisTickerRepository::new(conn.clone()));
+                (Some(conn), Some(repo))
             }
             Err(e) => {
                 tracing::warn!(error = %e, "redis unavailable, starting without cache");
-                None
+                (None, None)
             }
         },
         Err(_) => {
             tracing::warn!("REDIS_URL not set, starting without cache");
-            None
+            (None, None)
         }
     };
 
     let app_state = web::Data::new(AppState {
-        redis,
+        redis: redis_conn,
+        ticker_repository,
         clients: Arc::new(Mutex::new(HashMap::new())),
     });
 

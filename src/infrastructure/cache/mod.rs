@@ -1,3 +1,2 @@
-// Redis Client implementation
-
 pub mod redis;
+pub mod ticker_repository;

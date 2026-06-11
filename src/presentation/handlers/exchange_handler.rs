@@ -1,5 +1,6 @@
+use std::sync::Arc;
+
 use actix_web::{web, Responder};
-use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::time::{interval, Duration};
 
@@ -22,8 +23,8 @@ pub async fn start_kline_symbol_ticker(
     state: web::Data<AppState>,
     request: web::Json<SymbolRequest>,
 ) -> impl Responder {
-    let mut redis_conn = match state.redis.clone() {
-        Some(conn) => conn,
+    let repo = match &state.ticker_repository {
+        Some(r) => Arc::clone(r),
         None => {
             tracing::warn!(
                 exchange = %request.exchange,
@@ -34,29 +35,25 @@ pub async fn start_kline_symbol_ticker(
         }
     };
 
-    let redis_key = format!("ticker:{}:{}", request.exchange, request.symbol);
-    let exists: Result<bool, _> = redis_conn.exists(&redis_key).await;
-
-    match exists {
+    match repo.exists(&request.exchange, &request.symbol).await {
         Ok(true) => {
             tracing::warn!(
                 exchange = %request.exchange,
                 symbol = %request.symbol,
-                redis_key = %redis_key,
                 "ticker already running"
             );
             return ApiError::new("Ticker already running", vec![]).to_response();
         }
         Ok(false) => {
-            let ticker_info = serde_json::json!({
-                "exchange": request.exchange,
-                "symbol": request.symbol,
-                "status": "running",
-                "started_at": chrono::Utc::now().timestamp()
-            });
-            let _: Result<(), _> = redis_conn
-                .set_ex(&redis_key, ticker_info.to_string(), 120)
-                .await;
+            if let Err(e) = repo.register(&request.exchange, &request.symbol).await {
+                tracing::error!(
+                    exchange = %request.exchange,
+                    symbol = %request.symbol,
+                    error = %e,
+                    "failed to register ticker"
+                );
+                return ApiError::new("Redis error", vec![]).to_response();
+            }
         }
         Err(e) => {
             tracing::error!(
@@ -69,15 +66,16 @@ pub async fn start_kline_symbol_ticker(
         }
     }
 
-    let redis = state.redis.clone();
-    let redis_key_clone = redis_key.clone();
+    let exchange = request.exchange.clone();
+    let symbol = request.symbol.clone();
+    let repo_clone = Arc::clone(&repo);
 
     tokio::spawn(async move {
         let mut heartbeat = interval(Duration::from_secs(60));
         loop {
             heartbeat.tick().await;
-            if let Some(mut conn) = redis.clone() {
-                let _: Result<(), _> = conn.expire(&redis_key_clone, 120).await;
+            if let Err(e) = repo_clone.refresh(&exchange, &symbol).await {
+                tracing::warn!(error = %e, "ticker heartbeat refresh failed");
             }
         }
     });
@@ -85,7 +83,6 @@ pub async fn start_kline_symbol_ticker(
     tracing::info!(
         exchange = %request.exchange,
         symbol = %request.symbol,
-        redis_key = %redis_key,
         "ticker started"
     );
 
@@ -113,6 +110,7 @@ mod tests {
     fn state_without_redis() -> web::Data<AppState> {
         web::Data::new(AppState {
             redis: None,
+            ticker_repository: None,
             clients: Arc::new(Mutex::new(HashMap::new())),
         })
     }
