@@ -22,3 +22,28 @@ impl Modify for StripInfo {
         openapi.info.description = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use utoipa::OpenApi;
+
+    use super::*;
+
+    #[test]
+    fn swagger_has_no_contact() {
+        let api = ApiDoc::openapi();
+        assert!(api.info.contact.is_none());
+    }
+
+    #[test]
+    fn swagger_has_no_license() {
+        let api = ApiDoc::openapi();
+        assert!(api.info.license.is_none());
+    }
+
+    #[test]
+    fn swagger_title_is_stream_coin() {
+        let api = ApiDoc::openapi();
+        assert_eq!(api.info.title, "stream-coin");
+    }
+}

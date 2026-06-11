@@ -39,3 +39,47 @@ impl ResponseError for ApiError {
         self.to_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use actix_web::http::StatusCode;
+    use actix_web::ResponseError;
+
+    use super::*;
+
+    #[test]
+    fn api_error_success_field_is_false() {
+        let err = ApiError::new("test", vec![]);
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["success"], false);
+    }
+
+    #[test]
+    fn api_error_message_is_set_correctly() {
+        let err = ApiError::new("something went wrong", vec![]);
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["message"], "something went wrong");
+    }
+
+    #[test]
+    fn api_error_display_joins_errors_with_comma() {
+        let err = ApiError::new(
+            "msg",
+            vec!["field required".to_string(), "invalid value".to_string()],
+        );
+        assert_eq!(err.to_string(), "field required, invalid value");
+    }
+
+    #[test]
+    fn api_error_status_code_is_400() {
+        let err = ApiError::new("bad", vec![]);
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn api_error_to_response_returns_400() {
+        let err = ApiError::new("bad request", vec![]);
+        let resp = err.to_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}

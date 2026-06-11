@@ -97,3 +97,62 @@ pub async fn start_kline_symbol_ticker(
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use actix_web::http::StatusCode;
+    use actix_web::{test, web, App};
+    use tokio::sync::Mutex;
+
+    use super::*;
+    use crate::presentation::shared::app_state::AppState;
+
+    fn state_without_redis() -> web::Data<AppState> {
+        web::Data::new(AppState {
+            redis: None,
+            clients: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    #[actix_web::test]
+    async fn ticker_returns_400_when_redis_unavailable() {
+        let app = test::init_service(
+            App::new()
+                .app_data(state_without_redis())
+                .route("/ticker", web::post().to(start_kline_symbol_ticker)),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri("/ticker")
+            .set_json(SymbolRequest {
+                exchange: "tabdeal".to_string(),
+                symbol: "USDT_IRT".to_string(),
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn ticker_returns_redis_unavailable_message() {
+        let app = test::init_service(
+            App::new()
+                .app_data(state_without_redis())
+                .route("/ticker", web::post().to(start_kline_symbol_ticker)),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri("/ticker")
+            .set_json(SymbolRequest {
+                exchange: "tabdeal".to_string(),
+                symbol: "USDT_IRT".to_string(),
+            })
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["message"], "Redis unavailable");
+    }
+}
