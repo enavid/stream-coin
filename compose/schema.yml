@@ -52,6 +52,3 @@ services:
     networks:
       - stream-coin
 
-networks:
-  stream-coin:
-    external: true

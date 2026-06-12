@@ -458,5 +458,15 @@ MigrationBackup/
 # Ionide (cross platform F# VS Code tools) working folder
 .ionide/
 .env
-docker-volumes
+docker-volumes/
+
+# Auto-generated Kafka internal SSL certs (JKS)
+certs/
+
+# Real TLS certificates (Let's Encrypt / custom) — never commit private keys
+cert/
+
+# Nginx basic auth password file
+nginx/auth/.htpasswd
+
 # End of https://www.toptal.com/developers/gitignore/api/rust,intellij+all,vs

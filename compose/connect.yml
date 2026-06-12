@@ -92,12 +92,3 @@ services:
     networks:
       - stream-coin
 
-networks:
-  stream-coin:
-    external: true
-
-volumes:
-  kafka-connect-data:
-    external: true
-  kafka-connect-plugins:
-    external: true

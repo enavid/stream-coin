@@ -68,10 +68,3 @@ services:
     networks:
       - stream-coin
 
-networks:
-  stream-coin:
-    external: true
-
-volumes:
-  redis-data:
-    external: true
