@@ -48,6 +48,18 @@ build-release:
 run:
     cargo run --bin stream-coin
 
+# Run the CLI (debug)
+sc *args:
+    cargo run --bin sc -- {{args}}
+
+# Build release .deb for server
+deb-server:
+    cargo deb --bin stream-coin
+
+# Build release .deb for CLI
+deb-sc:
+    cargo deb --variant sc
+
 # Security audit
 audit:
     cargo audit

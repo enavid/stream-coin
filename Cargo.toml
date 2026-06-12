@@ -23,6 +23,17 @@ tracing-actix-web = "0.7"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
 rdkafka = { version = "0.37", features = ["cmake-build"] }
+clap = { version = "4", features = ["derive", "color"] }
+reqwest = { version = "0.12", features = ["json"] }
+open = "5"
+colored = "2"
+toml = "0.8"
+dirs = "5"
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
+predicates = "3"
 
 [package.metadata.deb]
 maintainer = "Navid Sadeghi <navidsadeghi0021@gmail.com>"
@@ -35,6 +46,13 @@ assets = [
     { source = "target/release/stream-coin", dest = "usr/bin/", mode = "755" },
 ]
 
+[package.metadata.deb.variants.sc]
+name = "sc"
+depends = "$auto"
+assets = [
+    { source = "target/release/sc", dest = "usr/bin/", mode = "755" },
+]
+
 [lib]
 name = "stream_coin"
 path = "src/lib.rs"
@@ -44,3 +62,6 @@ path = "src/lib.rs"
 name = "stream-coin"
 path = "bin/http.rs"
 
+[[bin]]
+name = "sc"
+path = "bin/cli.rs"
