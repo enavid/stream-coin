@@ -1,112 +1,73 @@
-services:
-#  stream-coin:
-#    build:
-#      context: .
-#      dockerfile: Dockerfile
-#    image: 'stream-coin'
-#    container_name: stream-coin
-#    environment:
-#      - RUST_LOG=info
-#      - APP_ENV=production
-#    expose:
-#      - '8080'
-#    ports:
-#      - '8080:8080'
-#    depends_on:
-#      - mariadb
-#    networks:
-#      - stream-coin
-#  postgres-db:
-#    image: postgres:15
-#    container_name: postgres-db
-#    restart: always
-#    environment:
-#      - POSTGRES_USER=${POSTGRES_USER}
-#      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-#      - POSTGRES_DB=${POSTGRES_DB}
-#    ports:
-#      - '5432:5432'
-#    volumes:
-#      - ./docker-volumes/postgres:/var/lib/postgresql/data
-#    networks:
-#      - stream-coin
-#  pgadmin:
-#    image: dpage/pgadmin4
-#    container_name: pgadmin
-#    restart: always
-#    environment:
-#      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
-#      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
-#    ports:
-#      - '8081:80'
-#    depends_on:
-#      - postgres-db
-#    networks:
-#      - stream-coin
-  redis:
-    image: redis:latest
-    container_name: redis
-    restart: always
-    volumes:
-      - ./docker-volumes/redis:/data
-    expose:
-      - '6379'
-    ports:
-      - '6379:6379'
-    networks:
-      - stream-coin
-  redis-insight:
-    image: redislabs/redisinsight:1.14.0
-    container_name: redis-insight
-    restart: always
-    volumes:
-      - ./docker-volumes/redis-insight:/db
-    ports:
-      - '8082:8001'
-    depends_on:
-      - redis
-    networks:
-      - stream-coin
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.4.1
-    container_name: zookeeper
-    ports:
-      - "${ZOOKEEPER_CLIENT_PORT}:${ZOOKEEPER_CLIENT_PORT}"
-    environment:
-      - ZOOKEEPER_CLIENT_PORT=${ZOOKEEPER_CLIENT_PORT}
-      - ZOOKEEPER_SERVER_ID=${ZOOKEEPER_SERVER_ID}
-    networks:
-      - stream-coin
-  kafka:
-    image: confluentinc/cp-kafka:7.4.1
-    container_name: kafka
-    ports:
-      - '9092:9092'
-      - '29092:29092'
-    environment:
-      - KAFKA_BROKER_ID=${KAFKA_BROKER_ID}
-      - KAFKA_ZOOKEEPER_CONNECT=${KAFKA_ZOOKEEPER_CONNECT}
-      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=${KAFKA_LISTENER_SECURITY_PROTOCOL_MAP}
-      - KAFKA_ADVERTISED_LISTENERS=${KAFKA_ADVERTISED_LISTENERS}
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=${KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR}
-    depends_on:
-      - zookeeper
-    networks:
-      - stream-coin
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: kafka-ui
-    ports:
-      - '8083:8080'
-    environment:
-      - KAFKA_CLUSTERS_0_NAME=${KAFKA_UI_CLUSTER_NAME}
-      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=${KAFKA_UI_BOOTSTRAP_SERVERS}
-      - KAFKA_CLUSTERS_0_ZOOKEEPER=${KAFKA_UI_ZOOKEEPER}
-      - KAFKA_CLUSTERS_0_METRICS_PORT=${KAFKA_UI_METRICS_PORT}
-    depends_on:
-      - kafka
-    networks:
-      - stream-coin
+# ==============================================================================
+# stream-coin — Master Compose File
+#
+# Usage:
+#   Full stack:    docker compose up -d
+#   Infra only:    docker compose up -d redis kafka schema-registry kafka-connect flink-jobmanager flink-taskmanager kafka-ui
+#   Without proxy: docker compose up -d --scale nginx=0
+#
+# Kafka connection for app containers:  kafka:9094  (DOCKER plaintext)
+# Kafka connection from host (dev):     localhost:9092  (HOST plaintext)
+# Redis connection for app containers:  redis://redis:6379
+# Redis connection from host (dev):     redis://localhost:6379
+#
+# Setup (first time):
+#   cp .env.example .env          # fill in passwords and domain
+#   mkdir -p cert nginx/auth
+#   cp /path/to/fullchain.pem cert/
+#   cp /path/to/privkey.pem cert/
+#   htpasswd -c nginx/auth/.htpasswd <username>
+#   docker compose up -d
+# ==============================================================================
+
+name: stream-coin
+
+include:
+  - path: compose/redis.yml
+    project_directory: .
+  - path: compose/kafka.yml
+    project_directory: .
+  - path: compose/schema.yml
+    project_directory: .
+  - path: compose/connect.yml
+    project_directory: .
+  - path: compose/rest-proxy.yml
+    project_directory: .
+  - path: compose/flink.yml
+    project_directory: .
+  - path: compose/ui.yml
+    project_directory: .
+  - path: compose/proxy.yml
+    project_directory: .
+
+# ==============================================================================
+# Network — single bridge network for all services
+# ==============================================================================
 networks:
   stream-coin:
+    driver: bridge
     name: stream-coin
+
+# ==============================================================================
+# Volumes
+# ==============================================================================
+volumes:
+  redis-data:
+    driver: local
+    name: redis-data
+
+  kafka-data:
+    driver: local
+    name: kafka-data
+
+  kafka-connect-data:
+    driver: local
+    name: kafka-connect-data
+
+  kafka-connect-plugins:
+    driver: local
+    name: kafka-connect-plugins
+
+  flink-checkpoints:
+    driver: local
+    name: flink-checkpoints

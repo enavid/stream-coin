@@ -1,0 +1,76 @@
+services:
+
+  # ============================================================================
+  # Kafka UI — provectuslabs/kafka-ui
+  # Dashboard for topics, consumer groups, connectors, schema registry, Flink.
+  # Access via: https://kafka-ui.yourdomain.com  (or http://localhost:8083 dev)
+  # ============================================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    hostname: kafka-ui
+    restart: unless-stopped
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-connect:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+
+    expose:
+      - "8080"
+    ports:
+      - "8083:8080"   # accessible on host for local dev
+
+    environment:
+      DYNAMIC_CONFIG_ENABLED: "true"
+
+      KAFKA_CLUSTERS_0_NAME: "${KAFKA_UI_CLUSTER_NAME:-stream-coin}"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9091"
+
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: "SSL"
+      KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_LOCATION: "/etc/kafka/secrets/kafka.client.truststore.jks"
+      KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_PASSWORD: "${KAFKA_SSL_TRUSTSTORE_PASSWORD:-changeit}"
+
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: "http://schema-registry:8081"
+
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: "kafka-connect"
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: "http://kafka-connect:8083"
+
+      KAFKA_CLUSTERS_0_READONLY: "${KAFKA_UI_READONLY:-false}"
+      KAFKA_CLUSTERS_0_AUDIT_TOPICAUDITENABLED: "true"
+      KAFKA_CLUSTERS_0_AUDIT_CONSOLEAUDITENABLED: "true"
+
+      AUTH_TYPE: "LOGIN_FORM"
+      SPRING_SECURITY_USER_NAME: "${KAFKA_UI_USERNAME:-admin}"
+      SPRING_SECURITY_USER_PASSWORD: "${KAFKA_UI_PASSWORD:-admin123}"
+
+      SERVER_MAX_HTTP_REQUEST_SIZE: "20MB"
+
+    volumes:
+      - ./certs:/etc/kafka/secrets:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+        reservations:
+          memory: 256M
+          cpus: "0.25"
+
+    networks:
+      - stream-coin
+
+networks:
+  stream-coin:
+    external: true

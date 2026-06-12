@@ -1,0 +1,57 @@
+services:
+
+  # ============================================================================
+  # Schema Registry — Confluent Community Edition
+  # Central schema store for Avro / Protobuf / JSON Schema topics.
+  # ============================================================================
+  schema-registry:
+    image: confluentinc/cp-schema-registry:${KAFKA_VERSION:-8.0.0}
+    container_name: schema-registry
+    hostname: schema-registry
+    restart: unless-stopped
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+    expose:
+      - "8081"
+
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "kafka:9091"
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: "SSL"
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION: "/etc/kafka/secrets/kafka.client.truststore.jks"
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD: "${KAFKA_SSL_TRUSTSTORE_PASSWORD:-changeit}"
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION: "/etc/kafka/secrets/kafka.client.keystore.jks"
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD: "${KAFKA_SSL_KEYSTORE_PASSWORD:-changeit}"
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_KEY_PASSWORD: "${KAFKA_SSL_KEY_PASSWORD:-changeit}"
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+
+    volumes:
+      - ./certs:/etc/kafka/secrets:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    deploy:
+      resources:
+        limits:
+          memory: ${SCHEMA_REGISTRY_MEMORY_LIMIT:-512M}
+          cpus: "${SCHEMA_REGISTRY_CPU_LIMIT:-0.5}"
+        reservations:
+          memory: ${SCHEMA_REGISTRY_MEMORY_RESERVATION:-256M}
+          cpus: "${SCHEMA_REGISTRY_CPU_RESERVATION:-0.25}"
+
+    networks:
+      - stream-coin
+
+networks:
+  stream-coin:
+    external: true

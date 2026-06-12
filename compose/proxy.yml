@@ -1,0 +1,63 @@
+services:
+
+  # ============================================================================
+  # Nginx Reverse Proxy
+  # Terminates TLS with real certificates from ./cert/ (Let's Encrypt or custom).
+  # All internal services are unexposed; only Nginx is reachable on 80/443.
+  #
+  # Required DNS A records (all → this server's public IP):
+  #   kafka-ui.yourdomain.com        → kafka-ui:8080
+  #   flink.yourdomain.com           → flink-jobmanager:9081
+  #   schema-registry.yourdomain.com → schema-registry:8081
+  #   kafka-connect.yourdomain.com   → kafka-connect:8083
+  #   rest-proxy.yourdomain.com      → rest-proxy:8082
+  #
+  # Certificates (place before running):
+  #   ./cert/fullchain.pem
+  #   ./cert/privkey.pem
+  # ============================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    hostname: nginx
+    restart: unless-stopped
+
+    depends_on:
+      - kafka-ui
+      - flink-jobmanager
+      - schema-registry
+      - kafka-connect
+      - rest-proxy
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/auth/.htpasswd:/etc/nginx/auth/.htpasswd:ro
+      - ./cert/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
+      - ./cert/privkey.pem:/etc/nginx/ssl/privkey.pem:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+          cpus: "0.1"
+
+    networks:
+      - stream-coin
+
+networks:
+  stream-coin:
+    external: true

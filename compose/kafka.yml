@@ -1,0 +1,256 @@
+services:
+
+  # ============================================================================
+  # SSL Certificate Generator
+  # Runs once on first start; generates JKS certs for Kafka mTLS.
+  # Subsequent starts are skipped when ./certs/kafka.server.keystore.jks exists.
+  # ============================================================================
+  generate-kafka-ssl:
+    image: eclipse-temurin:11-jre
+    container_name: generate_kafka_ssl
+    volumes:
+      - ./certs:/certs
+    environment:
+      - KAFKA_SSL_KEYSTORE_PASSWORD=${KAFKA_SSL_KEYSTORE_PASSWORD:-changeit}
+      - KAFKA_SSL_TRUSTSTORE_PASSWORD=${KAFKA_SSL_TRUSTSTORE_PASSWORD:-changeit}
+      - KAFKA_SSL_KEY_PASSWORD=${KAFKA_SSL_KEY_PASSWORD:-changeit}
+    command:
+      - bash
+      - -c
+      - |
+        echo "==== Checking for existing Kafka certificates ====";
+        if [ -f "/certs/kafka.server.keystore.jks" ]; then
+          echo "Kafka certificates already exist, skipping generation";
+        else
+          echo "==== Generating Kafka SSL Certificates ====";
+
+          cd /certs;
+
+          keytool -genkeypair \
+            -alias ca -keyalg RSA -keysize 2048 -validity 365 \
+            -keystore ca.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -keypass ${KAFKA_SSL_KEY_PASSWORD} \
+            -dname "CN=Kafka-CA, OU=DevOps, O=stream-coin, L=Tehran, ST=Tehran, C=IR" \
+            -ext bc=ca:true;
+
+          keytool -exportcert \
+            -alias ca -keystore ca.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -file kafka-ca.crt -rfc;
+
+          keytool -genkeypair \
+            -alias kafka -keyalg RSA -keysize 2048 -validity 365 \
+            -keystore kafka.server.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -keypass ${KAFKA_SSL_KEY_PASSWORD} \
+            -dname "CN=kafka, OU=DevOps, O=stream-coin, L=Tehran, ST=Tehran, C=IR" \
+            -ext SAN=DNS:kafka,DNS:kafka-kraft,DNS:localhost,IP:127.0.0.1;
+
+          keytool -certreq \
+            -alias kafka -keystore kafka.server.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -keypass ${KAFKA_SSL_KEY_PASSWORD} \
+            -file kafka.csr;
+
+          keytool -gencert \
+            -alias ca -keystore ca.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -infile kafka.csr -outfile kafka-signed.crt \
+            -ext SAN=DNS:kafka,DNS:kafka-kraft,DNS:localhost,IP:127.0.0.1 \
+            -validity 365;
+
+          keytool -importcert -alias ca -file kafka-ca.crt \
+            -keystore kafka.server.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -keypass ${KAFKA_SSL_KEY_PASSWORD} -noprompt;
+
+          keytool -importcert -alias kafka -file kafka-signed.crt \
+            -keystore kafka.server.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -keypass ${KAFKA_SSL_KEY_PASSWORD} -noprompt;
+
+          keytool -importcert -alias ca -file kafka-ca.crt \
+            -keystore kafka.server.truststore.jks \
+            -storepass ${KAFKA_SSL_TRUSTSTORE_PASSWORD} -noprompt;
+
+          keytool -genkeypair \
+            -alias kafka-client -keyalg RSA -keysize 2048 -validity 365 \
+            -keystore kafka.client.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -keypass ${KAFKA_SSL_KEY_PASSWORD} \
+            -dname "CN=kafka-client, OU=DevOps, O=stream-coin, L=Tehran, ST=Tehran, C=IR";
+
+          keytool -certreq \
+            -alias kafka-client -keystore kafka.client.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -keypass ${KAFKA_SSL_KEY_PASSWORD} \
+            -file kafka-client.csr;
+
+          keytool -gencert \
+            -alias ca -keystore ca.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -infile kafka-client.csr -outfile kafka-client-signed.crt \
+            -validity 365;
+
+          keytool -importcert -alias ca -file kafka-ca.crt \
+            -keystore kafka.client.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -keypass ${KAFKA_SSL_KEY_PASSWORD} -noprompt;
+
+          keytool -importcert -alias kafka-client -file kafka-client-signed.crt \
+            -keystore kafka.client.keystore.jks \
+            -storepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -keypass ${KAFKA_SSL_KEY_PASSWORD} -noprompt;
+
+          keytool -importcert -alias ca -file kafka-ca.crt \
+            -keystore kafka.client.truststore.jks \
+            -storepass ${KAFKA_SSL_TRUSTSTORE_PASSWORD} -noprompt;
+
+          keytool -importkeystore \
+            -srckeystore kafka.client.keystore.jks \
+            -destkeystore kafka.client.keystore.p12 \
+            -srcstoretype JKS -deststoretype PKCS12 \
+            -srcstorepass ${KAFKA_SSL_KEYSTORE_PASSWORD} \
+            -deststorepass ${KAFKA_SSL_KEYSTORE_PASSWORD} -noprompt;
+
+          openssl pkcs12 -in kafka.client.keystore.p12 -nokeys -out kafka-client.crt;
+
+          echo "${KAFKA_SSL_KEYSTORE_PASSWORD}"  > keystore_creds;
+          echo "${KAFKA_SSL_KEY_PASSWORD}"        > key_creds;
+          echo "${KAFKA_SSL_TRUSTSTORE_PASSWORD}" > truststore_creds;
+
+          chmod 644 *.jks *.crt *_creds;
+          chmod 600 *.key 2>/dev/null || true;
+          rm -f *.csr ca.keystore.jks *-signed.crt;
+
+          echo "Kafka SSL certificates generated successfully";
+        fi
+    networks:
+      - stream-coin
+
+  # ============================================================================
+  # Kafka Broker — Confluent KRaft (no ZooKeeper)
+  #
+  # Listeners:
+  #   SSL      kafka:9091  — internal mTLS (Schema Registry, Connect, kafka-ui)
+  #   CTRL     kafka:9093  — KRaft controller (internal only)
+  #   HOST     *:9092      — plaintext for host-machine dev tools
+  #   EXTERNAL *:9095      — SSL for internet (via Nginx)
+  #   DOCKER   kafka:9094  — plaintext for app containers on this network
+  # ============================================================================
+  kafka:
+    image: confluentinc/cp-kafka:${KAFKA_VERSION:-8.0.0}
+    container_name: kafka-kraft
+    hostname: kafka
+    restart: unless-stopped
+
+    depends_on:
+      generate-kafka-ssl:
+        condition: service_completed_successfully
+
+    ports:
+      - "9092:9092"   # HOST — dev tools on host machine
+      - "9095:9095"   # EXTERNAL — SSL, internet-facing
+    expose:
+      - "9091"        # SSL internal
+      - "9094"        # DOCKER plaintext internal
+
+    environment:
+      KAFKA_NODE_ID: "${KAFKA_NODE_ID:-1}"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID:-EmptNWtoR4GGWx-BH6nGLQ}"
+
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+
+      KAFKA_LISTENERS: >-
+        SSL://kafka:9091,
+        CONTROLLER://kafka:9093,
+        HOST://0.0.0.0:9092,
+        EXTERNAL://0.0.0.0:9095,
+        DOCKER://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: >-
+        SSL://kafka:9091,
+        HOST://localhost:9092,
+        EXTERNAL://${KAFKA_ADVERTISED_HOST:-localhost}:9095,
+        DOCKER://kafka:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >-
+        CONTROLLER:PLAINTEXT,
+        SSL:SSL,
+        HOST:PLAINTEXT,
+        EXTERNAL:SSL,
+        DOCKER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: "SSL"
+
+      KAFKA_SSL_KEYSTORE_FILENAME: "kafka.server.keystore.jks"
+      KAFKA_SSL_KEYSTORE_LOCATION: "/etc/kafka/secrets/kafka.server.keystore.jks"
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: "keystore_creds"
+      KAFKA_SSL_KEYSTORE_PASSWORD: "${KAFKA_SSL_KEYSTORE_PASSWORD:-changeit}"
+      KAFKA_SSL_KEY_CREDENTIALS: "key_creds"
+      KAFKA_SSL_KEY_PASSWORD: "${KAFKA_SSL_KEY_PASSWORD:-changeit}"
+      KAFKA_SSL_TRUSTSTORE_FILENAME: "kafka.server.truststore.jks"
+      KAFKA_SSL_TRUSTSTORE_LOCATION: "/etc/kafka/secrets/kafka.server.truststore.jks"
+      KAFKA_SSL_TRUSTSTORE_PASSWORD: "${KAFKA_SSL_TRUSTSTORE_PASSWORD:-changeit}"
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: "truststore_creds"
+      KAFKA_SSL_CLIENT_AUTH: "none"
+      KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "${KAFKA_REPLICATION_FACTOR:-1}"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "${KAFKA_REPLICATION_FACTOR:-1}"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "${KAFKA_MIN_ISR:-1}"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "${KAFKA_REPLICATION_FACTOR:-1}"
+      KAFKA_MIN_INSYNC_REPLICAS: "${KAFKA_MIN_ISR:-1}"
+
+      KAFKA_HEAP_OPTS: "${KAFKA_HEAP_OPTS:--Xmx1G -Xms1G}"
+      KAFKA_NUM_NETWORK_THREADS: "${KAFKA_NETWORK_THREADS:-3}"
+      KAFKA_NUM_IO_THREADS: "${KAFKA_IO_THREADS:-8}"
+      KAFKA_SOCKET_SEND_BUFFER_BYTES: "102400"
+      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: "102400"
+      KAFKA_SOCKET_REQUEST_MAX_BYTES: "104857600"
+
+      KAFKA_LOG_RETENTION_HOURS: "${KAFKA_LOG_RETENTION_HOURS:-168}"
+      KAFKA_LOG_RETENTION_BYTES: "${KAFKA_LOG_RETENTION_BYTES:-1073741824}"
+      KAFKA_LOG_SEGMENT_BYTES: "1073741824"
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: "300000"
+      KAFKA_LOG_FLUSH_INTERVAL_MESSAGES: "10000"
+      KAFKA_LOG_FLUSH_INTERVAL_MS: "1000"
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "${KAFKA_AUTO_CREATE_TOPICS:-true}"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_COMPRESSION_TYPE: "${KAFKA_COMPRESSION_TYPE:-producer}"
+      KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+
+      KAFKA_LOG4J_ROOT_LOGLEVEL: "${KAFKA_LOG_LEVEL:-INFO}"
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
+
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+      - ./certs:/etc/kafka/secrets:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+    deploy:
+      resources:
+        limits:
+          memory: ${KAFKA_MEMORY_LIMIT:-2G}
+          cpus: "${KAFKA_CPU_LIMIT:-2.0}"
+        reservations:
+          memory: ${KAFKA_MEMORY_RESERVATION:-1G}
+          cpus: "${KAFKA_CPU_RESERVATION:-1.0}"
+
+    networks:
+      - stream-coin
+
+networks:
+  stream-coin:
+    external: true
+
+volumes:
+  kafka-data:
+    external: true

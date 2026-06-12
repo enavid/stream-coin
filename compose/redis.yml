@@ -1,0 +1,77 @@
+services:
+
+  # ============================================================================
+  # Redis 7 — In-memory data store
+  # Tracks active ticker subscriptions (TickerRepository).
+  # Prices go to Kafka, NOT here.
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    hostname: redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+    expose:
+      - "6379"
+    ports:
+      - "6379:6379"
+
+    volumes:
+      - redis-data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+          cpus: "0.1"
+
+    networks:
+      - stream-coin
+
+  # ============================================================================
+  # Redis Insight — Web UI for Redis
+  # Access: http://localhost:5540
+  # ============================================================================
+  redis-insight:
+    image: redis/redisinsight:latest
+    container_name: redis-insight
+    hostname: redis-insight
+    restart: unless-stopped
+
+    ports:
+      - "5540:5540"
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.25"
+        reservations:
+          memory: 128M
+          cpus: "0.1"
+
+    networks:
+      - stream-coin
+
+networks:
+  stream-coin:
+    external: true
+
+volumes:
+  redis-data:
+    external: true

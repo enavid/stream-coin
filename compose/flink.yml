@@ -1,0 +1,124 @@
+services:
+
+  # ============================================================================
+  # Flink JobManager — Confluent-flavored Apache Flink
+  # Coordinates stream processing jobs; hosts the Web UI on :9081.
+  # Checkpoints persisted to flink-checkpoints volume (EXACTLY_ONCE).
+  # ============================================================================
+  flink-jobmanager:
+    image: cnfldemos/flink-kafka:1.19.1-scala_2.12-java17
+    container_name: flink-jobmanager
+    hostname: flink-jobmanager
+    restart: unless-stopped
+
+    command: jobmanager
+
+    expose:
+      - "6123"
+      - "9081"
+
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        rest.bind-port: 9081
+        jobmanager.memory.process.size: ${FLINK_JM_MEMORY:-1600m}
+        parallelism.default: ${FLINK_PARALLELISM:-1}
+        state.backend.type: hashmap
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.interval: ${FLINK_CHECKPOINT_INTERVAL:-30000}
+        execution.checkpointing.mode: EXACTLY_ONCE
+        execution.checkpointing.timeout: 600000
+        execution.checkpointing.max-concurrent-checkpoints: 1
+        execution.checkpointing.min-pause: 5000
+
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9081/overview || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    deploy:
+      resources:
+        limits:
+          memory: ${FLINK_JM_MEMORY_LIMIT:-2G}
+          cpus: "${FLINK_JM_CPU_LIMIT:-1.0}"
+        reservations:
+          memory: ${FLINK_JM_MEMORY_RESERVATION:-1G}
+          cpus: "${FLINK_JM_CPU_RESERVATION:-0.5}"
+
+    networks:
+      - stream-coin
+
+  # ============================================================================
+  # Flink TaskManager
+  # Executes the actual stream processing tasks; shares checkpoint volume.
+  # ============================================================================
+  flink-taskmanager:
+    image: cnfldemos/flink-kafka:1.19.1-scala_2.12-java17
+    container_name: flink-taskmanager
+    hostname: flink-taskmanager
+    restart: unless-stopped
+
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+
+    command: taskmanager
+
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: ${FLINK_TASK_SLOTS:-10}
+        taskmanager.memory.process.size: ${FLINK_TM_MEMORY:-1728m}
+        state.backend.type: hashmap
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.interval: ${FLINK_CHECKPOINT_INTERVAL:-30000}
+        execution.checkpointing.mode: EXACTLY_ONCE
+
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+
+    deploy:
+      resources:
+        limits:
+          memory: ${FLINK_TM_MEMORY_LIMIT:-2G}
+          cpus: "${FLINK_TM_CPU_LIMIT:-2.0}"
+        reservations:
+          memory: ${FLINK_TM_MEMORY_RESERVATION:-1G}
+          cpus: "${FLINK_TM_CPU_RESERVATION:-1.0}"
+
+    networks:
+      - stream-coin
+
+  # ============================================================================
+  # Flink SQL Client — Interactive SQL shell
+  # Attach: docker exec -it flink-sql-client ./bin/sql-client.sh
+  # ============================================================================
+  flink-sql-client:
+    image: cnfldemos/flink-sql-client-kafka:1.19.1-scala_2.12-java17
+    container_name: flink-sql-client
+    hostname: flink-sql-client
+
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+
+    environment:
+      FLINK_JOBMANAGER_HOST: flink-jobmanager
+
+    networks:
+      - stream-coin
+
+networks:
+  stream-coin:
+    external: true
+
+volumes:
+  flink-checkpoints:
+    external: true
