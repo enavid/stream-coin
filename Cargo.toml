@@ -22,6 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-actix-web = "0.7"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
+rdkafka = { version = "0.37", features = ["cmake-build"] }
 
 [package.metadata.deb]
 maintainer = "Navid Sadeghi <navidsadeghi0021@gmail.com>"

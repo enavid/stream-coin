@@ -15,6 +15,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         ticker_repository: None,
         exchange_adapters: Arc::new(HashMap::new()),
         clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher: None,
     })
 }
 

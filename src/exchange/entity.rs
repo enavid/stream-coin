@@ -1,7 +1,15 @@
 use std::fmt;
 
+use serde::Serializer;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExchangeId(String);
+
+impl serde::Serialize for ExchangeId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
 
 impl ExchangeId {
     pub fn new(name: &str) -> Self {

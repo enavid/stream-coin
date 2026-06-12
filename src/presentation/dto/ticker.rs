@@ -12,3 +12,20 @@ pub struct TickerStarted {
     pub exchange: String,
     pub symbol: String,
 }
+
+#[derive(Serialize, ToSchema)]
+pub struct TickerStopped {
+    pub exchange: String,
+    pub symbol: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ActiveTicker {
+    pub exchange: String,
+    pub symbol: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct TickerList {
+    pub tickers: Vec<ActiveTicker>,
+}

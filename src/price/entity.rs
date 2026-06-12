@@ -1,6 +1,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use serde::{Serialize, Serializer};
 
 use crate::exchange::entity::ExchangeId;
 
@@ -8,6 +9,12 @@ use crate::exchange::entity::ExchangeId;
 pub struct TradingPair {
     pub base: String,
     pub quote: String,
+}
+
+impl Serialize for TradingPair {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
 }
 
 impl TradingPair {
@@ -25,7 +32,7 @@ impl fmt::Display for TradingPair {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Price {
     pub exchange: ExchangeId,
     pub pair: TradingPair,

@@ -15,6 +15,8 @@ use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::infrastructure::cache::redis;
 use stream_coin::infrastructure::cache::ticker_repository::RedisTickerRepository;
+use stream_coin::kafka::port::MessagePublisher;
+use stream_coin::kafka::KafkaProducer;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::AppState;
@@ -67,11 +69,29 @@ async fn main() -> std::io::Result<()> {
     let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
     adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter));
 
+    let publisher: Option<Arc<dyn MessagePublisher>> = match env::var("KAFKA_URL") {
+        Ok(url) => match KafkaProducer::new(&url) {
+            Ok(p) => {
+                tracing::info!(url = %url, "kafka producer connected");
+                Some(Arc::new(p))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "kafka unavailable, starting without publisher");
+                None
+            }
+        },
+        Err(_) => {
+            tracing::warn!("KAFKA_URL not set, starting without publisher");
+            None
+        }
+    };
+
     let app_state = web::Data::new(AppState {
         redis: redis_conn,
         ticker_repository,
         exchange_adapters: Arc::new(adapters),
         clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher,
     });
 
     tracing::info!(host = %host, port = %port, "server starting");

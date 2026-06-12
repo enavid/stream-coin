@@ -2,7 +2,9 @@ use utoipa::openapi::OpenApi as OpenApiSpec;
 use utoipa::{Modify, OpenApi};
 
 use crate::presentation::dto::health::{Dependencies, HealthStatus};
-use crate::presentation::dto::ticker::{SymbolRequest, TickerStarted};
+use crate::presentation::dto::ticker::{
+    ActiveTicker, SymbolRequest, TickerList, TickerStarted, TickerStopped,
+};
 use crate::presentation::responses::ApiError;
 
 #[derive(OpenApi)]
@@ -12,9 +14,15 @@ use crate::presentation::responses::ApiError;
     paths(
         crate::presentation::handlers::health_handler::health,
         crate::presentation::handlers::exchange_handler::start_kline_symbol_ticker,
+        crate::presentation::handlers::exchange_handler::stop_kline_symbol_ticker,
+        crate::presentation::handlers::exchange_handler::list_tickers,
     ),
     components(
-        schemas(HealthStatus, Dependencies, SymbolRequest, TickerStarted, ApiError)
+        schemas(
+            HealthStatus, Dependencies,
+            SymbolRequest, TickerStarted, TickerStopped, ActiveTicker, TickerList,
+            ApiError
+        )
     ),
     tags(
         (name = "Health", description = "Service health and status"),
@@ -70,5 +78,23 @@ mod tests {
             .paths
             .paths
             .contains_key("/v1/exchanges/futures/start_kline_symbol_ticker"));
+    }
+
+    #[test]
+    fn swagger_registers_stop_ticker_path() {
+        let api = ApiDoc::openapi();
+        assert!(api
+            .paths
+            .paths
+            .contains_key("/v1/exchanges/futures/stop_kline_symbol_ticker"));
+    }
+
+    #[test]
+    fn swagger_registers_list_tickers_path() {
+        let api = ApiDoc::openapi();
+        assert!(api
+            .paths
+            .paths
+            .contains_key("/v1/exchanges/futures/tickers"));
     }
 }
