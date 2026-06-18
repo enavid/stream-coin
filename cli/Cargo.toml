@@ -32,3 +32,8 @@ priority = "optional"
 assets = [
     { source = "target/release/sc", dest = "usr/bin/", mode = "755" },
 ]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/sc", dest = "/usr/bin/sc", mode = "755" },
+]

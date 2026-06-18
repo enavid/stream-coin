@@ -27,19 +27,11 @@ Current coverage is mostly happy-path. Add cases for:
 
 ## 4. CI / release — separate, independently downloadable artifacts
 
-`ci.yml` only builds one Docker image (engine). `release.yml` only packages
-the `stream-coin` binary (tar/deb/rpm/msi/AppImage) — `sc` is never built or
-released standalone, and the UI is absent from CI entirely.
-
-Still needed:
-
-- per-target build + upload for `sc` (mirroring the existing `stream-coin` matrix)
-- a job that runs `dx build --platform web --package web --release` in `ui/`
-  and uploads the static bundle (`ui/target/dx/web/release/web/public`) as
-  its own release asset
-- `release.yml`'s `build-deb`/`build-rpm` jobs call `cargo deb`/`cargo generate-rpm`
-  without `-p`, which is now ambiguous in a multi-package workspace — needs
-  `-p stream-coin` / `-p sc` variants for each binary
+Done — see Status below. `release.yml` now builds and uploads `stream-coin`,
+`sc`, and the web UI as independent artifacts (archives, plus `.deb`/`.rpm`
+for the two binaries). Remaining gap: Windows `.msi` only packages
+`stream-coin`, and `sc`/UI have no Windows or macOS installer packaging
+(archives only on those platforms).
 
 ## Status
 
@@ -61,16 +53,29 @@ Still needed:
       silently failing `just check`; (b) `cli/src/config.rs`'s tests that
       mutate `SC_CONFIG_PATH` raced under parallel test execution — fixed
       with a `Mutex` guard.
-- [ ] 4. CI/release separation — partially done: `ci.yml` and `release.yml`
-      now install `cmake`/`build-essential`/`libcurl4-openssl-dev` (Linux),
-      `brew install cmake` (macOS) wherever `cargo build`/`test`/`clippy`
-      runs, fixing the production CI failure where `rdkafka-sys`'s
-      `cmake-build` feature couldn't find `curl/curl.h` on the GitHub-hosted
-      runner. `justfile`'s `check` now also runs `check-clean-env` (a Docker
-      build using the project's own `Dockerfile`, with no host-installed
-      system libs) specifically so missing-system-dependency bugs like this
-      one are caught locally before push, not just in CI. The deeper
-      per-artifact CI/release split (separate sc/ui jobs, fixing
-      `cargo deb`/`cargo generate-rpm` ambiguity) is still open — see above.
+- [x] 4. CI/release separation — `ci.yml` and `release.yml` install
+      `cmake`/`build-essential`/`libcurl4-openssl-dev` (Linux), `brew install
+      cmake` (macOS) wherever `cargo build`/`test`/`clippy` runs, fixing the
+      production CI failure where `rdkafka-sys`'s `cmake-build` feature
+      couldn't find `curl/curl.h` on the GitHub-hosted runner. `justfile`'s
+      `check` now also runs `check-clean-env` (a Docker build using the
+      project's own `Dockerfile`, with no host-installed system libs) so this
+      class of bug is caught locally before push, not just in CI.
+      `release.yml` now has independent build/upload jobs per artifact:
+      `build` (stream-coin archives), `build-cli` (sc archives, same OS/arch
+      matrix, no rdkafka deps so no cmake/curl install needed),
+      `build-ui` (`dx build --platform web --package web --release`, archives
+      `ui/target/dx/web/release/web/public`), `build-deb-server`/
+      `build-deb-cli` (`cargo deb -p stream-coin` / `-p sc`), `build-rpm-server`/
+      `build-rpm-cli` (`cargo generate-rpm -p engine` / `-p cli` — note: this
+      flag takes the **directory** name, not the package name, unlike
+      `cargo deb -p`/`cargo build -p` which take the package name; verified
+      locally). Root-caused why GitHub Releases was empty: `cargo
+      generate-rpm` requires an explicit `[package.metadata.generate-rpm]`
+      assets table and neither `engine/Cargo.toml` nor `cli/Cargo.toml` had
+      one, so `build-rpm` always failed and the final `release` job (which
+      `needs` every build job) never ran for any tag — added the metadata
+      table to both, verified each `cargo generate-rpm` invocation locally.
       Windows (`build-msi` job) was not touched: rdkafka's cmake-build on
-      Windows likely needs a different fix (vcpkg) and wasn't verified.
+      Windows likely needs a different fix (vcpkg) and wasn't verified; it
+      only packages `stream-coin`, not `sc`.

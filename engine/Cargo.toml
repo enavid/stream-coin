@@ -40,6 +40,11 @@ assets = [
     { source = "target/release/stream-coin", dest = "usr/bin/", mode = "755" },
 ]
 
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/stream-coin", dest = "/usr/bin/stream-coin", mode = "755" },
+]
+
 [lib]
 name = "stream_coin"
 path = "src/lib.rs"

@@ -195,7 +195,147 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.*
 
-  build-deb:
+  build-cli:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: sc
+            asset_name: sc-linux-x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: sc
+            asset_name: sc-linux-x86_64-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: sc.exe
+            asset_name: sc-windows-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: sc
+            asset_name: sc-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: sc
+            asset_name: sc-macos-arm64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        shell: bash
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux musl only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-sc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-sc-
+
+      - name: Build release binary
+        run: cargo build --release --locked -p sc --target ${{ matrix.target }}
+
+      - name: Strip binary (Unix only)
+        if: matrix.os != 'windows-latest'
+        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+      - name: Create archive (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf ${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.tar.gz ${{ matrix.artifact_name }}
+          sha256sum ${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.tar.gz > ${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.tar.gz.sha256
+
+      - name: Create archive (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path ${{ matrix.artifact_name }} -DestinationPath ${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.zip
+          (Get-FileHash ${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.zip -Algorithm SHA256).Hash | Out-File -FilePath ${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.zip.sha256 -NoNewline
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}
+          path: |
+            target/${{ matrix.target }}/release/${{ matrix.asset_name }}-${{ steps.get_version.outputs.version }}.*
+
+  build-ui:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ui/target/
+          key: ${{ runner.os }}-cargo-ui-${{ hashFiles('ui/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ui-
+
+      - name: Install dioxus-cli
+        run: cargo install dioxus-cli --version 0.7.9 --locked
+
+      - name: Build web UI (release)
+        run: cd ui && dx build --platform web --package web --release
+
+      - name: Create archive
+        run: |
+          cd ui/target/dx/web/release/web/public
+          tar -czf ui-web-${{ steps.get_version.outputs.version }}.tar.gz .
+          sha256sum ui-web-${{ steps.get_version.outputs.version }}.tar.gz > ui-web-${{ steps.get_version.outputs.version }}.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-web-${{ steps.get_version.outputs.version }}
+          path: |
+            ui/target/dx/web/release/web/public/ui-web-${{ steps.get_version.outputs.version }}.tar.gz*
+
+  build-deb-server:
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -226,10 +366,10 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-deb-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-deb-server-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build .deb package
-        run: cargo deb
+        run: cargo deb -p stream-coin
 
       - name: Rename .deb file
         run: |
@@ -243,7 +383,52 @@ jobs:
           name: stream-coin-deb-${{ steps.get_version.outputs.version }}
           path: target/debian/*.deb*
 
-  build-rpm:
+  build-deb-cli:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-deb-cli-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build .deb package
+        run: cargo deb -p sc
+
+      - name: Rename .deb file
+        run: |
+          DEB_FILE=$(find target/debian -name "*.deb")
+          mv $DEB_FILE target/debian/sc-${{ steps.get_version.outputs.version }}-amd64.deb
+          sha256sum target/debian/sc-${{ steps.get_version.outputs.version }}-amd64.deb > target/debian/sc-${{ steps.get_version.outputs.version }}-amd64.deb.sha256
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sc-deb-${{ steps.get_version.outputs.version }}
+          path: target/debian/sc-*.deb*
+
+  build-rpm-server:
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -274,21 +459,21 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-rpm-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-rpm-server-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release -p stream-coin
 
       - name: Strip binary
         run: strip target/release/stream-coin
 
       - name: Build .rpm package
-        run: cargo generate-rpm
+        run: cargo generate-rpm -p engine
 
       - name: Rename .rpm file
         run: |
           RPM_FILE=$(find target/generate-rpm -name "*.rpm")
-          mv $RPM_FILE target/generate-rpm/stream-coin-${{ steps.get_version.outputs.version }}-1.x86_64.rpm
+          mv "$RPM_FILE" target/generate-rpm/stream-coin-${{ steps.get_version.outputs.version }}-1.x86_64.rpm
           sha256sum target/generate-rpm/stream-coin-${{ steps.get_version.outputs.version }}-1.x86_64.rpm > target/generate-rpm/stream-coin-${{ steps.get_version.outputs.version }}-1.x86_64.rpm.sha256
 
       - name: Upload .rpm artifact
@@ -296,6 +481,57 @@ jobs:
         with:
           name: stream-coin-rpm-${{ steps.get_version.outputs.version }}
           path: target/generate-rpm/*.rpm*
+
+  build-rpm-cli:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-rpm-cli-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release -p sc
+
+      - name: Strip binary
+        run: strip target/release/sc
+
+      - name: Build .rpm package
+        run: cargo generate-rpm -p cli
+
+      - name: Rename .rpm file
+        run: |
+          RPM_FILE=$(find target/generate-rpm -name "*.rpm")
+          mv "$RPM_FILE" target/generate-rpm/sc-${{ steps.get_version.outputs.version }}-1.x86_64.rpm
+          sha256sum target/generate-rpm/sc-${{ steps.get_version.outputs.version }}-1.x86_64.rpm > target/generate-rpm/sc-${{ steps.get_version.outputs.version }}-1.x86_64.rpm.sha256
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sc-rpm-${{ steps.get_version.outputs.version }}
+          path: target/generate-rpm/sc-*.rpm*
 
   build-msi:
     needs: test
@@ -414,7 +650,19 @@ jobs:
             stream-coin-${{ steps.get_version.outputs.version }}-x86_64.AppImage*
 
   release:
-    needs: [docker, build, build-deb, build-rpm, build-msi, build-appimage]
+    needs:
+      [
+        docker,
+        build,
+        build-cli,
+        build-ui,
+        build-deb-server,
+        build-deb-cli,
+        build-rpm-server,
+        build-rpm-cli,
+        build-msi,
+        build-appimage,
+      ]
     runs-on: ubuntu-latest
     permissions:
       contents: write
