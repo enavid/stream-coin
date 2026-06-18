@@ -16,6 +16,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         exchange_adapters: Arc::new(HashMap::new()),
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
+        broadcaster: AppState::new_broadcaster(),
     })
 }
 

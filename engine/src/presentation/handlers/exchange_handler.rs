@@ -63,9 +63,12 @@ pub async fn start_kline_symbol_ticker(
     };
 
     let publisher = state.publisher.clone();
+    let broadcaster = state.broadcaster.clone();
     let topic = std::env::var("KAFKA_TOPIC_PRICES").unwrap_or_else(|_| "prices".to_string());
 
     tokio::spawn(async move {
+        use crate::kafka::producer::KafkaProducer;
+
         while let Some(price) = rx.recv().await {
             tracing::info!(
                 exchange = %price.exchange,
@@ -75,16 +78,20 @@ pub async fn start_kline_symbol_ticker(
                 "price update"
             );
 
+            let payload = match KafkaProducer::price_to_payload(&price) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to serialize price");
+                    continue;
+                }
+            };
+
+            let _ = broadcaster.send(payload.clone());
+
             if let Some(ref pub_) = publisher {
-                use crate::kafka::producer::KafkaProducer;
                 let key = KafkaProducer::price_to_key(&price);
-                match KafkaProducer::price_to_payload(&price) {
-                    Ok(payload) => {
-                        if let Err(e) = pub_.publish(&topic, &key, &payload).await {
-                            tracing::error!(error = %e, "failed to publish price to kafka");
-                        }
-                    }
-                    Err(e) => tracing::error!(error = %e, "failed to serialize price"),
+                if let Err(e) = pub_.publish(&topic, &key, &payload).await {
+                    tracing::error!(error = %e, "failed to publish price to kafka");
                 }
             }
         }
@@ -198,6 +205,7 @@ mod tests {
             exchange_adapters: Arc::new(HashMap::new()),
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: None,
+            broadcaster: AppState::new_broadcaster(),
         })
     }
 
@@ -211,10 +219,11 @@ mod tests {
             exchange_adapters: Arc::new(HashMap::new()),
             clients: Arc::new(Mutex::new(map)),
             publisher: None,
+            broadcaster: AppState::new_broadcaster(),
         })
     }
 
-    // ── start ────────────────────────────────────────────────────────────────
+    // start
 
     #[actix_web::test]
     async fn ticker_returns_400_when_exchange_not_supported() {
@@ -255,7 +264,7 @@ mod tests {
         assert_eq!(body["message"], "Exchange not supported");
     }
 
-    // ── stop ─────────────────────────────────────────────────────────────────
+    // stop
 
     #[actix_web::test]
     async fn stop_returns_400_when_ticker_not_running() {
@@ -330,6 +339,7 @@ mod tests {
             exchange_adapters: Arc::new(HashMap::new()),
             clients: Arc::clone(&clients),
             publisher: None,
+            broadcaster: AppState::new_broadcaster(),
         });
         let app = test::init_service(
             App::new()
@@ -369,7 +379,7 @@ mod tests {
         assert_eq!(body["data"]["symbol"], "USDTIRT");
     }
 
-    // ── list ─────────────────────────────────────────────────────────────────
+    // list
 
     #[actix_web::test]
     async fn list_returns_200_with_empty_list_when_no_tickers() {
@@ -426,6 +436,7 @@ mod tests {
             exchange_adapters: Arc::new(HashMap::new()),
             clients: Arc::new(Mutex::new(map)),
             publisher: None,
+            broadcaster: AppState::new_broadcaster(),
         });
         let app = test::init_service(
             App::new()

@@ -17,6 +17,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         exchange_adapters: Arc::new(HashMap::new()),
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
+        broadcaster: AppState::new_broadcaster(),
     })
 }
 
@@ -30,6 +31,7 @@ fn build_state_with_ticker(key: &str) -> actix_web::web::Data<AppState> {
         exchange_adapters: Arc::new(HashMap::new()),
         clients: Arc::new(Mutex::new(map)),
         publisher: None,
+        broadcaster: AppState::new_broadcaster(),
     })
 }
 
@@ -98,7 +100,7 @@ async fn ticker_endpoint_returns_400_on_missing_body() {
     assert_eq!(resp.status(), 400);
 }
 
-// ── stop ─────────────────────────────────────────────────────────────────────
+// stop
 
 #[actix_web::test]
 async fn stop_ticker_returns_400_when_ticker_not_running() {
@@ -191,7 +193,7 @@ async fn stop_ticker_response_contains_exchange_and_symbol() {
     assert_eq!(body["data"]["symbol"], "USDTIRT");
 }
 
-// ── list ─────────────────────────────────────────────────────────────────────
+// list
 
 #[actix_web::test]
 async fn list_tickers_returns_200() {

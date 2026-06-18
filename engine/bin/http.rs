@@ -92,6 +92,7 @@ async fn main() -> std::io::Result<()> {
         exchange_adapters: Arc::new(adapters),
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher,
+        broadcaster: AppState::new_broadcaster(),
     });
 
     tracing::info!(host = %host, port = %port, "server starting");

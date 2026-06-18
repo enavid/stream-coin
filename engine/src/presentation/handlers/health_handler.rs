@@ -54,6 +54,7 @@ mod tests {
             exchange_adapters: Arc::new(HashMap::new()),
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: None,
+            broadcaster: AppState::new_broadcaster(),
         })
     }
 

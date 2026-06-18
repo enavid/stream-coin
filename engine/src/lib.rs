@@ -1,4 +1,3 @@
-pub mod cli;
 pub mod exchange;
 pub mod infrastructure;
 pub mod kafka;

@@ -33,6 +33,12 @@ pub mod mock {
         should_fail: bool,
     }
 
+    impl Default for MockPublisher {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl MockPublisher {
         pub fn new() -> Self {
             Self {
