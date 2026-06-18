@@ -1,0 +1,15 @@
+[package]
+name = "web"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { workspace = true, features = ["web"] }
+ui_core = { workspace = true }
+gloo-net = { version = "0.6", features = ["websocket"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+futures-util = "0.3"
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]

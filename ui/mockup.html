@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>stream-coin</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #080a0f;
+      --surface:   #0f1117;
+      --surface2:  #161b25;
+      --border:    #1e2535;
+      --border2:   #262f42;
+      --accent:    #3b82f6;
+      --accent-glow: rgba(59,130,246,.18);
+      --green:     #22c55e;
+      --red:       #f43f5e;
+      --yellow:    #f59e0b;
+      --yellow-dim:rgba(245,158,11,.12);
+      --muted:     #3d4d63;
+      --muted2:    #5a6a80;
+      --text:      #cdd8e8;
+      --text-dim:  #7a8fa8;
+      --mono:      'JetBrains Mono','Fira Code','Cascadia Code',monospace;
+      --radius:    12px;
+      --radius-sm: 8px;
+    }
+
+    html, body {
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ═══════ HEADER ═══════ */
+    header {
+      height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -.4px;
+      color: #fff;
+    }
+
+    .logo-mark {
+      width: 30px; height: 30px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, #3b82f6 0%, #6d28d9 100%);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px;
+      box-shadow: 0 0 20px rgba(59,130,246,.3);
+      flex-shrink: 0;
+    }
+
+    .header-end { display: flex; align-items: center; gap: 10px; }
+
+    .ws-pill {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--text-dim);
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      padding: 5px 10px;
+      border-radius: 20px;
+    }
+
+    .ws-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
+      animation: blink 2s ease-in-out infinite;
+    }
+
+    @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+    .server-chip {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted2);
+      display: none;
+    }
+
+    @media (min-width: 600px) {
+      .server-chip { display: inline; }
+    }
+
+    /* ═══════ LAYOUT ═══════ */
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px 16px 40px;
+    }
+
+    .label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--muted2);
+      display: block;
+      margin-bottom: 12px;
+    }
+
+    section { margin-bottom: 28px; }
+
+    /* ═══════ TICKER CARDS ═══════ */
+    .cards-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+      gap: 10px;
+    }
+
+    .tcard {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      position: relative;
+      transition: border-color .2s, box-shadow .2s;
+    }
+
+    .tcard.up   { border-color: var(--green); box-shadow: 0 0 0 1px var(--green), 0 4px 20px rgba(34,197,94,.15); }
+    .tcard.down { border-color: var(--red);   box-shadow: 0 0 0 1px var(--red),   0 4px 20px rgba(244,63,94,.15); }
+
+    .tcard-top {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      margin-bottom: 14px;
+      gap: 6px;
+    }
+
+    .tcard-pair {
+      font-size: 15px;
+      font-weight: 800;
+      font-family: var(--mono);
+      letter-spacing: -.4px;
+      color: #fff;
+    }
+
+    .tcard-exch {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--accent);
+      background: var(--accent-glow);
+      padding: 3px 7px;
+      border-radius: 5px;
+      border: 1px solid rgba(59,130,246,.2);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .tcard-prices { display: flex; flex-direction: column; gap: 7px; margin-bottom: 12px; }
+
+    .price-line { display: flex; justify-content: space-between; align-items: center; }
+    .price-line .lbl { font-size: 11px; color: var(--text-dim); font-weight: 500; }
+    .price-line .val { font-family: var(--mono); font-size: 13px; font-weight: 700; }
+    .val.bid { color: var(--green); }
+    .val.ask { color: var(--red); }
+
+    .tcard-divider { height: 1px; background: var(--border); margin-bottom: 10px; }
+
+    .spread-line { display: flex; justify-content: space-between; align-items: center; }
+    .spread-line .lbl { font-size: 10px; color: var(--muted2); }
+    .spread-badge {
+      font-family: var(--mono); font-size: 11px; font-weight: 600;
+      background: var(--yellow-dim); color: var(--yellow);
+      padding: 2px 7px; border-radius: 4px;
+    }
+
+    .stop-x {
+      position: absolute; top: 10px; right: 10px;
+      width: 20px; height: 20px; border-radius: 50%;
+      background: transparent; border: 1px solid var(--border2);
+      color: var(--muted2); font-size: 9px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity .15s, background .15s, color .15s;
+    }
+    .tcard:hover .stop-x { opacity: 1; }
+    .stop-x:hover { background: rgba(244,63,94,.12); color: var(--red); border-color: var(--red); }
+
+    /* Add ticker card — collapsed + expanded states */
+    .add-card {
+      background: transparent;
+      border: 1.5px dashed var(--border2);
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: border-color .15s, color .15s;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 6px; color: var(--muted2); font-size: 12px;
+      min-height: 132px;
+      padding: 14px;
+    }
+    .add-card:hover { border-color: var(--accent); color: var(--accent); }
+    .add-icon { font-size: 20px; line-height: 1; }
+
+    .add-card.expanded {
+      cursor: default;
+      align-items: stretch;
+      justify-content: flex-start;
+      border-style: solid;
+      border-color: var(--border2);
+      color: var(--text);
+    }
+
+    .add-form { display: none; flex-direction: column; gap: 8px; width: 100%; }
+    .add-card.expanded .add-form { display: flex; }
+    .add-card.expanded .add-trigger { display: none; }
+
+    .finput {
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      color: var(--text);
+      font-size: 12px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .finput:focus { border-color: var(--accent); }
+    .finput::placeholder { color: var(--muted); }
+
+    select.finput {
+      cursor: pointer;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235a6a80'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      padding-right: 26px;
+    }
+
+    .btn-row { display: flex; gap: 6px; }
+
+    .btn-start {
+      flex: 1;
+      background: var(--accent);
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 8px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity .15s;
+    }
+    .btn-start:hover { opacity: .9; }
+
+    .btn-cancel {
+      background: transparent;
+      border: 1px solid var(--border2);
+      border-radius: var(--radius-sm);
+      padding: 8px 12px;
+      color: var(--muted2);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-cancel:hover { color: var(--text); border-color: var(--border2); }
+
+    /* ═══════ LIVE FEED ═══════ */
+    .feed-wrap {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+
+    .feed-scroll {
+      max-height: 480px;
+      overflow-y: auto;
+      overflow-x: auto;
+    }
+    .feed-scroll::-webkit-scrollbar { width: 4px; height: 4px; }
+    .feed-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+    table { width: 100%; border-collapse: collapse; min-width: 480px; }
+
+    thead tr { background: var(--surface2); position: sticky; top: 0; z-index: 1; }
+
+    th {
+      font-size: 10px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase;
+      color: var(--muted2); padding: 10px 14px; text-align: left; white-space: nowrap;
+      border-bottom: 1px solid var(--border);
+    }
+
+    tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
+    tbody tr:hover { background: var(--surface2); }
+    tbody tr:last-child { border-bottom: none; }
+
+    tbody tr.new-row { animation: slideIn .25s ease; }
+    @keyframes slideIn {
+      from { opacity: 0; background: rgba(59,130,246,.08); }
+      to   { opacity: 1; background: transparent; }
+    }
+
+    td { padding: 9px 14px; font-size: 12px; white-space: nowrap; font-family: var(--mono); }
+    .td-time { color: var(--muted2); font-size: 11px; }
+    .td-exch { color: var(--accent); font-weight: 600; }
+    .td-pair { color: var(--text); font-weight: 700; }
+    .td-bid  { color: var(--green); font-weight: 600; }
+    .td-ask  { color: var(--red); font-weight: 600; }
+    .spread-cell { color: var(--yellow); font-size: 11px; }
+
+    /* ═══════ RESPONSIVE ═══════ */
+    @media (max-width: 480px) {
+      .cards-row { grid-template-columns: repeat(2, 1fr); }
+      main { padding: 16px 12px 32px; }
+      th, td { padding: 8px 10px; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-mark">⚡</div>
+    stream-coin
+  </div>
+  <div class="header-end">
+    <span class="server-chip">localhost:8080</span>
+    <div class="ws-pill">
+      <div class="ws-dot"></div>
+      <span>Connected</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <section>
+    <span class="label">Active Tickers</span>
+    <div class="cards-row" id="cards-row">
+
+      <div class="tcard" id="card-tabdeal-USDTIRT">
+        <button class="stop-x" title="Stop">✕</button>
+        <div class="tcard-top">
+          <div class="tcard-pair">USDT/IRT</div>
+          <div class="tcard-exch">tabdeal</div>
+        </div>
+        <div class="tcard-prices">
+          <div class="price-line"><span class="lbl">Bid</span><span class="val bid" id="bid-tabdeal-USDTIRT">92,815</span></div>
+          <div class="price-line"><span class="lbl">Ask</span><span class="val ask" id="ask-tabdeal-USDTIRT">92,936</span></div>
+        </div>
+        <div class="tcard-divider"></div>
+        <div class="spread-line"><span class="lbl">Spread</span><span class="spread-badge" id="sp-tabdeal-USDTIRT">121</span></div>
+      </div>
+
+      <div class="tcard" id="card-nobitex-USDTIRT">
+        <button class="stop-x" title="Stop">✕</button>
+        <div class="tcard-top">
+          <div class="tcard-pair">USDT/IRT</div>
+          <div class="tcard-exch">nobitex</div>
+        </div>
+        <div class="tcard-prices">
+          <div class="price-line"><span class="lbl">Bid</span><span class="val bid" id="bid-nobitex-USDTIRT">92,740</span></div>
+          <div class="price-line"><span class="lbl">Ask</span><span class="val ask" id="ask-nobitex-USDTIRT">92,860</span></div>
+        </div>
+        <div class="tcard-divider"></div>
+        <div class="spread-line"><span class="lbl">Spread</span><span class="spread-badge" id="sp-nobitex-USDTIRT">120</span></div>
+      </div>
+
+      <div class="tcard" id="card-tabdeal-BTCIRT">
+        <button class="stop-x" title="Stop">✕</button>
+        <div class="tcard-top">
+          <div class="tcard-pair">BTC/IRT</div>
+          <div class="tcard-exch">tabdeal</div>
+        </div>
+        <div class="tcard-prices">
+          <div class="price-line"><span class="lbl">Bid</span><span class="val bid" id="bid-tabdeal-BTCIRT">4.218B</span></div>
+          <div class="price-line"><span class="lbl">Ask</span><span class="val ask" id="ask-tabdeal-BTCIRT">4.221B</span></div>
+        </div>
+        <div class="tcard-divider"></div>
+        <div class="spread-line"><span class="lbl">Spread</span><span class="spread-badge" id="sp-tabdeal-BTCIRT">2.5M</span></div>
+      </div>
+
+      <div class="add-card" id="add-card" onclick="expandAdd()">
+        <div class="add-trigger" style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <div class="add-icon">+</div>
+          <div>Add Ticker</div>
+        </div>
+        <div class="add-form" onclick="event.stopPropagation()">
+          <select class="finput">
+            <option>tabdeal</option>
+            <option>nobitex</option>
+          </select>
+          <input class="finput" placeholder="Symbol — e.g. USDTIRT" />
+          <div class="btn-row">
+            <button class="btn-cancel" onclick="collapseAdd()">Cancel</button>
+            <button class="btn-start" onclick="collapseAdd()">Start</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <span class="label">Live Feed</span>
+    <div class="feed-wrap">
+      <div class="feed-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Exchange</th>
+              <th>Pair</th>
+              <th>Bid</th>
+              <th>Ask</th>
+              <th>Spread</th>
+            </tr>
+          </thead>
+          <tbody id="feed-body">
+            <tr>
+              <td class="td-time">10:26:33</td>
+              <td class="td-exch">tabdeal</td>
+              <td class="td-pair">BTC/IRT</td>
+              <td class="td-bid">4.218B</td>
+              <td class="td-ask">4.221B</td>
+              <td class="spread-cell">2.1M</td>
+            </tr>
+            <tr>
+              <td class="td-time">10:26:32</td>
+              <td class="td-exch">nobitex</td>
+              <td class="td-pair">USDT/IRT</td>
+              <td class="td-bid">92,740</td>
+              <td class="td-ask">92,860</td>
+              <td class="spread-cell">120</td>
+            </tr>
+            <tr>
+              <td class="td-time">10:26:31</td>
+              <td class="td-exch">tabdeal</td>
+              <td class="td-pair">USDT/IRT</td>
+              <td class="td-bid">92,815</td>
+              <td class="td-ask">92,936</td>
+              <td class="spread-cell">121</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script>
+function fmt(n) {
+  n = Math.round(n);
+  if (n >= 1e9) return (n / 1e9).toFixed(3) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  return n.toLocaleString('en-US');
+}
+function fmtSpread(n) {
+  n = Math.round(n);
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+function nowStr() { return new Date().toTimeString().slice(0, 8); }
+
+const tickers = {
+  'tabdeal-USDTIRT': { exch: 'tabdeal', pair: 'USDT/IRT', bid: 92815, ask: 92936, step: 50 },
+  'nobitex-USDTIRT': { exch: 'nobitex', pair: 'USDT/IRT', bid: 92740, ask: 92860, step: 50 },
+  'tabdeal-BTCIRT':  { exch: 'tabdeal', pair: 'BTC/IRT',  bid: 4218500000, ask: 4221000000, step: 500000 },
+};
+
+function addFeedRow(exch, pair, bid, ask) {
+  const tbody = document.getElementById('feed-body');
+  const spread = ask - bid;
+  const tr = document.createElement('tr');
+  tr.className = 'new-row';
+  tr.innerHTML = `
+    <td class="td-time">${nowStr()}</td>
+    <td class="td-exch">${exch}</td>
+    <td class="td-pair">${pair}</td>
+    <td class="td-bid">${fmt(bid)}</td>
+    <td class="td-ask">${fmt(ask)}</td>
+    <td class="spread-cell">${fmtSpread(spread)}</td>
+  `;
+  tbody.insertBefore(tr, tbody.firstChild);
+  if (tbody.children.length > 20) tbody.lastChild.remove();
+}
+
+function flash(id, dir) {
+  const card = document.getElementById('card-' + id);
+  if (!card) return;
+  card.classList.remove('up', 'down');
+  void card.offsetWidth;
+  card.classList.add(dir);
+  setTimeout(() => card.classList.remove('up', 'down'), 600);
+}
+
+setInterval(() => {
+  const keys = Object.keys(tickers);
+  const key = keys[Math.floor(Math.random() * keys.length)];
+  const t = tickers[key];
+  const delta = (Math.random() - 0.5) * t.step * 2;
+
+  t.bid = Math.round(Math.max(0, t.bid + delta));
+  t.ask = Math.round(t.bid + Math.abs(delta * 0.3) + t.step * 2);
+
+  document.getElementById('bid-' + key).textContent = fmt(t.bid);
+  document.getElementById('ask-' + key).textContent = fmt(t.ask);
+  document.getElementById('sp-' + key).textContent = fmtSpread(t.ask - t.bid);
+
+  flash(key, delta > 0 ? 'up' : 'down');
+  addFeedRow(t.exch, t.pair, t.bid, t.ask);
+}, 900);
+
+function expandAdd() {
+  document.getElementById('add-card').classList.add('expanded');
+}
+function collapseAdd() {
+  document.getElementById('add-card').classList.remove('expanded');
+}
+</script>
+</body>
+</html>
