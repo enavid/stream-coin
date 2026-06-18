@@ -171,27 +171,28 @@ Stream-Coin currently integrates with the following Iranian cryptocurrency excha
 
 ## 🏗️ Project Structure
 
+Three independent, separately buildable projects in one Cargo workspace —
+each can be split into its own repository later with no code changes:
+
 ```
 stream-coin/
-├── src/
-│   ├── api/              # API layer (Actix-web routes & handlers)
-│   ├── application/      # Application services & use cases
-│   ├── domain/           # Domain models & business logic
-│   ├── infrastructure/   # External integrations (Kafka, Redis, DB)
-│   ├── exchanges/        # Exchange-specific implementations
-│   └── main.rs           # Application entry point
-├── migrations/           # Database migrations
-├── docker-compose.yml    # Infrastructure setup
-├── Cargo.toml           # Rust dependencies
-└── README.md
+├── Cargo.toml            # workspace manifest: members = ["engine", "cli"]
+├── engine/                # the arbitrage engine server (binary: stream-coin)
+│   ├── bin/http.rs
+│   └── src/
+│       ├── exchange/      # ExchangeAdapter implementations (Tabdeal, ...)
+│       ├── price/         # Price domain entity
+│       ├── ticker/        # TickerRepository port
+│       ├── kafka/         # MessagePublisher port + Kafka producer
+│       ├── infrastructure/# Redis cache, WebSocket client trait
+│       └── presentation/  # actix-web handlers, routers, DTOs, WS feed
+├── cli/                   # the `sc` control-plane CLI, no engine dependency
+│   └── src/               # auth, client, config, ticker subcommands
+├── ui/                    # separate Cargo workspace: Dioxus SPA (web/mobile)
+└── docker-compose.yml     # local infra: Redis, Kafka, Flink, proxy
 ```
 
-### Clean Architecture Layers
-
-1. **Domain Layer**: Core business logic and entities
-2. **Application Layer**: Use cases and application-specific business rules
-3. **Infrastructure Layer**: External concerns (database, message brokers, APIs)
-4. **API Layer**: HTTP interface and presentation logic
+See `ARCHITECTURE.md` for the full system diagram and data flow.
 
 ---
 
