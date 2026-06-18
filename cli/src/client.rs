@@ -1,7 +1,7 @@
 use reqwest::Client;
 use serde_json::Value;
 
-use crate::cli::config::Config;
+use crate::config::Config;
 
 pub struct ApiClient {
     inner: Client,
@@ -80,7 +80,7 @@ mod tests {
     use super::*;
 
     fn make_client(url: &str) -> ApiClient {
-        let mut config = crate::cli::config::Config::default();
+        let mut config = crate::config::Config::default();
         config.set_url(url);
         ApiClient::new(&config)
     }

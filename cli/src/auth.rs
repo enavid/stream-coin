@@ -1,6 +1,6 @@
 use colored::Colorize;
 
-use crate::cli::config::Config;
+use crate::config::Config;
 
 pub fn handle_login(config: &mut Config) -> Result<(), String> {
     let url = format!("{}/swagger-ui/", config.server.url);

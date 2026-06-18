@@ -1,6 +1,6 @@
 use colored::Colorize;
 
-use crate::cli::client::ApiClient;
+use crate::client::ApiClient;
 
 pub async fn handle_start(client: &ApiClient, exchange: &str, symbol: &str) -> Result<(), String> {
     let resp = client.ticker_start(exchange, symbol).await?;

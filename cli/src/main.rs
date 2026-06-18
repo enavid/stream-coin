@@ -1,10 +1,13 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 
-use stream_coin::cli::auth;
-use stream_coin::cli::client::ApiClient;
-use stream_coin::cli::config::Config;
-use stream_coin::cli::ticker;
+mod auth;
+mod client;
+mod config;
+mod ticker;
+
+use client::ApiClient;
+use config::Config;
 
 #[derive(Parser)]
 #[command(
