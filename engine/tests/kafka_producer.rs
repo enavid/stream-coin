@@ -35,6 +35,7 @@ fn build_consumer(group_id: &str) -> StreamConsumer {
 }
 
 #[tokio::test]
+#[ignore = "requires a live Kafka broker on localhost:9092 (see compose/kafka.yml); run with `cargo test --tests -- --ignored`"]
 async fn kafka_producer_publishes_price_without_error() {
     let producer = KafkaProducer::new(BROKER).expect("producer creation failed");
     let price = sample_price();
@@ -48,6 +49,7 @@ async fn kafka_producer_publishes_price_without_error() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live Kafka broker on localhost:9092 (see compose/kafka.yml); run with `cargo test --tests -- --ignored`"]
 async fn kafka_producer_published_message_is_consumable() {
     let unique_group = format!(
         "test-group-{}",

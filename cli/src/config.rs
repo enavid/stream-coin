@@ -76,6 +76,11 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // SC_CONFIG_PATH is process-global; cargo runs tests in parallel threads
+    // within the same process, so tests that set/read it must not interleave.
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
 
     #[test]
     fn config_default_server_url_is_localhost_8080() {
@@ -142,6 +147,7 @@ token = "abc123"
 
     #[test]
     fn config_path_uses_sc_config_path_env_var() {
+        let _guard = ENV_GUARD.lock().unwrap();
         std::env::set_var("SC_CONFIG_PATH", "/tmp/test-sc-config.toml");
         let path = Config::config_path();
         assert_eq!(path, PathBuf::from("/tmp/test-sc-config.toml"));
@@ -150,6 +156,7 @@ token = "abc123"
 
     #[test]
     fn config_path_contains_sc_directory_by_default() {
+        let _guard = ENV_GUARD.lock().unwrap();
         std::env::remove_var("SC_CONFIG_PATH");
         let path = Config::config_path();
         let path_str = path.to_string_lossy();
@@ -159,6 +166,7 @@ token = "abc123"
 
     #[test]
     fn config_save_and_load_roundtrip() {
+        let _guard = ENV_GUARD.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         std::env::set_var("SC_CONFIG_PATH", config_path.to_str().unwrap());

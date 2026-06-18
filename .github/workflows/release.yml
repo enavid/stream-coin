@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install native build dependencies (rdkafka cmake-build)
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libcurl4-openssl-dev
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -142,6 +145,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
+      - name: Install native build dependencies (rdkafka cmake-build, Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libcurl4-openssl-dev
+
+      - name: Install native build dependencies (rdkafka cmake-build, macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install cmake
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -200,6 +211,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install native build dependencies (rdkafka cmake-build)
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libcurl4-openssl-dev
+
       - name: Install cargo-deb
         run: cargo install cargo-deb
 
@@ -244,6 +258,9 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build dependencies (rdkafka cmake-build)
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libcurl4-openssl-dev
 
       - name: Install cargo-generate-rpm
         run: cargo install cargo-generate-rpm
@@ -342,6 +359,9 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build dependencies (rdkafka cmake-build)
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libcurl4-openssl-dev
 
       - name: Cache Cargo
         uses: actions/cache@v4

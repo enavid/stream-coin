@@ -24,7 +24,13 @@ test:
 test-integration:
     cargo test --tests
 
-# Full quality cycle: fmt → lint → unit tests → integration tests
+# Build the engine in a clean container with no host-installed system libs.
+# Catches missing system deps (e.g. rdkafka's cmake/curl headers) that a
+# long-lived dev machine already has installed and CI runners don't.
+check-clean-env:
+    docker build --target builder -t stream-coin-check .
+
+# Full quality cycle: fmt → lint → unit tests → integration tests → clean-env build
 check:
     @echo "→ Formatting..."
     cargo fmt
@@ -34,6 +40,8 @@ check:
     cargo test --lib --bins
     @echo "→ Testing (integration)..."
     cargo test --tests
+    @echo "→ Clean-environment build (mirrors CI runner)..."
+    just check-clean-env
     @echo "✓ All checks passed"
 
 # Build debug
