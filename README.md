@@ -1,280 +1,103 @@
-# Stream-Coin
+# stream-coin
 
-> Real-time cryptocurrency arbitrage detection system across multiple Iranian exchanges
+> Real-time arbitrage engine for Iranian cryptocurrency exchanges.
 
-[![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Kafka](https://img.shields.io/badge/Apache%20Kafka-000?style=for-the-badge&logo=apachekafka)](https://kafka.apache.org/)
-[![Redis](https://img.shields.io/badge/redis-%23DD0031.svg?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io/)
-[![MySQL](https://img.shields.io/badge/mysql-%2300f.svg?style=for-the-badge&logo=mysql&logoColor=white)](https://www.mysql.com/)
+[![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Actix Web](https://img.shields.io/badge/actix--web-000?style=flat-square&logo=rust&logoColor=white)](https://actix.rs/)
+[![Kafka](https://img.shields.io/badge/Apache%20Kafka-000?style=flat-square&logo=apachekafka)](https://kafka.apache.org/)
+[![Redis](https://img.shields.io/badge/redis-%23DD0031.svg?style=flat-square&logo=redis&logoColor=white)](https://redis.io/)
+[![Dioxus](https://img.shields.io/badge/dioxus-0.7-blue?style=flat-square)](https://dioxuslabs.com/)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue?style=flat-square)](LICENSE)
 
-Stream-Coin is a high-performance, asynchronous cryptocurrency market data aggregator built with Rust. It connects to multiple Iranian cryptocurrency exchanges, streams real-time price data into Kafka, and enables instant arbitrage opportunity detection through stream processing.
+Three independently buildable projects in one repository: an async Rust
+engine that streams live prices from exchange WebSockets into Kafka and a
+real-time WS feed, a CLI (`sc`) to control it, and a Dioxus web UI to watch
+it.
 
----
+## How it works
 
-## Overview
+Each exchange adapter parses its own WebSocket stream into a common `Price`
+type. Every tick is published to Kafka (for downstream arbitrage detection)
+and broadcast over WebSocket to connected clients at the same time. The CLI
+and UI both talk to the same REST control plane to start/stop/list tickers.
 
-Stream-Coin solves the challenge of identifying price discrepancies across multiple cryptocurrency exchanges in real-time. By leveraging event streaming and async processing, the system can detect arbitrage opportunities within milliseconds.
-
-### Key Features
-
-- **Asynchronous Architecture**: Built on Tokio for non-blocking, concurrent operations
-- **Multi-Exchange Support**: Integrates with 8+ Iranian cryptocurrency exchanges
-- **Real-time Streaming**: Kafka-based event streaming for low-latency data processing
-- **Persistent Storage**: MySQL database with SeaORM for reliable data persistence
-- **High-Performance Caching**: Redis integration for fast data access
-- **Clean Architecture**: Domain-driven design with clear separation of concerns
-- **API-First Design**: RESTful API with Actix-web and comprehensive Swagger documentation
-
----
-
-## Architecture
-
-```
-┌─────────────────┐
-│   Exchanges     │
-│  (WebSocket/    │
-│   REST APIs)    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Stream-Coin    │
-│   (Rust App)    │
-│                 │
-│  ┌───────────┐  │
-│  │  Actix    │  │ ◄── REST API
-│  │   Web     │  │
-│  └───────────┘  │
-│                 │
-│  ┌───────────┐  │
-│  │  Tokio    │  │ ◄── Async Runtime
-│  │  Runtime  │  │
-│  └───────────┘  │
-└────────┬────────┘
-         │
-         ├──────────────┐
-         ▼              ▼
-┌─────────────┐  ┌─────────────┐
-│   Kafka     │  │   Redis     │
-│  (Streams)  │  │  (Cache)    │
-└─────────────┘  └─────────────┘
-         │
-         ▼
-┌─────────────────┐
-│     MySQL       │
-│  (SeaORM)       │
-└─────────────────┘
-```
-
-### Technology Stack
-
-| Component | Technology |
-|-----------|-----------|
-| **Language** | Rust 🦀 |
-| **Async Runtime** | Tokio |
-| **Web Framework** | Actix-web |
-| **Message Broker** | Apache Kafka |
-| **Cache** | Redis |
-| **Database** | MySQL |
-| **ORM** | SeaORM |
-| **Container Runtime** | Docker / Nerdctl |
-
----
-
-## Quick Start
-
-### Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/stream-coin.git
-   cd stream-coin
-   ```
-
-2. **Set up infrastructure**
-   
-   Using Docker:
-   ```bash
-   sudo docker compose up -d
-   ```
-   
-   Using Nerdctl (containerd):
-   ```bash
-   sudo nerdctl compose -f ./docker-compose.yml up -d
-   ```
-
-3. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
-
-4. **Run database migrations**
-   ```bash
-   cargo run --bin migrate
-   ```
-
-5. **Start the application**
-   ```bash
-   cargo run --bin stream-coin
-   ```
-
----
-
-## Usage
-
-### API Documentation
-
-Once the application is running, access the interactive API documentation:
-
-- **Swagger UI**: http://localhost:8080/swagger-ui/
-
-### Management Interfaces
-
-- **Kafka UI**: http://localhost:8083/ui/
-- **Redis Insight**: http://localhost:8082/
-
-### Debugging
-
-Enable debug logging in your code:
-
-```rust
-use log::debug;
-
-debug!("Payload: {}", payload);
-```
-
-Run with `RUST_LOG` environment variable:
-```bash
-RUST_LOG=debug cargo run --bin stream-coin
-```
-
----
-
-## 🔌 Supported Exchanges
-
-Stream-Coin currently integrates with the following Iranian cryptocurrency exchanges:
-
-| Exchange | API Documentation | Status |
-|----------|------------------|--------|
-| **Wallex** | [docs](https://wallex.ir/api-document) | ✅ Active |
-| **Bitpin** | [docs](https://docs.bitpin.ir/v1/docs/Introduction/bitpin-api-documentation) | ✅ Active |
-| **Aban Tether** | [docs](https://docs.abantether.com/#buy-orders-list) | ✅ Active |
-| **Ramzinex** | [docs](https://docs.ramzinex.com/#tag/()/operation/currenciesId) | ✅ Active |
-| **Exir** | [docs](https://apidocs.exir.io/#introduction) | ✅ Active |
-| **Nobitex** | [docs](https://apidocs.nobitex.ir/#0f4b9b52e8) | ✅ Active |
-| **Tetherland** | [docs](https://docs.tetherland.com/docs/tetherland/15fd2beb3a6d3-get-user-info) | ✅ Active |
-| **Tabdeal** | [docs](https://docs.tabdeal.org/#00d56275ee) | ✅ Active |
-| **Bit24** | [docs](https://docs.bit24.cash/#api-24) | ✅ Active |
-
----
-
-## 🏗️ Project Structure
-
-Three independent, separately buildable projects in one Cargo workspace —
-each can be split into its own repository later with no code changes:
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data-flow diagram.
 
 ```
 stream-coin/
-├── Cargo.toml            # workspace manifest: members = ["engine", "cli"]
-├── engine/                # the arbitrage engine server (binary: stream-coin)
-│   ├── bin/http.rs
-│   └── src/
-│       ├── exchange/      # ExchangeAdapter implementations (Tabdeal, ...)
-│       ├── price/         # Price domain entity
-│       ├── ticker/        # TickerRepository port
-│       ├── kafka/         # MessagePublisher port + Kafka producer
-│       ├── infrastructure/# Redis cache, WebSocket client trait
-│       └── presentation/  # actix-web handlers, routers, DTOs, WS feed
-├── cli/                   # the `sc` control-plane CLI, no engine dependency
-│   └── src/               # auth, client, config, ticker subcommands
-├── ui/                    # separate Cargo workspace: Dioxus SPA (web/mobile)
-└── docker-compose.yml     # local infra: Redis, Kafka, Flink, proxy
+├── engine/   # the server — actix-web, exchange adapters, Kafka, Redis, WS feed
+├── cli/      # `sc` — controls the engine over REST, zero dependency on engine
+└── ui/       # Dioxus SPA — shared core + a web launcher, consumes the WS feed
 ```
 
-See `ARCHITECTURE.md` for the full system diagram and data flow.
+## Supported exchanges
 
----
+| Exchange | Status |
+|---|---|
+| Tabdeal | ✅ |
 
-## 🧪 Development
+New exchanges are added by implementing one trait (`ExchangeAdapter`) —
+nothing else in the engine changes.
 
-### Running Tests
+## Quick start
+
+**Infra** (Redis, Kafka, Flink, Kafka UI):
 
 ```bash
-# Run all tests
-cargo test
-
-# Run specific test suite
-cargo test --test integration_tests
-
-# Run with output
-cargo test -- --nocapture
+cp .env.example .env   # fill in passwords
+docker compose up -d
 ```
 
-### Code Quality
+**Engine:**
 
 ```bash
-# Format code
-cargo fmt
-
-# Run linter
-cargo clippy
-
-# Check for issues
-cargo check
+just run               # cargo run --bin stream-coin
 ```
 
-### Building for Production
+**CLI:**
 
 ```bash
-# Optimized release build
-cargo build --release
-
-# Run release binary
-./target/release/stream-coin
+just sc ticker start --exchange tabdeal --pair USDT/IRT
+just sc ticker list
 ```
 
----
+**UI** (dev server with hot reload):
+
+```bash
+just ui-dev
+```
+
+## Development
+
+This project uses [`just`](https://github.com/casey/just) as its task runner.
+
+```bash
+just check    # fmt + clippy -D warnings + unit tests + integration tests + clean-room docker build
+just test     # unit tests only
+just sc --help
+```
+
+The `ui/` workspace has its own test/lint targets: `cd ui && just ui-test` /
+`ui-lint`.
+
+## Releases
+
+Tagged pushes (`vX.Y.Z`) trigger a CI pipeline that builds and publishes,
+independently: the engine (`stream-coin`, tar/deb/rpm/msi/AppImage + Docker
+image), the CLI (`sc`, tar/deb/rpm), and the web UI (static bundle) — see
+[Releases](../../releases).
 
 ## Roadmap
 
-### Current Tasks
-
-- [ ] Update readme
-- [ ] Create output variable standardization
-- [ ] Fix Redis Insight configuration
-- [ ] Add Postman API collection
-- [ ] Complete Swagger documentation for all endpoints
-
-### Future Enhancements
-
-- [ ] WebSocket support for real-time client updates
-- [ ] Machine learning-based opportunity prediction
-- [ ] Multi-region deployment support
-
----
+Outstanding standardization work is tracked in [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 
-Contributions are welcome! Please follow these guidelines:
-
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Code Style
-
-- Follow Rust naming conventions
-- Write comprehensive tests
-- Document public APIs
-- Keep functions focused and small
-- Use meaningful variable names
-
----
+3. `just check` before opening a PR
+4. Open a Pull Request
 
 ## License
 
-This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) file for details.
-
+GPL-3.0 — see [LICENSE](LICENSE).
