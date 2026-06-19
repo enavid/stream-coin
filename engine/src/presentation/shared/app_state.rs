@@ -39,6 +39,8 @@ pub struct AppState {
     pub publisher: Option<Arc<dyn MessagePublisher>>,
     /// Broadcast channel that fans out every serialized price tick to all WS sessions.
     pub broadcaster: broadcast::Sender<String>,
+    /// HS256 secret for JWT validation. `None` = auth disabled (development mode).
+    pub jwt_secret: Option<Arc<String>>,
 }
 
 impl AppState {

@@ -291,6 +291,7 @@ mod tests {
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
         })
     }
 
@@ -306,6 +307,7 @@ mod tests {
             clients: Arc::new(Mutex::new(map)),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
         })
     }
 
@@ -427,6 +429,7 @@ mod tests {
             clients: Arc::clone(&clients),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
         });
         let app = test::init_service(
             App::new()
@@ -525,6 +528,7 @@ mod tests {
             clients: Arc::new(Mutex::new(map)),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
         });
         let app = test::init_service(
             App::new()
@@ -570,6 +574,7 @@ mod tests {
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: Some(failing_publisher),
             broadcaster,
+            jwt_secret: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -617,6 +622,7 @@ mod tests {
             clients: Arc::clone(&clients),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -686,6 +692,7 @@ mod tests {
             clients: Arc::clone(&clients),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();

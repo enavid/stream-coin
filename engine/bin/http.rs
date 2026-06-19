@@ -134,6 +134,17 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    let jwt_secret = match env::var("JWT_SECRET") {
+        Ok(s) if !s.is_empty() => {
+            tracing::info!("JWT auth enabled");
+            Some(Arc::new(s))
+        }
+        _ => {
+            tracing::warn!("JWT_SECRET not set — running without authentication");
+            None
+        }
+    };
+
     let app_state = web::Data::new(AppState {
         redis: redis_conn,
         exchange_adapters: Arc::new(RwLock::new(adapters)),
@@ -142,6 +153,7 @@ async fn main() -> std::io::Result<()> {
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher,
         broadcaster: AppState::new_broadcaster(),
+        jwt_secret,
     });
 
     tracing::info!(host = %host, port = %port, "server starting");

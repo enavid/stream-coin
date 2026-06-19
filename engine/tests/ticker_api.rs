@@ -10,6 +10,7 @@ use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
+use stream_coin::presentation::middlewares::jwt::mint_token;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
 use stream_coin::price::entity::MarketType;
@@ -23,6 +24,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
+        jwt_secret: None,
     })
 }
 
@@ -37,6 +39,7 @@ fn build_state_with_hitobit() -> actix_web::web::Data<AppState> {
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
+        jwt_secret: None,
     })
 }
 
@@ -52,6 +55,7 @@ fn build_state_with_both_adapters() -> actix_web::web::Data<AppState> {
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
+        jwt_secret: None,
     })
 }
 
@@ -67,6 +71,7 @@ fn build_state_with_ticker(key: &str) -> actix_web::web::Data<AppState> {
         clients: Arc::new(Mutex::new(map)),
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
+        jwt_secret: None,
     })
 }
 
@@ -703,6 +708,7 @@ async fn start_ticker_for_disabled_exchange_returns_400() {
                 clients: Arc::new(Mutex::new(HashMap::new())),
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
+                jwt_secret: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -753,6 +759,7 @@ async fn disable_exchange_aborts_running_tickers() {
                 clients: Arc::clone(&clients),
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
+                jwt_secret: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -799,6 +806,7 @@ async fn enable_exchange_then_start_ticker_returns_200() {
                 clients: Arc::new(Mutex::new(HashMap::new())),
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
+                jwt_secret: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -860,6 +868,7 @@ async fn list_pairs_returns_only_active_pairs() {
                 clients: Arc::new(Mutex::new(HashMap::new())),
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
+                jwt_secret: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -911,6 +920,7 @@ async fn list_pairs_filters_by_market_type() {
                 clients: Arc::new(Mutex::new(HashMap::new())),
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
+                jwt_secret: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -927,4 +937,70 @@ async fn list_pairs_filters_by_market_type() {
         "spot filter must return only spot pairs, got {pairs:?}"
     );
     assert_eq!(pairs[0]["market_type"], "spot");
+}
+
+#[actix_web::test]
+async fn start_ticker_without_token_returns_401() {
+    let secret = "test_jwt_secret";
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(actix_web::web::Data::new(AppState {
+                redis: None,
+                exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+                exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+                adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                publisher: None,
+                broadcaster: AppState::new_broadcaster(),
+                jwt_secret: Some(Arc::new(secret.to_string())),
+            }))
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"tabdeal","symbol":"USDT/IRT"}"#)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 401, "missing token must return 401");
+}
+
+#[actix_web::test]
+async fn start_ticker_with_valid_token_returns_200() {
+    let secret = "test_jwt_secret";
+    let token = mint_token("test_user", secret, 3600);
+
+    let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+    adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter::default()));
+
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(actix_web::web::Data::new(AppState {
+                redis: None,
+                exchange_adapters: Arc::new(RwLock::new(adapters)),
+                exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+                adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                publisher: None,
+                broadcaster: AppState::new_broadcaster(),
+                jwt_secret: Some(Arc::new(secret.to_string())),
+            }))
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_payload(r#"{"exchange":"tabdeal","symbol":"USDT/IRT"}"#)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200, "valid token must allow the request");
 }

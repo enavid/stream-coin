@@ -25,6 +25,7 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
 rdkafka = { version = "0.37", features = ["cmake-build"] }
 actix-ws = "0.3"
+jsonwebtoken = "9"
 
 [dev-dependencies]
 actix-test = "0.1"

@@ -155,6 +155,7 @@ mod tests {
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
         })
     }
 
