@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::exchange::entity::ExchangeId;
 use crate::price::entity::TradingPair;
 
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct SymbolRequest {
-    pub exchange: String,
+    #[schema(value_type = String, example = "tabdeal")]
+    pub exchange: ExchangeId,
     #[schema(value_type = String, example = "USDT/IRT")]
     pub symbol: TradingPair,
 }

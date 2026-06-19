@@ -3,15 +3,30 @@ use serde::Serialize;
 use std::fmt;
 use utoipa::ToSchema;
 
+#[derive(Debug, Serialize, ToSchema, PartialEq)]
+pub struct FieldError {
+    pub field: String,
+    pub message: String,
+}
+
+impl FieldError {
+    pub fn new(field: &str, message: &str) -> Self {
+        FieldError {
+            field: field.to_string(),
+            message: message.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ApiError {
     success: bool,
     message: String,
-    errors: Vec<String>,
+    errors: Vec<FieldError>,
 }
 
 impl ApiError {
-    pub fn new(message: &str, errors: Vec<String>) -> Self {
+    pub fn new(message: &str, errors: Vec<FieldError>) -> Self {
         ApiError {
             success: false,
             message: message.to_string(),
@@ -26,7 +41,12 @@ impl ApiError {
 
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.errors.join(", "))
+        let msgs: Vec<String> = self
+            .errors
+            .iter()
+            .map(|e| format!("{}: {}", e.field, e.message))
+            .collect();
+        write!(f, "{}", msgs.join(", "))
     }
 }
 
@@ -48,6 +68,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn field_error_serializes_with_both_field_and_message_keys() {
+        let fe = FieldError::new("symbol", "must be BASE/QUOTE format");
+        let json = serde_json::to_value(&fe).unwrap();
+        assert_eq!(json["field"], "symbol");
+        assert_eq!(json["message"], "must be BASE/QUOTE format");
+    }
+
+    #[test]
+    fn api_error_errors_is_array_of_objects() {
+        let err = ApiError::new(
+            "Validation failed",
+            vec![FieldError::new("symbol", "must be BASE/QUOTE format")],
+        );
+        let json = serde_json::to_value(&err).unwrap();
+        let errors = json["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].is_object(),
+            "each error must be an object with field and message keys"
+        );
+        assert_eq!(errors[0]["field"], "symbol");
+    }
+
+    #[test]
+    fn api_error_success_is_always_false() {
+        let err = ApiError::new("anything", vec![]);
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["success"], false);
+    }
+
+    #[test]
     fn api_error_success_field_is_false() {
         let err = ApiError::new("test", vec![]);
         let json = serde_json::to_value(&err).unwrap();
@@ -65,9 +116,15 @@ mod tests {
     fn api_error_display_joins_errors_with_comma() {
         let err = ApiError::new(
             "msg",
-            vec!["field required".to_string(), "invalid value".to_string()],
+            vec![
+                FieldError::new("name", "field required"),
+                FieldError::new("value", "invalid value"),
+            ],
         );
-        assert_eq!(err.to_string(), "field required, invalid value");
+        assert_eq!(
+            err.to_string(),
+            "name: field required, value: invalid value"
+        );
     }
 
     #[test]

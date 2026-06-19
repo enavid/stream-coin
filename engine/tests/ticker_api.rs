@@ -456,3 +456,131 @@ async fn list_tickers_returns_canonical_pair_not_exchange_format() {
         "list must return canonical pair, not exchange-specific symbol"
     );
 }
+
+// --- field-level error name tests (1c) ---
+
+#[actix_web::test]
+async fn start_ticker_wrong_symbol_format_errors_names_symbol_field() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"tabdeal","symbol":"USDTIRT"}"#)
+        .to_request();
+
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["errors"][0]["field"], "symbol");
+}
+
+#[actix_web::test]
+async fn start_ticker_unsupported_exchange_errors_names_exchange_field() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"nobitex","symbol":"USDT/IRT"}"#)
+        .to_request();
+
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(
+        body["errors"][0]["field"], "exchange",
+        "unsupported exchange error must name the exchange field"
+    );
+}
+
+#[actix_web::test]
+async fn start_ticker_wrong_type_for_symbol_errors_names_symbol_field() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"symbol":42,"exchange":"tabdeal"}"#)
+        .to_request();
+
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["errors"][0]["field"], "symbol");
+}
+
+#[actix_web::test]
+async fn start_ticker_missing_symbol_field_errors_names_symbol_field() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"tabdeal"}"#)
+        .to_request();
+
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["errors"][0]["field"], "symbol");
+}
+
+#[actix_web::test]
+async fn start_ticker_missing_exchange_field_errors_names_exchange_field() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"symbol":"USDT/IRT"}"#)
+        .to_request();
+
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["errors"][0]["field"], "exchange");
+}
+
+#[actix_web::test]
+async fn start_ticker_empty_exchange_errors_names_exchange_field() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"","symbol":"USDT/IRT"}"#)
+        .to_request();
+
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(
+        body["errors"][0]["field"], "exchange",
+        "empty exchange must produce a field error naming 'exchange'"
+    );
+}

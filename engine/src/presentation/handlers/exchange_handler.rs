@@ -6,7 +6,8 @@ use tokio::sync::mpsc;
 use crate::presentation::dto::ticker::{
     ActiveTicker, SymbolRequest, TickerList, TickerStarted, TickerStopped,
 };
-use crate::presentation::responses::{success_response, ApiError};
+use crate::presentation::extractors::ValidatedJson;
+use crate::presentation::responses::{success_response, ApiError, FieldError};
 use crate::presentation::shared::app_state::AppState;
 
 #[utoipa::path(
@@ -24,16 +25,20 @@ use crate::presentation::shared::app_state::AppState;
 /// running, 400 if the exchange is not registered.
 pub async fn start_kline_symbol_ticker(
     state: web::Data<AppState>,
-    request: web::Json<SymbolRequest>,
+    request: ValidatedJson<SymbolRequest>,
 ) -> impl Responder {
-    let adapter = match state.exchange_adapters.get(&request.exchange) {
+    let adapter = match state.exchange_adapters.get(request.exchange.as_str()) {
         Some(a) => Arc::clone(a),
         None => {
             tracing::warn!(
                 exchange = %request.exchange,
                 "ticker request rejected: exchange not supported"
             );
-            return ApiError::new("Exchange not supported", vec![]).to_response();
+            return ApiError::new(
+                "Exchange not supported",
+                vec![FieldError::new("exchange", "unsupported exchange")],
+            )
+            .to_response();
         }
     };
 
@@ -116,7 +121,7 @@ pub async fn start_kline_symbol_ticker(
     success_response(
         "Ticker started",
         TickerStarted {
-            exchange: request.exchange.clone(),
+            exchange: request.exchange.to_string(),
             pair: request.symbol.to_string(),
         },
     )
@@ -137,7 +142,7 @@ pub async fn start_kline_symbol_ticker(
 /// with the given exchange and symbol is currently running.
 pub async fn stop_kline_symbol_ticker(
     state: web::Data<AppState>,
-    request: web::Json<SymbolRequest>,
+    request: ValidatedJson<SymbolRequest>,
 ) -> impl Responder {
     let key = format!("{}:{}", request.exchange, request.symbol);
     let mut clients = state.clients.lock().await;
@@ -153,7 +158,7 @@ pub async fn stop_kline_symbol_ticker(
             success_response(
                 "Ticker stopped",
                 TickerStopped {
-                    exchange: request.exchange.clone(),
+                    exchange: request.exchange.to_string(),
                     pair: request.symbol.to_string(),
                 },
             )
@@ -308,7 +313,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/ticker")
             .set_json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
@@ -327,7 +332,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/ticker")
             .set_json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
@@ -349,7 +354,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/stop")
             .set_json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
@@ -368,7 +373,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/stop")
             .set_json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
@@ -389,7 +394,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/stop")
             .set_json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
@@ -421,7 +426,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/stop")
             .set_json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
@@ -441,7 +446,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/stop")
             .set_json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
@@ -555,8 +560,8 @@ mod tests {
         let dummy_req = test::TestRequest::default().to_http_request();
         start_kline_symbol_ticker(
             state,
-            web::Json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+            ValidatedJson(SymbolRequest {
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             }),
         )
@@ -602,15 +607,15 @@ mod tests {
         let (r1, r2) = tokio::join!(
             start_kline_symbol_ticker(
                 state.clone(),
-                web::Json(SymbolRequest {
-                    exchange: "tabdeal".to_string(),
+                ValidatedJson(SymbolRequest {
+                    exchange: ExchangeId::new("tabdeal"),
                     symbol: TradingPair::new("USDT", "IRT"),
                 }),
             ),
             start_kline_symbol_ticker(
                 state.clone(),
-                web::Json(SymbolRequest {
-                    exchange: "tabdeal".to_string(),
+                ValidatedJson(SymbolRequest {
+                    exchange: ExchangeId::new("tabdeal"),
                     symbol: TradingPair::new("USDT", "IRT"),
                 }),
             ),
@@ -668,8 +673,8 @@ mod tests {
 
         let stop_status = stop_kline_symbol_ticker(
             state.clone(),
-            web::Json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+            ValidatedJson(SymbolRequest {
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             }),
         )
@@ -680,8 +685,8 @@ mod tests {
 
         let start_status = start_kline_symbol_ticker(
             state.clone(),
-            web::Json(SymbolRequest {
-                exchange: "tabdeal".to_string(),
+            ValidatedJson(SymbolRequest {
+                exchange: ExchangeId::new("tabdeal"),
                 symbol: TradingPair::new("USDT", "IRT"),
             }),
         )

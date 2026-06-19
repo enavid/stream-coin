@@ -1,6 +1,7 @@
 use std::fmt;
 
-use serde::Serializer;
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serializer};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExchangeId(String);
@@ -11,9 +12,23 @@ impl serde::Serialize for ExchangeId {
     }
 }
 
+impl<'de> Deserialize<'de> for ExchangeId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        if s.trim().is_empty() {
+            return Err(de::Error::custom("exchange name cannot be empty"));
+        }
+        Ok(ExchangeId::new(&s))
+    }
+}
+
 impl ExchangeId {
     pub fn new(name: &str) -> Self {
         Self(name.to_lowercase())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     pub fn try_new(name: &str) -> Result<Self, &'static str> {
@@ -51,5 +66,29 @@ mod tests {
     fn exchange_id_rejects_empty_name() {
         let result = ExchangeId::try_new("");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn exchange_id_deserialize_accepts_lowercase_name() {
+        let id: ExchangeId = serde_json::from_str(r#""tabdeal""#).unwrap();
+        assert_eq!(id.to_string(), "tabdeal");
+    }
+
+    #[test]
+    fn exchange_id_deserialize_accepts_uppercase_and_normalizes() {
+        let id: ExchangeId = serde_json::from_str(r#""TABDEAL""#).unwrap();
+        assert_eq!(id.to_string(), "tabdeal");
+    }
+
+    #[test]
+    fn exchange_id_deserialize_rejects_empty_string() {
+        let result: Result<ExchangeId, _> = serde_json::from_str(r#""""#);
+        assert!(result.is_err(), "empty string must be rejected");
+    }
+
+    #[test]
+    fn exchange_id_deserialize_rejects_whitespace_only() {
+        let result: Result<ExchangeId, _> = serde_json::from_str(r#""   ""#);
+        assert!(result.is_err(), "whitespace-only string must be rejected");
     }
 }
