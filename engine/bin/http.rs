@@ -63,7 +63,7 @@ async fn main() -> std::io::Result<()> {
     };
 
     let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
-    adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter));
+    adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter::default()));
 
     let publisher: Option<Arc<dyn MessagePublisher>> = match env::var("KAFKA_URL") {
         Ok(url) => match KafkaProducer::new(&url) {

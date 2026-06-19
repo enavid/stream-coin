@@ -203,8 +203,9 @@ mod tests {
     use super::*;
     use crate::exchange::entity::ExchangeId;
     use crate::exchange::port::{ExchangeAdapter, ExchangeAdapterError};
+    use crate::kafka::port::mock::MockPublisher;
     use crate::presentation::shared::app_state::AppState;
-    use crate::price::entity::Price;
+    use crate::price::entity::{Price, TradingPair};
 
     struct CountingAdapter {
         count: Arc<AtomicUsize>,
@@ -223,6 +224,32 @@ mod tests {
         ) -> Result<AbortHandle, ExchangeAdapterError> {
             self.count.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(tokio::spawn(std::future::pending::<()>()).abort_handle())
+        }
+    }
+
+    struct InstantPriceAdapter;
+
+    #[async_trait]
+    impl ExchangeAdapter for InstantPriceAdapter {
+        fn exchange_id(&self) -> ExchangeId {
+            ExchangeId::new("tabdeal")
+        }
+
+        async fn subscribe(
+            &self,
+            _symbol: &str,
+            tx: Sender<Price>,
+        ) -> Result<AbortHandle, ExchangeAdapterError> {
+            let _ = tx
+                .send(Price {
+                    exchange: ExchangeId::new("tabdeal"),
+                    pair: TradingPair::new("USDT", "IRT"),
+                    bid: 92_815,
+                    ask: 92_936,
+                    timestamp: chrono::Utc::now(),
+                })
+                .await;
             Ok(tokio::spawn(std::future::pending::<()>()).abort_handle())
         }
     }
@@ -486,6 +513,48 @@ mod tests {
         let req = test::TestRequest::get().uri("/tickers").to_request();
         let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
         assert_eq!(body["success"], true);
+    }
+
+    // --- kafka failure tests ---
+
+    #[actix_web::test]
+    async fn kafka_publish_failure_does_not_stop_broadcast() {
+        let failing_publisher = Arc::new(MockPublisher::failing());
+        let broadcaster = AppState::new_broadcaster();
+        let mut rx = broadcaster.subscribe();
+
+        let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+        adapters.insert("tabdeal".to_string(), Arc::new(InstantPriceAdapter));
+
+        let state = web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(adapters),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            publisher: Some(failing_publisher),
+            broadcaster,
+        });
+
+        let dummy_req = test::TestRequest::default().to_http_request();
+        start_kline_symbol_ticker(
+            state,
+            web::Json(SymbolRequest {
+                exchange: "tabdeal".to_string(),
+                symbol: "USDT/IRT".to_string(),
+            }),
+        )
+        .await
+        .respond_to(&dummy_req);
+
+        let received = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+        assert!(
+            received.is_ok(),
+            "broadcaster must deliver the price even when Kafka publish fails"
+        );
+        let payload = received.unwrap().unwrap();
+        assert!(
+            payload.contains("tabdeal"),
+            "broadcast payload must contain the exchange name"
+        );
     }
 
     // --- concurrent-start race tests ---

@@ -136,6 +136,44 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn ws_lagged_receiver_skips_old_messages_and_stays_connected() {
+        use std::time::Duration;
+
+        let state = build_state();
+        let broadcaster = state.broadcaster.clone();
+
+        let mut srv = actix_test::start(move || {
+            App::new()
+                .app_data(state.clone())
+                .route("/ws", web::get().to(ws_index))
+        });
+
+        let mut conn = srv.ws_at("/ws").await.unwrap();
+
+        // Flood past the broadcast channel capacity (256) without yielding
+        // so the ws_handler task cannot drain the channel first.
+        // This forces RecvError::Lagged when the task eventually runs.
+        for i in 0..300u32 {
+            let _ = broadcaster.send(format!("{i}"));
+        }
+
+        // Yield to let the spawned ws_handler task run and hit Lagged.
+        tokio::task::yield_now().await;
+
+        // A message sent AFTER the lag must still reach the client.
+        broadcaster.send("sentinel".to_string()).unwrap();
+
+        let deadline = Duration::from_millis(500);
+        loop {
+            match tokio::time::timeout(deadline, conn.next()).await {
+                Ok(Some(Ok(ws::Frame::Text(bytes)))) if bytes == "sentinel" => break,
+                Ok(Some(Ok(_))) => continue,
+                _ => panic!("client did not receive the post-lag sentinel message"),
+            }
+        }
+    }
+
+    #[actix_web::test]
     async fn ws_connection_closes_cleanly_when_client_disconnects() {
         let state = build_state();
 

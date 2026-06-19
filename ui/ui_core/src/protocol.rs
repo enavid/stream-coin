@@ -83,4 +83,40 @@ mod tests {
         assert_eq!(ticker.bid, 92815.0);
         assert_eq!(ticker.ask, 92936.0);
     }
+
+    // --- WS frame boundary tests ---
+
+    #[test]
+    fn parse_rejects_bid_as_string_type() {
+        let json = r#"{"exchange":"tabdeal","pair":"USDT/IRT","ask":92936,"bid":"not-a-number","timestamp":"2026-06-18T10:26:33Z"}"#;
+        assert!(
+            PriceMessage::parse(json).is_err(),
+            "bid as a string must be rejected — field type is u64"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_ask_as_null() {
+        let json = r#"{"exchange":"tabdeal","pair":"USDT/IRT","ask":null,"bid":92815,"timestamp":"2026-06-18T10:26:33Z"}"#;
+        assert!(
+            PriceMessage::parse(json).is_err(),
+            "null ask must be rejected — field is non-optional"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_empty_string() {
+        assert!(
+            PriceMessage::parse("").is_err(),
+            "empty string is not valid JSON"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_json_array_at_root() {
+        assert!(
+            PriceMessage::parse("[]").is_err(),
+            "a JSON array is not a PriceMessage object"
+        );
+    }
 }

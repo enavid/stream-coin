@@ -138,4 +138,43 @@ mod tests {
     fn extract_time_falls_back_to_raw_input_when_there_is_no_t_separator() {
         assert_eq!(extract_time("not-a-timestamp"), "not-a-timestamp");
     }
+
+    // --- boundary / edge value tests ---
+
+    #[test]
+    fn format_price_negative_value_shows_minus_prefix() {
+        assert_eq!(format_price(-92_815.0), "-92,815");
+    }
+
+    #[test]
+    fn format_price_negative_million_uses_m_suffix() {
+        assert_eq!(format_price(-1_500_000.0), "-1.50M");
+    }
+
+    #[test]
+    fn format_price_sub_unit_value_rounds_to_nearest_integer() {
+        assert_eq!(format_price(0.3), "0");
+        assert_eq!(format_price(0.5), "1");
+        assert_eq!(format_price(0.9), "1");
+    }
+
+    #[test]
+    fn format_price_exactly_one_million_uses_m_suffix() {
+        assert_eq!(format_price(1_000_000.0), "1.00M");
+    }
+
+    #[test]
+    fn format_price_exactly_one_billion_uses_b_suffix() {
+        assert_eq!(format_price(1_000_000_000.0), "1.000B");
+    }
+
+    #[test]
+    fn format_spread_zero_returns_zero_string() {
+        assert_eq!(format_spread(0.0), "0");
+    }
+
+    #[test]
+    fn format_spread_negative_value_below_threshold_shows_plain_number() {
+        assert_eq!(format_spread(-500.0), "-500");
+    }
 }

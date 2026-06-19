@@ -191,6 +191,132 @@ async fn stop_ticker_response_contains_exchange_and_symbol() {
     assert_eq!(body["data"]["symbol"], "USDTIRT");
 }
 
+// --- malformed / boundary request body tests ---
+
+#[actix_web::test]
+async fn start_ticker_invalid_json_body_returns_400() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload("{not valid json}")
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn start_ticker_wrong_field_types_returns_400() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange": 42, "symbol": true}"#)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn start_ticker_missing_exchange_field_returns_400() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"symbol": "USDTIRT"}"#)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn start_ticker_missing_symbol_field_returns_400() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange": "tabdeal"}"#)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn start_ticker_empty_exchange_returns_400_as_unsupported() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange": "", "symbol": "USDTIRT"}"#)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn start_ticker_oversized_payload_returns_400() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    // actix-web JsonConfig default limit is 256 KB; this exceeds it
+    let large_symbol = "A".repeat(300_000);
+    let body = format!(r#"{{"exchange":"tabdeal","symbol":"{large_symbol}"}}"#);
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(body)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
 // list
 
 #[actix_web::test]

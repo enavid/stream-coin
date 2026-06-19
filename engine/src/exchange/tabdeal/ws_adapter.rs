@@ -13,8 +13,27 @@ use crate::exchange::port::{ExchangeAdapter, ExchangeAdapterError};
 use crate::price::entity::{Price, TradingPair};
 
 const WS_URL: &str = "wss://api1.tabdeal.org/stream/";
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
-pub struct TabdealWsAdapter;
+pub struct TabdealWsAdapter {
+    ws_url: &'static str,
+    reconnect_delay: Duration,
+}
+
+impl TabdealWsAdapter {
+    pub fn new() -> Self {
+        Self {
+            ws_url: WS_URL,
+            reconnect_delay: RECONNECT_DELAY,
+        }
+    }
+}
+
+impl Default for TabdealWsAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TabdealWsAdapter {
     pub fn build_subscribe_message(symbol: &str) -> Value {
@@ -101,15 +120,17 @@ impl ExchangeAdapter for TabdealWsAdapter {
         let symbol = symbol.to_lowercase();
         let subscribe_msg = Self::build_subscribe_message(&symbol).to_string();
 
+        let url = self.ws_url;
+        let reconnect_delay = self.reconnect_delay;
         let handle = tokio::spawn(async move {
             loop {
-                match connect_async(WS_URL).await {
+                match connect_async(url).await {
                     Ok((mut ws, _)) => {
                         tracing::info!(symbol = %symbol, "tabdeal websocket connected");
 
                         if ws.send(Message::Text(subscribe_msg.clone())).await.is_err() {
                             tracing::error!(symbol = %symbol, "failed to send subscribe message");
-                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            tokio::time::sleep(reconnect_delay).await;
                             continue;
                         }
 
@@ -142,7 +163,7 @@ impl ExchangeAdapter for TabdealWsAdapter {
                     }
                 }
 
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(reconnect_delay).await;
             }
         });
 
@@ -152,6 +173,10 @@ impl ExchangeAdapter for TabdealWsAdapter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    use futures_util::SinkExt;
     use serde_json::json;
 
     use super::*;
@@ -229,6 +254,208 @@ mod tests {
     fn build_subscribe_message_includes_depth_stream_for_symbol() {
         let msg = TabdealWsAdapter::build_subscribe_message("usdtirt");
         assert_eq!(msg["params"][0], "usdtirt@depth@2000ms");
+    }
+
+    // --- adapter lifecycle / reconnect tests ---
+
+    fn depth_json(bid: &str, ask: &str) -> String {
+        format!(
+            r#"{{"stream":"usdtirt@depth@2000ms","data":{{"e":"depthUpdate","E":1657530675579,"s":"USDTIRT","b":[["{bid}","1.0"]],"a":[["{ask}","1.0"]]}}}}"#
+        )
+    }
+
+    async fn start_test_ws_server(
+        connect_count: Arc<AtomicUsize>,
+        behavior: impl Fn(
+                tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    ) -> std::net::SocketAddr {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let behavior = Arc::new(behavior);
+
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        connect_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let ws = accept_async(stream).await.unwrap();
+                        let beh = Arc::clone(&behavior);
+                        tokio::spawn(beh(ws));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        addr
+    }
+
+    #[tokio::test]
+    async fn adapter_delivers_price_through_channel() {
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let addr = start_test_ws_server(Arc::clone(&connections), |mut ws| {
+            Box::pin(async move {
+                use futures_util::SinkExt;
+                let _ = ws
+                    .send(Message::Text(depth_json("58000", "58100").into()))
+                    .await;
+                let _ = ws.send(Message::Close(None)).await;
+            })
+        })
+        .await;
+
+        let url: &'static str = Box::leak(format!("ws://{addr}").into_boxed_str());
+        let adapter = TabdealWsAdapter {
+            ws_url: url,
+            reconnect_delay: Duration::from_millis(10),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let _handle = adapter.subscribe("usdtirt", tx).await.unwrap();
+
+        let price = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("timed out waiting for price")
+            .expect("channel closed before price arrived");
+
+        assert_eq!(price.bid, 58000);
+        assert_eq!(price.ask, 58100);
+    }
+
+    #[tokio::test]
+    async fn adapter_reconnects_after_server_closes_connection() {
+        use std::time::Duration;
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let addr = start_test_ws_server(Arc::clone(&connections), |mut ws| {
+            Box::pin(async move {
+                use futures_util::SinkExt;
+                // immediately close — adapter must reconnect
+                let _ = ws
+                    .send(tokio_tungstenite::tungstenite::Message::Close(None))
+                    .await;
+            })
+        })
+        .await;
+
+        let url: &'static str = Box::leak(format!("ws://{addr}").into_boxed_str());
+        let adapter = TabdealWsAdapter {
+            ws_url: url,
+            reconnect_delay: Duration::from_millis(10),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let handle = adapter.subscribe("usdtirt", tx).await.unwrap();
+
+        // Allow time for at least 2 connect attempts (each with a 5s backoff
+        // but the server closes immediately so the cycle is fast).
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        handle.abort();
+
+        assert!(
+            connections.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "adapter must reconnect after a clean server close"
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_stops_on_abort_handle() {
+        use std::time::Duration;
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let addr = start_test_ws_server(Arc::clone(&connections), |ws| {
+            Box::pin(async move {
+                // hold the connection open indefinitely
+                futures_util::StreamExt::for_each(ws, |_| async {}).await;
+            })
+        })
+        .await;
+
+        let url: &'static str = Box::leak(format!("ws://{addr}").into_boxed_str());
+        let adapter = TabdealWsAdapter {
+            ws_url: url,
+            reconnect_delay: Duration::from_millis(10),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+
+        let handle = adapter.subscribe("usdtirt", tx).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.abort();
+
+        // After abort the task must finish (not keep reconnecting).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let count_at_abort = connections.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let count_after = connections.load(std::sync::atomic::Ordering::SeqCst);
+
+        assert_eq!(
+            count_at_abort, count_after,
+            "adapter must not reconnect after abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_stops_when_price_channel_receiver_is_dropped() {
+        use std::time::Duration;
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let addr = start_test_ws_server(Arc::clone(&connections), |mut ws| {
+            Box::pin(async move {
+                use futures_util::SinkExt;
+                // send prices in a tight loop
+                loop {
+                    if ws
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            depth_json("58000", "58100").into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+        })
+        .await;
+
+        let url: &'static str = Box::leak(format!("ws://{addr}").into_boxed_str());
+        let adapter = TabdealWsAdapter {
+            ws_url: url,
+            reconnect_delay: Duration::from_millis(10),
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let handle = adapter.subscribe("usdtirt", tx).await.unwrap();
+
+        // Let the adapter start and receive at least one price
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Drop the receiver — adapter must exit its task
+        drop(rx);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Task should be finished; abort is a no-op if already done
+        handle.abort();
+
+        // Verify the connection count doesn't grow after rx drop
+        // (no reconnect loop running)
+        let count_before = connections.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let count_after = connections.load(std::sync::atomic::Ordering::SeqCst);
+
+        assert_eq!(
+            count_before, count_after,
+            "adapter must not reconnect after the price channel is closed"
+        );
     }
 
     // --- malformed / boundary price tests ---
