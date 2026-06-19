@@ -12,9 +12,9 @@ fmt:
 fmt-check:
     cargo fmt --check
 
-# Run linter (warnings = errors)
+# Run linter (warnings = errors, all targets including test code)
 lint:
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets -- -D warnings
 
 # Run unit tests (engine lib + cli bin)
 test:
@@ -35,7 +35,7 @@ check:
     @echo "→ Formatting..."
     cargo fmt
     @echo "→ Linting..."
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets -- -D warnings
     @echo "→ Testing (unit)..."
     cargo test --lib --bins
     @echo "→ Testing (integration)..."
@@ -75,6 +75,14 @@ audit:
 # Remove build artifacts
 clean:
     cargo clean
+
+# Start all infrastructure services (Redis, Kafka, Schema Registry, Flink, UI, Nginx)
+docker-up:
+    docker compose up -d
+
+# Stop all infrastructure services and remove containers
+docker-down:
+    docker compose down
 
 # UI (Dioxus, separate workspace in ui/)
 

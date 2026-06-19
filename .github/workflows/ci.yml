@@ -38,7 +38,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - run: cargo fmt --all -- --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
 
   test:
     name: Test
@@ -64,7 +64,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Unit tests
-        run: cargo test --lib
+        run: cargo test --lib --bins
 
       - name: Integration tests
         run: cargo test --tests

@@ -176,7 +176,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
 
-    use futures_util::SinkExt;
     use serde_json::json;
 
     use super::*;
@@ -281,16 +280,11 @@ mod tests {
         let behavior = Arc::new(behavior);
 
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        connect_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        let ws = accept_async(stream).await.unwrap();
-                        let beh = Arc::clone(&behavior);
-                        tokio::spawn(beh(ws));
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                connect_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let ws = accept_async(stream).await.unwrap();
+                let beh = Arc::clone(&behavior);
+                tokio::spawn(beh(ws));
             }
         });
 
@@ -306,9 +300,7 @@ mod tests {
         let addr = start_test_ws_server(Arc::clone(&connections), |mut ws| {
             Box::pin(async move {
                 use futures_util::SinkExt;
-                let _ = ws
-                    .send(Message::Text(depth_json("58000", "58100").into()))
-                    .await;
+                let _ = ws.send(Message::Text(depth_json("58000", "58100"))).await;
                 let _ = ws.send(Message::Close(None)).await;
             })
         })
@@ -414,9 +406,9 @@ mod tests {
                 // send prices in a tight loop
                 loop {
                     if ws
-                        .send(tokio_tungstenite::tungstenite::Message::Text(
-                            depth_json("58000", "58100").into(),
-                        ))
+                        .send(tokio_tungstenite::tungstenite::Message::Text(depth_json(
+                            "58000", "58100",
+                        )))
                         .await
                         .is_err()
                     {
