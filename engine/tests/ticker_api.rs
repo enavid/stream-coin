@@ -13,7 +13,6 @@ use stream_coin::presentation::shared::app_state::AppState;
 fn build_state() -> actix_web::web::Data<AppState> {
     actix_web::web::Data::new(AppState {
         redis: None,
-        ticker_repository: None,
         exchange_adapters: Arc::new(HashMap::new()),
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
@@ -27,7 +26,6 @@ fn build_state_with_ticker(key: &str) -> actix_web::web::Data<AppState> {
     map.insert(key.to_string(), handle);
     actix_web::web::Data::new(AppState {
         redis: None,
-        ticker_repository: None,
         exchange_adapters: Arc::new(HashMap::new()),
         clients: Arc::new(Mutex::new(map)),
         publisher: None,

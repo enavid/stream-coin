@@ -230,7 +230,6 @@ mod tests {
     fn empty_state() -> web::Data<AppState> {
         web::Data::new(AppState {
             redis: None,
-            ticker_repository: None,
             exchange_adapters: Arc::new(HashMap::new()),
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: None,
@@ -244,7 +243,6 @@ mod tests {
         map.insert(key.to_string(), handle);
         web::Data::new(AppState {
             redis: None,
-            ticker_repository: None,
             exchange_adapters: Arc::new(HashMap::new()),
             clients: Arc::new(Mutex::new(map)),
             publisher: None,
@@ -364,7 +362,6 @@ mod tests {
         }));
         let state = web::Data::new(AppState {
             redis: None,
-            ticker_repository: None,
             exchange_adapters: Arc::new(HashMap::new()),
             clients: Arc::clone(&clients),
             publisher: None,
@@ -461,7 +458,6 @@ mod tests {
         map.insert("tabdeal:BTCIRT".to_string(), handle2);
         let state = web::Data::new(AppState {
             redis: None,
-            ticker_repository: None,
             exchange_adapters: Arc::new(HashMap::new()),
             clients: Arc::new(Mutex::new(map)),
             publisher: None,
@@ -508,7 +504,6 @@ mod tests {
         );
         let state = web::Data::new(AppState {
             redis: None,
-            ticker_repository: None,
             exchange_adapters: Arc::new(adapters),
             clients: Arc::clone(&clients),
             publisher: None,
@@ -576,7 +571,6 @@ mod tests {
         );
         let state = web::Data::new(AppState {
             redis: None,
-            ticker_repository: None,
             exchange_adapters: Arc::new(adapters),
             clients: Arc::clone(&clients),
             publisher: None,
