@@ -5,3 +5,4 @@ mod responses;
 pub mod routers;
 pub mod shared;
 pub mod swagger;
+pub mod ws_message;

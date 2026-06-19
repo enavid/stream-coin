@@ -74,6 +74,7 @@ pub async fn start_kline_symbol_ticker(
 
     tokio::spawn(async move {
         use crate::kafka::producer::KafkaProducer;
+        use crate::presentation::ws_message::{PricePayload, WsMessage};
 
         while let Some(price) = rx.recv().await {
             tracing::info!(
@@ -84,13 +85,14 @@ pub async fn start_kline_symbol_ticker(
                 "price update"
             );
 
-            let payload = match KafkaProducer::price_to_payload(&price) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to serialize price");
-                    continue;
-                }
-            };
+            let payload =
+                match serde_json::to_string(&WsMessage::PriceUpdate(PricePayload::from(&price))) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to serialize price");
+                        continue;
+                    }
+                };
 
             let _ = broadcaster.send(payload.clone());
 

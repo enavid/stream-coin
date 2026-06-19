@@ -21,7 +21,15 @@ pub struct PriceMessage {
 
 impl PriceMessage {
     pub fn parse(raw: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(raw)
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum WireMessage {
+            PriceUpdate(PriceMessage),
+        }
+        let wire: WireMessage = serde_json::from_str(raw)?;
+        match wire {
+            WireMessage::PriceUpdate(msg) => Ok(msg),
+        }
     }
 }
 
@@ -36,7 +44,7 @@ mod tests {
     use super::*;
 
     fn sample_json() -> &'static str {
-        r#"{"exchange":"tabdeal","pair":"USDT/IRT","ask":92936,"bid":92815,"timestamp":"2026-06-18T10:26:33.123Z"}"#
+        r#"{"type":"price_update","exchange":"tabdeal","pair":"USDT/IRT","ask":92936,"bid":92815,"timestamp":"2026-06-18T10:26:33.123Z"}"#
     }
 
     #[test]
@@ -69,8 +77,11 @@ mod tests {
             bid: 4_218_500_000,
             timestamp: "2026-06-18T10:00:00Z".to_string(),
         };
-        let json = serde_json::to_string(&original).unwrap();
-        let parsed = PriceMessage::parse(&json).unwrap();
+        // PriceMessage::serialize produces the payload fields (no type discriminator).
+        // Re-wrap with the type tag to form the complete wire JSON before parsing.
+        let payload_json = serde_json::to_string(&original).unwrap();
+        let wire = format!(r#"{{"type":"price_update",{}"#, &payload_json[1..]);
+        let parsed = PriceMessage::parse(&wire).unwrap();
         assert_eq!(original, parsed);
     }
 
@@ -117,6 +128,33 @@ mod tests {
         assert!(
             PriceMessage::parse("[]").is_err(),
             "a JSON array is not a PriceMessage object"
+        );
+    }
+
+    #[test]
+    fn price_message_parse_accepts_type_field_in_payload() {
+        let json = r#"{"type":"price_update","exchange":"tabdeal","pair":"USDT/IRT","ask":92936,"bid":92815,"timestamp":"2026-06-18T10:26:33.123Z"}"#;
+        assert!(
+            PriceMessage::parse(json).is_ok(),
+            "payload with type:price_update must parse successfully"
+        );
+    }
+
+    #[test]
+    fn price_message_parse_rejects_unknown_type() {
+        let json = r#"{"type":"order_book","exchange":"tabdeal","pair":"USDT/IRT","ask":92936,"bid":92815,"timestamp":"2026-06-18T10:26:33.123Z"}"#;
+        assert!(
+            PriceMessage::parse(json).is_err(),
+            "unknown type 'order_book' must be rejected"
+        );
+    }
+
+    #[test]
+    fn price_message_parse_rejects_missing_type_field() {
+        let json = r#"{"exchange":"tabdeal","pair":"USDT/IRT","ask":92936,"bid":92815,"timestamp":"2026-06-18T10:26:33.123Z"}"#;
+        assert!(
+            PriceMessage::parse(json).is_err(),
+            "payload without type field must be rejected"
         );
     }
 }
