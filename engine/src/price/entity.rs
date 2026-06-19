@@ -1,7 +1,8 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Serializer};
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::exchange::entity::ExchangeId;
 
@@ -23,6 +24,24 @@ impl TradingPair {
             base: base.to_string(),
             quote: quote.to_string(),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for TradingPair {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let (base, quote) = s
+            .split_once('/')
+            .ok_or_else(|| de::Error::custom("symbol must be BASE/QUOTE format (e.g. USDT/IRT)"))?;
+        if base.is_empty() || quote.is_empty() {
+            return Err(de::Error::custom("base and quote must not be empty"));
+        }
+        if quote.contains('/') {
+            return Err(de::Error::custom(
+                "symbol must have exactly one '/' separator",
+            ));
+        }
+        Ok(TradingPair::new(base, quote))
     }
 }
 
@@ -55,6 +74,65 @@ impl Price {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    // --- TradingPair Deserialize tests ---
+
+    #[test]
+    fn trading_pair_deserialize_accepts_base_slash_quote() {
+        let pair: TradingPair = serde_json::from_str("\"USDT/IRT\"").unwrap();
+        assert_eq!(pair.base, "USDT");
+        assert_eq!(pair.quote, "IRT");
+    }
+
+    #[test]
+    fn trading_pair_deserialize_rejects_no_slash() {
+        let result: Result<TradingPair, _> = serde_json::from_str("\"USDTIRT\"");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("BASE/QUOTE"),
+            "error must mention BASE/QUOTE format, got: {err}"
+        );
+    }
+
+    #[test]
+    fn trading_pair_deserialize_rejects_empty_base() {
+        let result: Result<TradingPair, _> = serde_json::from_str("\"/IRT\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn trading_pair_deserialize_rejects_empty_quote() {
+        let result: Result<TradingPair, _> = serde_json::from_str("\"USDT/\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn trading_pair_deserialize_rejects_multiple_slashes() {
+        let result: Result<TradingPair, _> = serde_json::from_str("\"USDT/IRT/EXTRA\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn trading_pair_deserialize_rejects_empty_string() {
+        let result: Result<TradingPair, _> = serde_json::from_str("\"\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn trading_pair_serialize_produces_base_slash_quote() {
+        let pair = TradingPair::new("BTC", "IRT");
+        let json = serde_json::to_string(&pair).unwrap();
+        assert_eq!(json, "\"BTC/IRT\"");
+    }
+
+    #[test]
+    fn trading_pair_round_trips_serialize_then_deserialize() {
+        let original = TradingPair::new("USDT", "IRT");
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: TradingPair = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
 
     #[test]
     fn trading_pair_display_is_base_slash_quote() {

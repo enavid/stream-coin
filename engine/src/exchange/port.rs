@@ -5,7 +5,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::AbortHandle;
 
 use crate::exchange::entity::ExchangeId;
-use crate::price::entity::Price;
+use crate::price::entity::{Price, TradingPair};
 
 #[derive(Debug)]
 pub enum ExchangeAdapterError {
@@ -31,13 +31,18 @@ pub trait ExchangeAdapter: Send + Sync {
     /// Returns the canonical identifier for the exchange this adapter drives.
     fn exchange_id(&self) -> ExchangeId;
 
-    /// Subscribes to price updates for `symbol` and starts forwarding them on
+    /// Converts a canonical [`TradingPair`] to the exchange-specific stream
+    /// symbol used in WebSocket subscription messages.
+    /// e.g. `TradingPair("USDT","IRT")` → `"usdtirt"` for Tabdeal.
+    fn symbol_for_pair(&self, pair: &TradingPair) -> String;
+
+    /// Subscribes to price updates for `pair` and starts forwarding them on
     /// `tx`. Returns an [`AbortHandle`] that stops the subscription when
     /// called; the adapter's background task exits cleanly on abort or when
     /// `tx` is dropped.
     async fn subscribe(
         &self,
-        symbol: &str,
+        pair: &TradingPair,
         tx: Sender<Price>,
     ) -> Result<AbortHandle, ExchangeAdapterError>;
 }
@@ -58,9 +63,13 @@ mod tests {
             ExchangeId::new("mock")
         }
 
+        fn symbol_for_pair(&self, pair: &TradingPair) -> String {
+            format!("{}{}", pair.base, pair.quote).to_lowercase()
+        }
+
         async fn subscribe(
             &self,
-            _symbol: &str,
+            _pair: &TradingPair,
             tx: Sender<Price>,
         ) -> Result<AbortHandle, ExchangeAdapterError> {
             let handle = tokio::spawn(async move {
@@ -89,7 +98,10 @@ mod tests {
         let adapter = MockAdapter;
         let (tx, mut rx) = mpsc::channel(1);
 
-        let handle = adapter.subscribe("USDT", tx).await.unwrap();
+        let handle = adapter
+            .subscribe(&TradingPair::new("USDT", "IRT"), tx)
+            .await
+            .unwrap();
 
         let price = rx.recv().await.unwrap();
         assert_eq!(price.bid, 100);

@@ -114,12 +114,16 @@ impl ExchangeAdapter for TabdealWsAdapter {
         ExchangeId::new("tabdeal")
     }
 
+    fn symbol_for_pair(&self, pair: &TradingPair) -> String {
+        format!("{}{}", pair.base, pair.quote).to_lowercase()
+    }
+
     async fn subscribe(
         &self,
-        symbol: &str,
+        pair: &TradingPair,
         tx: Sender<Price>,
     ) -> Result<AbortHandle, ExchangeAdapterError> {
-        let symbol = symbol.to_lowercase();
+        let symbol = self.symbol_for_pair(pair);
         let subscribe_msg = Self::build_subscribe_message(&symbol).to_string();
 
         let url = self.ws_url;
@@ -314,7 +318,10 @@ mod tests {
             reconnect_delay: Duration::from_millis(10),
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-        let _handle = adapter.subscribe("usdtirt", tx).await.unwrap();
+        let _handle = adapter
+            .subscribe(&TradingPair::new("USDT", "IRT"), tx)
+            .await
+            .unwrap();
 
         let price = tokio::time::timeout(Duration::from_millis(500), rx.recv())
             .await
@@ -347,7 +354,10 @@ mod tests {
             reconnect_delay: Duration::from_millis(10),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
-        let handle = adapter.subscribe("usdtirt", tx).await.unwrap();
+        let handle = adapter
+            .subscribe(&TradingPair::new("USDT", "IRT"), tx)
+            .await
+            .unwrap();
 
         // Allow time for at least 2 connect attempts (each with a 5s backoff
         // but the server closes immediately so the cycle is fast).
@@ -381,7 +391,10 @@ mod tests {
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
 
-        let handle = adapter.subscribe("usdtirt", tx).await.unwrap();
+        let handle = adapter
+            .subscribe(&TradingPair::new("USDT", "IRT"), tx)
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.abort();
 
@@ -428,7 +441,10 @@ mod tests {
             reconnect_delay: Duration::from_millis(10),
         };
         let (tx, rx) = tokio::sync::mpsc::channel(10);
-        let handle = adapter.subscribe("usdtirt", tx).await.unwrap();
+        let handle = adapter
+            .subscribe(&TradingPair::new("USDT", "IRT"), tx)
+            .await
+            .unwrap();
 
         // Let the adapter start and receive at least one price
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -504,6 +520,45 @@ mod tests {
         let price = TabdealWsAdapter::parse_depth_message(&msg).unwrap();
         assert_eq!(price.bid, 58000);
         assert_eq!(price.ask, 58100);
+    }
+
+    // --- symbol_for_pair unit tests ---
+
+    #[test]
+    fn symbol_for_pair_usdt_irt() {
+        let adapter = TabdealWsAdapter::new();
+        assert_eq!(
+            adapter.symbol_for_pair(&TradingPair::new("USDT", "IRT")),
+            "usdtirt"
+        );
+    }
+
+    #[test]
+    fn symbol_for_pair_btc_irt() {
+        let adapter = TabdealWsAdapter::new();
+        assert_eq!(
+            adapter.symbol_for_pair(&TradingPair::new("BTC", "IRT")),
+            "btcirt"
+        );
+    }
+
+    #[test]
+    fn symbol_for_pair_eth_usdt() {
+        let adapter = TabdealWsAdapter::new();
+        assert_eq!(
+            adapter.symbol_for_pair(&TradingPair::new("ETH", "USDT")),
+            "ethusdt"
+        );
+    }
+
+    #[test]
+    fn symbol_for_pair_is_always_lowercase() {
+        let adapter = TabdealWsAdapter::new();
+        let result = adapter.symbol_for_pair(&TradingPair::new("BTC", "IRT"));
+        assert!(
+            !result.chars().any(|c| c.is_uppercase()),
+            "result must be all lowercase, got: {result}"
+        );
     }
 
     // --- parse_price_units unit tests ---

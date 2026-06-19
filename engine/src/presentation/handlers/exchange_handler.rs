@@ -47,7 +47,7 @@ pub async fn start_kline_symbol_ticker(
     if clients.contains_key(&key) {
         tracing::warn!(
             exchange = %request.exchange,
-            symbol = %request.symbol,
+            pair = %request.symbol,
             "ticker already running"
         );
         return ApiError::new("Ticker already running", vec![]).to_response();
@@ -60,7 +60,7 @@ pub async fn start_kline_symbol_ticker(
         Err(e) => {
             tracing::error!(
                 exchange = %request.exchange,
-                symbol = %request.symbol,
+                pair = %request.symbol,
                 error = %e,
                 "failed to start ticker"
             );
@@ -107,7 +107,7 @@ pub async fn start_kline_symbol_ticker(
 
     tracing::info!(
         exchange = %request.exchange,
-        symbol = %request.symbol,
+        pair = %request.symbol,
         "ticker started"
     );
 
@@ -115,7 +115,7 @@ pub async fn start_kline_symbol_ticker(
         "Ticker started",
         TickerStarted {
             exchange: request.exchange.clone(),
-            symbol: request.symbol.clone(),
+            pair: request.symbol.to_string(),
         },
     )
 }
@@ -145,21 +145,21 @@ pub async fn stop_kline_symbol_ticker(
             handle.abort();
             tracing::info!(
                 exchange = %request.exchange,
-                symbol = %request.symbol,
+                pair = %request.symbol,
                 "ticker stopped"
             );
             success_response(
                 "Ticker stopped",
                 TickerStopped {
                     exchange: request.exchange.clone(),
-                    symbol: request.symbol.clone(),
+                    pair: request.symbol.to_string(),
                 },
             )
         }
         None => {
             tracing::warn!(
                 exchange = %request.exchange,
-                symbol = %request.symbol,
+                pair = %request.symbol,
                 "stop request rejected: ticker not running"
             );
             ApiError::new("Ticker not found", vec![]).to_response()
@@ -185,8 +185,8 @@ pub async fn list_tickers(state: web::Data<AppState>) -> impl Responder {
         .filter_map(|key| {
             let mut parts = key.splitn(2, ':');
             let exchange = parts.next()?.to_string();
-            let symbol = parts.next()?.to_string();
-            Some(ActiveTicker { exchange, symbol })
+            let pair = parts.next()?.to_string();
+            Some(ActiveTicker { exchange, pair })
         })
         .collect();
 
@@ -225,9 +225,13 @@ mod tests {
             ExchangeId::new("tabdeal")
         }
 
+        fn symbol_for_pair(&self, pair: &TradingPair) -> String {
+            format!("{}{}", pair.base, pair.quote).to_lowercase()
+        }
+
         async fn subscribe(
             &self,
-            _symbol: &str,
+            _pair: &TradingPair,
             _tx: Sender<Price>,
         ) -> Result<AbortHandle, ExchangeAdapterError> {
             self.count.fetch_add(1, Ordering::SeqCst);
@@ -244,9 +248,13 @@ mod tests {
             ExchangeId::new("tabdeal")
         }
 
+        fn symbol_for_pair(&self, pair: &TradingPair) -> String {
+            format!("{}{}", pair.base, pair.quote).to_lowercase()
+        }
+
         async fn subscribe(
             &self,
-            _symbol: &str,
+            _pair: &TradingPair,
             tx: Sender<Price>,
         ) -> Result<AbortHandle, ExchangeAdapterError> {
             let _ = tx
@@ -299,7 +307,7 @@ mod tests {
             .uri("/ticker")
             .set_json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDTIRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -318,7 +326,7 @@ mod tests {
             .uri("/ticker")
             .set_json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDTIRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
         let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
@@ -340,7 +348,7 @@ mod tests {
             .uri("/stop")
             .set_json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDTIRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -359,7 +367,7 @@ mod tests {
             .uri("/stop")
             .set_json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDTIRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
         let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
@@ -369,7 +377,7 @@ mod tests {
 
     #[actix_web::test]
     async fn stop_returns_200_when_ticker_is_running() {
-        let state = state_with_ticker("tabdeal:USDTIRT");
+        let state = state_with_ticker("tabdeal:USDT/IRT");
         let app = test::init_service(
             App::new()
                 .app_data(state)
@@ -380,7 +388,7 @@ mod tests {
             .uri("/stop")
             .set_json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDTIRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -392,7 +400,7 @@ mod tests {
         let clients: Arc<Mutex<HashMap<String, AbortHandle>>> = Arc::new(Mutex::new({
             let handle = tokio::spawn(std::future::pending::<()>()).abort_handle();
             let mut m = HashMap::new();
-            m.insert("tabdeal:USDTIRT".to_string(), handle);
+            m.insert("tabdeal:USDT/IRT".to_string(), handle);
             m
         }));
         let state = web::Data::new(AppState {
@@ -412,7 +420,7 @@ mod tests {
             .uri("/stop")
             .set_json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDTIRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
         test::call_service(&app, req).await;
@@ -424,7 +432,7 @@ mod tests {
     async fn stop_returns_exchange_and_symbol_in_response() {
         let app = test::init_service(
             App::new()
-                .app_data(state_with_ticker("tabdeal:USDTIRT"))
+                .app_data(state_with_ticker("tabdeal:USDT/IRT"))
                 .route("/stop", web::post().to(stop_kline_symbol_ticker)),
         )
         .await;
@@ -432,12 +440,12 @@ mod tests {
             .uri("/stop")
             .set_json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDTIRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             })
             .to_request();
         let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
         assert_eq!(body["data"]["exchange"], "tabdeal");
-        assert_eq!(body["data"]["symbol"], "USDTIRT");
+        assert_eq!(body["data"]["pair"], "USDT/IRT");
     }
 
     // list
@@ -472,7 +480,7 @@ mod tests {
     async fn list_returns_active_ticker_exchange_and_symbol() {
         let app = test::init_service(
             App::new()
-                .app_data(state_with_ticker("tabdeal:USDTIRT"))
+                .app_data(state_with_ticker("tabdeal:USDT/IRT"))
                 .route("/tickers", web::get().to(list_tickers)),
         )
         .await;
@@ -481,7 +489,7 @@ mod tests {
         let tickers = body["data"]["tickers"].as_array().unwrap();
         assert_eq!(tickers.len(), 1);
         assert_eq!(tickers[0]["exchange"], "tabdeal");
-        assert_eq!(tickers[0]["symbol"], "USDTIRT");
+        assert_eq!(tickers[0]["pair"], "USDT/IRT");
     }
 
     #[actix_web::test]
@@ -489,8 +497,8 @@ mod tests {
         let handle1 = tokio::spawn(std::future::pending::<()>()).abort_handle();
         let handle2 = tokio::spawn(std::future::pending::<()>()).abort_handle();
         let mut map = HashMap::new();
-        map.insert("tabdeal:USDTIRT".to_string(), handle1);
-        map.insert("tabdeal:BTCIRT".to_string(), handle2);
+        map.insert("tabdeal:USDT/IRT".to_string(), handle1);
+        map.insert("tabdeal:BTC/IRT".to_string(), handle2);
         let state = web::Data::new(AppState {
             redis: None,
             exchange_adapters: Arc::new(HashMap::new()),
@@ -547,7 +555,7 @@ mod tests {
             state,
             web::Json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDT/IRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             }),
         )
         .await
@@ -594,14 +602,14 @@ mod tests {
                 state.clone(),
                 web::Json(SymbolRequest {
                     exchange: "tabdeal".to_string(),
-                    symbol: "USDT/IRT".to_string(),
+                    symbol: TradingPair::new("USDT", "IRT"),
                 }),
             ),
             start_kline_symbol_ticker(
                 state.clone(),
                 web::Json(SymbolRequest {
                     exchange: "tabdeal".to_string(),
-                    symbol: "USDT/IRT".to_string(),
+                    symbol: TradingPair::new("USDT", "IRT"),
                 }),
             ),
         );
@@ -660,7 +668,7 @@ mod tests {
             state.clone(),
             web::Json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDT/IRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             }),
         )
         .await
@@ -672,7 +680,7 @@ mod tests {
             state.clone(),
             web::Json(SymbolRequest {
                 exchange: "tabdeal".to_string(),
-                symbol: "USDT/IRT".to_string(),
+                symbol: TradingPair::new("USDT", "IRT"),
             }),
         )
         .await
