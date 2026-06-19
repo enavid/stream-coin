@@ -1,11 +1,13 @@
 use dioxus::prelude::*;
 
+use crate::domain::SUPPORTED_EXCHANGES;
+
 /// Inline-expanding "add ticker" card: collapsed it's a dashed `+` tile;
 /// clicking it reveals an exchange/symbol form in place (no modal).
 #[component]
 pub fn AddTickerForm(on_start: EventHandler<(String, String)>) -> Element {
     let mut expanded = use_signal(|| false);
-    let mut exchange = use_signal(|| "tabdeal".to_string());
+    let mut exchange = use_signal(|| SUPPORTED_EXCHANGES[0].to_string());
     let mut symbol = use_signal(String::new);
 
     rsx! {
@@ -31,8 +33,9 @@ pub fn AddTickerForm(on_start: EventHandler<(String, String)>) -> Element {
                         class: "finput",
                         value: "{exchange}",
                         onchange: move |evt| exchange.set(evt.value()),
-                        option { value: "tabdeal", "tabdeal" }
-                        option { value: "nobitex", "nobitex" }
+                        for ex in SUPPORTED_EXCHANGES {
+                            option { value: *ex, "{ex}" }
+                        }
                     }
                     input {
                         class: "finput",
