@@ -15,8 +15,11 @@ impl fmt::Display for PublisherError {
     }
 }
 
+/// Publishes serialized price messages to an external message broker.
 #[async_trait]
 pub trait MessagePublisher: Send + Sync {
+    /// Publishes `payload` to `topic` with the given `key`. Errors are
+    /// non-fatal: the caller logs them and continues broadcasting to WS clients.
     async fn publish(&self, topic: &str, key: &str, payload: &str) -> Result<(), PublisherError>;
 }
 

@@ -12,6 +12,9 @@ use crate::presentation::shared::app_state::AppState;
         (status = 200, description = "Service is up", body = HealthStatus)
     )
 )]
+/// `GET /v1/check/health` — returns service version and dependency status
+/// (Redis connected/disconnected). Always returns 200; callers should inspect
+/// the `dependencies` field to determine actual health.
 pub async fn health(state: web::Data<AppState>) -> impl Responder {
     let redis_status = if state.redis.is_some() {
         "connected"

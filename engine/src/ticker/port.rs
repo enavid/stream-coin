@@ -17,10 +17,20 @@ impl fmt::Display for TickerError {
     }
 }
 
+/// Persists the set of actively-running tickers across server restarts.
+///
+/// Not yet wired into `exchange_handler`; the in-memory `clients` map is
+/// still the authoritative source of truth. This trait is ready to be
+/// connected when persistence becomes a requirement.
 #[async_trait]
 pub trait TickerRepository: Send + Sync {
+    /// Returns `true` if a ticker for `(exchange, symbol)` is registered.
     async fn exists(&self, exchange: &str, symbol: &str) -> Result<bool, TickerError>;
+
+    /// Records that a ticker for `(exchange, symbol)` has started.
     async fn register(&self, exchange: &str, symbol: &str) -> Result<(), TickerError>;
+
+    /// Refreshes the TTL for an already-registered ticker.
     async fn refresh(&self, exchange: &str, symbol: &str) -> Result<(), TickerError>;
 }
 

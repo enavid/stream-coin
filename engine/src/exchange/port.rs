@@ -20,9 +20,21 @@ impl fmt::Display for ExchangeAdapterError {
     }
 }
 
+/// Drives a single exchange's real-time price feed.
+///
+/// Each implementor connects to one exchange's WebSocket API, parses its
+/// proprietary message format into the shared [`Price`] type, and forwards
+/// prices over an `mpsc` channel. The returned [`AbortHandle`] stops the
+/// feed without requiring a mutable reference to the adapter.
 #[async_trait]
 pub trait ExchangeAdapter: Send + Sync {
+    /// Returns the canonical identifier for the exchange this adapter drives.
     fn exchange_id(&self) -> ExchangeId;
+
+    /// Subscribes to price updates for `symbol` and starts forwarding them on
+    /// `tx`. Returns an [`AbortHandle`] that stops the subscription when
+    /// called; the adapter's background task exits cleanly on abort or when
+    /// `tx` is dropped.
     async fn subscribe(
         &self,
         symbol: &str,

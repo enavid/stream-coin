@@ -19,6 +19,9 @@ use crate::presentation::shared::app_state::AppState;
         (status = 400, description = "Exchange not supported or ticker already running", body = ApiError)
     )
 )]
+/// `POST /v1/exchanges/futures/start_kline_symbol_ticker` — starts a ticker
+/// subscription for the requested exchange and symbol. Returns 409 if already
+/// running, 400 if the exchange is not registered.
 pub async fn start_kline_symbol_ticker(
     state: web::Data<AppState>,
     request: web::Json<SymbolRequest>,
@@ -127,6 +130,9 @@ pub async fn start_kline_symbol_ticker(
         (status = 400, description = "Ticker not found", body = ApiError)
     )
 )]
+/// `POST /v1/exchanges/futures/stop_kline_symbol_ticker` — aborts a running
+/// ticker and removes it from the active client map. Returns 400 if no ticker
+/// with the given exchange and symbol is currently running.
 pub async fn stop_kline_symbol_ticker(
     state: web::Data<AppState>,
     request: web::Json<SymbolRequest>,
@@ -169,6 +175,8 @@ pub async fn stop_kline_symbol_ticker(
         (status = 200, description = "List of active tickers", body = TickerList)
     )
 )]
+/// `GET /v1/exchanges/futures/tickers` — returns the list of all currently
+/// active ticker subscriptions as `[{exchange, symbol}]` pairs.
 pub async fn list_tickers(state: web::Data<AppState>) -> impl Responder {
     let clients = state.clients.lock().await;
 

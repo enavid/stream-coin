@@ -12,6 +12,9 @@ pub struct KafkaProducer {
 }
 
 impl KafkaProducer {
+    /// Creates a producer connected to the given `brokers` address
+    /// (e.g. `"localhost:9092"`). Returns an error if the client
+    /// configuration is rejected by librdkafka.
     pub fn new(brokers: &str) -> Result<Self, PublisherError> {
         let producer = ClientConfig::new()
             .set("bootstrap.servers", brokers)
@@ -23,10 +26,13 @@ impl KafkaProducer {
         Ok(Self { inner: producer })
     }
 
+    /// Serializes `price` to the JSON payload published to Kafka and broadcast
+    /// over WebSocket — both transports use this single representation.
     pub fn price_to_payload(price: &Price) -> Result<String, serde_json::Error> {
         serde_json::to_string(price)
     }
 
+    /// Returns the Kafka message key for `price` in `"exchange:pair"` format.
     pub fn price_to_key(price: &Price) -> String {
         format!("{}:{}", price.exchange, price.pair)
     }
