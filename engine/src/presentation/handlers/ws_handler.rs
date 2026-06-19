@@ -74,6 +74,7 @@ mod tests {
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
+            ticker_repository: None,
         })
     }
 

@@ -9,6 +9,8 @@ use stream_coin::exchange::hitobit::HitobitWsAdapter;
 use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
+use stream_coin::infrastructure::db::ticker_repository::{FakeTickerRepository, TickerRepository};
+use stream_coin::presentation::handlers::exchange_handler::restore_tickers;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::middlewares::jwt::mint_token;
 use stream_coin::presentation::routers::init_routes;
@@ -25,6 +27,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
         jwt_secret: None,
+        ticker_repository: None,
     })
 }
 
@@ -40,6 +43,7 @@ fn build_state_with_hitobit() -> actix_web::web::Data<AppState> {
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
         jwt_secret: None,
+        ticker_repository: None,
     })
 }
 
@@ -56,6 +60,7 @@ fn build_state_with_both_adapters() -> actix_web::web::Data<AppState> {
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
         jwt_secret: None,
+        ticker_repository: None,
     })
 }
 
@@ -72,6 +77,7 @@ fn build_state_with_ticker(key: &str) -> actix_web::web::Data<AppState> {
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
         jwt_secret: None,
+        ticker_repository: None,
     })
 }
 
@@ -709,6 +715,7 @@ async fn start_ticker_for_disabled_exchange_returns_400() {
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
                 jwt_secret: None,
+                ticker_repository: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -760,6 +767,7 @@ async fn disable_exchange_aborts_running_tickers() {
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
                 jwt_secret: None,
+                ticker_repository: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -807,6 +815,7 @@ async fn enable_exchange_then_start_ticker_returns_200() {
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
                 jwt_secret: None,
+                ticker_repository: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -869,6 +878,7 @@ async fn list_pairs_returns_only_active_pairs() {
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
                 jwt_secret: None,
+                ticker_repository: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -921,6 +931,7 @@ async fn list_pairs_filters_by_market_type() {
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
                 jwt_secret: None,
+                ticker_repository: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -954,6 +965,7 @@ async fn start_ticker_without_token_returns_401() {
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
                 jwt_secret: Some(Arc::new(secret.to_string())),
+                ticker_repository: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -989,6 +1001,7 @@ async fn start_ticker_with_valid_token_returns_200() {
                 publisher: None,
                 broadcaster: AppState::new_broadcaster(),
                 jwt_secret: Some(Arc::new(secret.to_string())),
+                ticker_repository: None,
             }))
             .app_data(json_error_handler_config()),
     )
@@ -1003,4 +1016,61 @@ async fn start_ticker_with_valid_token_returns_200() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200, "valid token must allow the request");
+}
+
+// --- ticker persistence tests (ROADMAP 1d) ---
+
+#[actix_web::test]
+async fn two_engine_instances_share_ticker_state() {
+    let shared_repo: Arc<dyn TickerRepository> = Arc::new(FakeTickerRepository::new());
+
+    let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+    adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter::default()));
+
+    let state1 = actix_web::web::Data::new(AppState {
+        redis: None,
+        exchange_adapters: Arc::new(RwLock::new(adapters.clone())),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher: None,
+        broadcaster: AppState::new_broadcaster(),
+        jwt_secret: None,
+        ticker_repository: Some(Arc::clone(&shared_repo)),
+    });
+
+    let app1 = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(state1)
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"tabdeal","symbol":"USDT/IRT"}"#)
+        .to_request();
+    let resp = test::call_service(&app1, req).await;
+    assert_eq!(resp.status(), 200, "instance 1 must start the ticker");
+
+    let state2 = actix_web::web::Data::new(AppState {
+        redis: None,
+        exchange_adapters: Arc::new(RwLock::new(adapters)),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher: None,
+        broadcaster: AppState::new_broadcaster(),
+        jwt_secret: None,
+        ticker_repository: Some(Arc::clone(&shared_repo)),
+    });
+
+    restore_tickers(&state2).await;
+
+    assert!(
+        state2.clients.lock().await.contains_key("tabdeal:USDT/IRT"),
+        "instance 2 must restore the ticker from shared state"
+    );
 }

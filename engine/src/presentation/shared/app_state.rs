@@ -7,6 +7,7 @@ use tokio::task::AbortHandle;
 
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
+use crate::infrastructure::db::ticker_repository::TickerRepository;
 use crate::kafka::port::MessagePublisher;
 
 pub type ClientKey = String;
@@ -41,6 +42,8 @@ pub struct AppState {
     pub broadcaster: broadcast::Sender<String>,
     /// HS256 secret for JWT validation. `None` = auth disabled (development mode).
     pub jwt_secret: Option<Arc<String>>,
+    /// Persistent store for active ticker subscriptions. `None` = in-memory only (no DB).
+    pub ticker_repository: Option<Arc<dyn TickerRepository>>,
 }
 
 impl AppState {

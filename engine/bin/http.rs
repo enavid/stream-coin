@@ -16,8 +16,11 @@ use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::infrastructure::cache::redis;
+use stream_coin::infrastructure::db::postgres::PostgresTickerRepository;
+use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
 use stream_coin::kafka::port::MessagePublisher;
 use stream_coin::kafka::KafkaProducer;
+use stream_coin::presentation::handlers::exchange_handler::restore_tickers;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
@@ -145,6 +148,28 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    let ticker_repository: Option<Arc<dyn TickerRepository>> = match env::var("DATABASE_URL") {
+        Ok(url) => match sqlx::PgPool::connect(&url).await {
+            Ok(pool) => {
+                if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
+                    tracing::error!(error = %e, "database migration failed");
+                    None
+                } else {
+                    tracing::info!(url = %url, "postgres connected, migrations applied");
+                    Some(Arc::new(PostgresTickerRepository::new(pool)))
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "postgres unavailable, starting without DB persistence");
+                None
+            }
+        },
+        Err(_) => {
+            tracing::warn!("DATABASE_URL not set, starting without DB persistence");
+            None
+        }
+    };
+
     let app_state = web::Data::new(AppState {
         redis: redis_conn,
         exchange_adapters: Arc::new(RwLock::new(adapters)),
@@ -154,7 +179,10 @@ async fn main() -> std::io::Result<()> {
         publisher,
         broadcaster: AppState::new_broadcaster(),
         jwt_secret,
+        ticker_repository,
     });
+
+    restore_tickers(&app_state).await;
 
     tracing::info!(host = %host, port = %port, "server starting");
 

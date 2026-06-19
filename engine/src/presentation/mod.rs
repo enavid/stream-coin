@@ -1,6 +1,6 @@
 pub mod dto;
 pub mod extractors;
-mod handlers;
+pub mod handlers;
 pub mod middlewares;
 mod responses;
 pub mod routers;

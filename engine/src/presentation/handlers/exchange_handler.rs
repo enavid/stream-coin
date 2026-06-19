@@ -3,12 +3,113 @@ use std::sync::Arc;
 use actix_web::{web, Responder};
 use tokio::sync::mpsc;
 
+use crate::kafka::port::MessagePublisher;
 use crate::presentation::dto::ticker::{
     ActiveTicker, SymbolRequest, TickerList, TickerStarted, TickerStopped,
 };
 use crate::presentation::extractors::ValidatedJson;
 use crate::presentation::responses::{success_response, ApiError, FieldError};
 use crate::presentation::shared::app_state::AppState;
+use crate::price::entity::Price;
+
+fn spawn_price_forwarder(
+    mut rx: tokio::sync::mpsc::Receiver<Price>,
+    broadcaster: tokio::sync::broadcast::Sender<String>,
+    publisher: Option<Arc<dyn MessagePublisher>>,
+) {
+    use crate::kafka::producer::KafkaProducer;
+    use crate::presentation::ws_message::{PricePayload, WsMessage};
+
+    let topic = std::env::var("KAFKA_TOPIC_PRICES").unwrap_or_else(|_| "prices".to_string());
+
+    tokio::spawn(async move {
+        while let Some(price) = rx.recv().await {
+            tracing::trace!(
+                exchange = %price.exchange,
+                pair = %price.pair,
+                bid = price.bid,
+                ask = price.ask,
+                "price update"
+            );
+            let payload =
+                match serde_json::to_string(&WsMessage::PriceUpdate(PricePayload::from(&price))) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to serialize price");
+                        continue;
+                    }
+                };
+            let _ = broadcaster.send(payload.clone());
+            if let Some(ref pub_) = publisher {
+                let key = KafkaProducer::price_to_key(&price);
+                if let Err(e) = pub_.publish(&topic, &key, &payload).await {
+                    tracing::error!(error = %e, "failed to publish price to kafka");
+                }
+            }
+        }
+    });
+}
+
+/// Reads active ticker subscriptions from the repository and restarts each one.
+/// Called on engine startup to restore state that survived a restart.
+pub async fn restore_tickers(state: &web::Data<AppState>) {
+    let Some(repo) = &state.ticker_repository else {
+        return;
+    };
+    let subs = match repo.list_active().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to load ticker subscriptions from DB");
+            return;
+        }
+    };
+
+    tracing::info!(count = subs.len(), "restoring ticker subscriptions from DB");
+
+    for sub in subs {
+        let pair = match sub.symbol.split_once('/') {
+            Some((base, quote)) => crate::price::entity::TradingPair::new(base, quote),
+            None => {
+                tracing::warn!(symbol = %sub.symbol, "invalid symbol format in DB, skipping");
+                continue;
+            }
+        };
+
+        let adapter = {
+            let adapters = state.exchange_adapters.read().await;
+            adapters.get(&sub.exchange).map(Arc::clone)
+        };
+        let adapter = match adapter {
+            Some(a) => a,
+            None => {
+                tracing::warn!(exchange = %sub.exchange, "no adapter found for restored ticker, skipping");
+                continue;
+            }
+        };
+
+        let key = format!("{}:{}", sub.exchange, sub.symbol);
+        {
+            let clients = state.clients.lock().await;
+            if clients.contains_key(&key) {
+                continue;
+            }
+        }
+
+        let (tx, rx) = mpsc::channel(100);
+        let abort = match adapter.subscribe(&pair, tx).await {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!(exchange = %sub.exchange, pair = %sub.symbol, error = %e, "failed to restore ticker");
+                continue;
+            }
+        };
+
+        spawn_price_forwarder(rx, state.broadcaster.clone(), state.publisher.clone());
+
+        state.clients.lock().await.insert(key, abort);
+        tracing::info!(exchange = %sub.exchange, pair = %sub.symbol, "ticker restored");
+    }
+}
 
 #[utoipa::path(
     post,
@@ -62,7 +163,7 @@ pub async fn start_kline_symbol_ticker(
         return ApiError::new("Ticker already running", vec![]).to_response();
     }
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
 
     let abort = match adapter.subscribe(&request.symbol, tx).await {
         Ok(h) => h,
@@ -77,44 +178,18 @@ pub async fn start_kline_symbol_ticker(
         }
     };
 
-    let publisher = state.publisher.clone();
-    let broadcaster = state.broadcaster.clone();
-    let topic = std::env::var("KAFKA_TOPIC_PRICES").unwrap_or_else(|_| "prices".to_string());
+    spawn_price_forwarder(rx, state.broadcaster.clone(), state.publisher.clone());
 
-    tokio::spawn(async move {
-        use crate::kafka::producer::KafkaProducer;
-        use crate::presentation::ws_message::{PricePayload, WsMessage};
+    clients.insert(key.clone(), abort);
 
-        while let Some(price) = rx.recv().await {
-            tracing::info!(
-                exchange = %price.exchange,
-                pair = %price.pair,
-                bid = price.bid,
-                ask = price.ask,
-                "price update"
-            );
-
-            let payload =
-                match serde_json::to_string(&WsMessage::PriceUpdate(PricePayload::from(&price))) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to serialize price");
-                        continue;
-                    }
-                };
-
-            let _ = broadcaster.send(payload.clone());
-
-            if let Some(ref pub_) = publisher {
-                let key = KafkaProducer::price_to_key(&price);
-                if let Err(e) = pub_.publish(&topic, &key, &payload).await {
-                    tracing::error!(error = %e, "failed to publish price to kafka");
-                }
-            }
+    if let Some(repo) = &state.ticker_repository {
+        if let Err(e) = repo
+            .insert(&request.exchange.to_string(), &request.symbol.to_string())
+            .await
+        {
+            tracing::error!(error = %e, "failed to persist ticker to DB; ticker runs but will not survive restart");
         }
-    });
-
-    clients.insert(key, abort);
+    }
 
     tracing::info!(
         exchange = %request.exchange,
@@ -154,6 +229,16 @@ pub async fn stop_kline_symbol_ticker(
     match clients.remove(&key) {
         Some(handle) => {
             handle.abort();
+
+            if let Some(repo) = &state.ticker_repository {
+                if let Err(e) = repo
+                    .remove(&request.exchange.to_string(), &request.symbol.to_string())
+                    .await
+                {
+                    tracing::error!(error = %e, "failed to remove ticker from DB");
+                }
+            }
+
             tracing::info!(
                 exchange = %request.exchange,
                 pair = %request.symbol,
@@ -223,6 +308,9 @@ mod tests {
     use crate::exchange::entity::ExchangeId;
     use crate::exchange::port::{ExchangeAdapter, ExchangeAdapterError};
     use crate::exchange::registry::ExchangeRegistry;
+    use crate::infrastructure::db::ticker_repository::{
+        FakeTickerRepository, TickerRepository, TickerSubscription,
+    };
     use crate::kafka::port::mock::MockPublisher;
     use crate::presentation::shared::app_state::{AdapterFactory, AppState};
     use crate::price::entity::{Price, TradingPair};
@@ -292,6 +380,7 @@ mod tests {
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
+            ticker_repository: None,
         })
     }
 
@@ -308,6 +397,7 @@ mod tests {
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
+            ticker_repository: None,
         })
     }
 
@@ -430,6 +520,7 @@ mod tests {
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
+            ticker_repository: None,
         });
         let app = test::init_service(
             App::new()
@@ -529,6 +620,7 @@ mod tests {
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
+            ticker_repository: None,
         });
         let app = test::init_service(
             App::new()
@@ -575,6 +667,7 @@ mod tests {
             publisher: Some(failing_publisher),
             broadcaster,
             jwt_secret: None,
+            ticker_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -623,6 +716,7 @@ mod tests {
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
+            ticker_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -693,6 +787,7 @@ mod tests {
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
+            ticker_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -734,6 +829,83 @@ mod tests {
             count.load(Ordering::SeqCst),
             1,
             "subscribe must be called exactly once for the new start"
+        );
+    }
+
+    // --- ticker repository persistence tests (ROADMAP 1d) ---
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_ticker_removes_db_row() {
+        let repo = Arc::new(FakeTickerRepository::new_with(vec![TickerSubscription {
+            exchange: "tabdeal".to_string(),
+            symbol: "USDT/IRT".to_string(),
+        }]));
+        let handle = tokio::spawn(std::future::pending::<()>()).abort_handle();
+        let mut map = HashMap::new();
+        map.insert("tabdeal:USDT/IRT".to_string(), handle);
+
+        let state = web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+            clients: Arc::new(Mutex::new(map)),
+            publisher: None,
+            broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
+            ticker_repository: Some(Arc::clone(&repo) as Arc<dyn TickerRepository>),
+        });
+
+        let dummy_req = test::TestRequest::default().to_http_request();
+        stop_kline_symbol_ticker(
+            state,
+            ValidatedJson(SymbolRequest {
+                exchange: ExchangeId::new("tabdeal"),
+                symbol: TradingPair::new("USDT", "IRT"),
+            }),
+        )
+        .await
+        .respond_to(&dummy_req);
+
+        let remaining = repo.list_active().await.unwrap();
+        assert!(
+            remaining.is_empty(),
+            "DB row must be removed when ticker is stopped"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_tickers_restored_from_db_on_startup() {
+        let repo = Arc::new(FakeTickerRepository::new_with(vec![TickerSubscription {
+            exchange: "tabdeal".to_string(),
+            symbol: "USDT/IRT".to_string(),
+        }]));
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+        adapters.insert(
+            "tabdeal".to_string(),
+            Arc::new(CountingAdapter {
+                count: Arc::clone(&count),
+            }),
+        );
+
+        let state = web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(adapters)),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            publisher: None,
+            broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
+            ticker_repository: Some(Arc::clone(&repo) as Arc<dyn TickerRepository>),
+        });
+
+        restore_tickers(&state).await;
+
+        assert!(
+            state.clients.lock().await.contains_key("tabdeal:USDT/IRT"),
+            "ticker from DB must be restored into the clients map on startup"
         );
     }
 }

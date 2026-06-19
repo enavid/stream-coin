@@ -20,6 +20,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
         jwt_secret: None,
+        ticker_repository: None,
     })
 }
 
