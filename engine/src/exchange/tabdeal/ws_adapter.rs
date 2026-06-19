@@ -48,15 +48,13 @@ impl TabdealWsAdapter {
 
         let bid = bids[0][0]
             .as_str()
-            .ok_or_else(|| "invalid bid price".to_string())?
-            .parse::<f64>()
-            .map_err(|e| e.to_string())? as u64;
+            .ok_or_else(|| "invalid bid price".to_string())
+            .and_then(Self::parse_price_units)?;
 
         let ask = asks[0][0]
             .as_str()
-            .ok_or_else(|| "invalid ask price".to_string())?
-            .parse::<f64>()
-            .map_err(|e| e.to_string())? as u64;
+            .ok_or_else(|| "invalid ask price".to_string())
+            .and_then(Self::parse_price_units)?;
 
         Ok(Price {
             exchange: ExchangeId::new("tabdeal"),
@@ -65,6 +63,17 @@ impl TabdealWsAdapter {
             ask,
             timestamp: Utc::now(),
         })
+    }
+
+    fn parse_price_units(s: &str) -> Result<u64, String> {
+        let v = s.parse::<f64>().map_err(|e| e.to_string())?;
+        if !v.is_finite() {
+            return Err(format!("price is not finite: {s}"));
+        }
+        if v < 0.0 {
+            return Err(format!("price must be non-negative: {s}"));
+        }
+        Ok(v as u64)
     }
 
     fn parse_trading_pair(symbol: &str) -> TradingPair {
@@ -220,5 +229,59 @@ mod tests {
     fn build_subscribe_message_includes_depth_stream_for_symbol() {
         let msg = TabdealWsAdapter::build_subscribe_message("usdtirt");
         assert_eq!(msg["params"][0], "usdtirt@depth@2000ms");
+    }
+
+    // --- malformed / boundary price tests ---
+
+    #[test]
+    fn parse_depth_message_nan_bid_returns_error() {
+        let msg = depth_message("USDTIRT", "NaN", "58100");
+        assert!(
+            TabdealWsAdapter::parse_depth_message(&msg).is_err(),
+            "NaN bid must return Err, not a silently zeroed price"
+        );
+    }
+
+    #[test]
+    fn parse_depth_message_infinity_ask_returns_error() {
+        let msg = depth_message("USDTIRT", "58000", "inf");
+        assert!(
+            TabdealWsAdapter::parse_depth_message(&msg).is_err(),
+            "infinite ask must return Err, not u64::MAX"
+        );
+    }
+
+    #[test]
+    fn parse_depth_message_negative_bid_returns_error() {
+        let msg = depth_message("USDTIRT", "-100", "58100");
+        assert!(
+            TabdealWsAdapter::parse_depth_message(&msg).is_err(),
+            "negative bid must return Err, not a silently zeroed price"
+        );
+    }
+
+    #[test]
+    fn parse_depth_message_negative_ask_returns_error() {
+        let msg = depth_message("USDTIRT", "58000", "-200");
+        assert!(
+            TabdealWsAdapter::parse_depth_message(&msg).is_err(),
+            "negative ask must return Err, not a silently zeroed price"
+        );
+    }
+
+    #[test]
+    fn parse_depth_message_zero_prices_succeeds() {
+        let msg = depth_message("USDTIRT", "0", "0");
+        let price = TabdealWsAdapter::parse_depth_message(&msg).unwrap();
+        assert_eq!(price.bid, 0);
+        assert_eq!(price.ask, 0);
+    }
+
+    #[test]
+    fn parse_depth_message_decimal_price_truncates_to_units() {
+        let msg = depth_message("USDTIRT", "58000.9", "58100.1");
+        let price = TabdealWsAdapter::parse_depth_message(&msg).unwrap();
+        assert_eq!(price.bid, 58000);
+        assert_eq!(price.ask, 58100);
     }
 }
