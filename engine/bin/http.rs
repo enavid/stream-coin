@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use stream_coin::exchange::hitobit::HitobitWsAdapter;
 use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::infrastructure::cache::redis;
@@ -64,6 +65,7 @@ async fn main() -> std::io::Result<()> {
 
     let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
     adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter::default()));
+    adapters.insert("hitobit".to_string(), Arc::new(HitobitWsAdapter::default()));
 
     let publisher: Option<Arc<dyn MessagePublisher>> = match env::var("KAFKA_URL") {
         Ok(url) => match KafkaProducer::new(&url) {

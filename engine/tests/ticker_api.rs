@@ -5,6 +5,9 @@ use actix_web::test;
 use actix_web::App;
 use tokio::sync::Mutex;
 
+use stream_coin::exchange::hitobit::HitobitWsAdapter;
+use stream_coin::exchange::port::ExchangeAdapter;
+use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::AppState;
@@ -13,6 +16,31 @@ fn build_state() -> actix_web::web::Data<AppState> {
     actix_web::web::Data::new(AppState {
         redis: None,
         exchange_adapters: Arc::new(HashMap::new()),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher: None,
+        broadcaster: AppState::new_broadcaster(),
+    })
+}
+
+fn build_state_with_hitobit() -> actix_web::web::Data<AppState> {
+    let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+    adapters.insert("hitobit".to_string(), Arc::new(HitobitWsAdapter::default()));
+    actix_web::web::Data::new(AppState {
+        redis: None,
+        exchange_adapters: Arc::new(adapters),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher: None,
+        broadcaster: AppState::new_broadcaster(),
+    })
+}
+
+fn build_state_with_both_adapters() -> actix_web::web::Data<AppState> {
+    let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+    adapters.insert("hitobit".to_string(), Arc::new(HitobitWsAdapter::default()));
+    adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter::default()));
+    actix_web::web::Data::new(AppState {
+        redis: None,
+        exchange_adapters: Arc::new(adapters),
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
@@ -454,6 +482,63 @@ async fn list_tickers_returns_canonical_pair_not_exchange_format() {
     assert_eq!(
         tickers[0]["pair"], "USDT/IRT",
         "list must return canonical pair, not exchange-specific symbol"
+    );
+}
+
+// --- hitobit adapter tests (Loop 1a) ---
+
+#[actix_web::test]
+async fn start_ticker_hitobit_returns_200() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state_with_hitobit())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"hitobit","symbol":"USDT/IRT"}"#)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+}
+
+#[actix_web::test]
+async fn hitobit_and_tabdeal_same_pair_both_active() {
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(build_state_with_both_adapters())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req1 = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"hitobit","symbol":"USDT/IRT"}"#)
+        .to_request();
+    let resp1 = test::call_service(&app, req1).await;
+    assert_eq!(
+        resp1.status(),
+        200,
+        "hitobit ticker must start successfully"
+    );
+
+    let req2 = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"tabdeal","symbol":"USDT/IRT"}"#)
+        .to_request();
+    let resp2 = test::call_service(&app, req2).await;
+    assert_eq!(
+        resp2.status(),
+        200,
+        "tabdeal ticker must start alongside hitobit for the same pair"
     );
 }
 
