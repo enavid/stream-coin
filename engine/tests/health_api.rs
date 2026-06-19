@@ -62,7 +62,7 @@ async fn health_endpoint_returns_project_name() {
 }
 
 #[actix_web::test]
-async fn health_endpoint_returns_status_up() {
+async fn health_endpoint_returns_status_down_when_redis_disconnected() {
     let app = test::init_service(
         App::new()
             .configure(init_routes)
@@ -79,11 +79,11 @@ async fn health_endpoint_returns_status_up() {
     )
     .await;
 
-    assert_eq!(body["data"]["status"], "up");
+    assert_eq!(body["data"]["status"], "down");
 }
 
 #[actix_web::test]
-async fn health_endpoint_returns_redis_disconnected() {
+async fn health_endpoint_checks_redis_is_down_when_disconnected() {
     let app = test::init_service(
         App::new()
             .configure(init_routes)
@@ -100,7 +100,7 @@ async fn health_endpoint_returns_redis_disconnected() {
     )
     .await;
 
-    assert_eq!(body["data"]["dependencies"]["redis"], "disconnected");
+    assert_eq!(body["data"]["checks"]["redis"], "down");
 }
 
 #[actix_web::test]

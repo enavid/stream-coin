@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use actix_web::{web, Responder};
 
-use crate::presentation::dto::health::{Dependencies, HealthStatus};
+use crate::presentation::dto::health::{worst_status, HealthStatus, ServiceStatus};
 use crate::presentation::responses::success_response;
 use crate::presentation::shared::app_state::AppState;
 
@@ -9,30 +11,32 @@ use crate::presentation::shared::app_state::AppState;
     path = "/v1/check/health",
     tag = "Health",
     responses(
-        (status = 200, description = "Service is up", body = HealthStatus)
+        (status = 200, description = "Service health with per-dependency checks", body = HealthStatus)
     )
 )]
-/// `GET /v1/check/health` — returns service version and dependency status
-/// (Redis connected/disconnected). Always returns 200; callers should inspect
-/// the `dependencies` field to determine actual health.
+/// `GET /v1/check/health` — returns service version and per-dependency status.
+/// Always returns 200; callers should inspect `status` and `checks` to determine
+/// actual health. `status` is the worst across all checks.
 pub async fn health(state: web::Data<AppState>) -> impl Responder {
-    let redis_status = if state.redis.is_some() {
-        "connected"
+    let redis_check = if state.redis.is_some() {
+        ServiceStatus::Up
     } else {
-        "disconnected"
+        ServiceStatus::Down
     };
 
-    tracing::debug!(redis = %redis_status, "health check");
+    let mut checks = HashMap::new();
+    checks.insert("redis".to_string(), redis_check);
+    let status = worst_status(&checks);
+
+    tracing::debug!(?status, "health check");
 
     success_response(
         "ok",
         HealthStatus {
             name: env!("CARGO_PKG_NAME"),
             version: env!("CARGO_PKG_VERSION"),
-            status: "up",
-            dependencies: Dependencies {
-                redis: redis_status,
-            },
+            status,
+            checks,
         },
     )
 }
@@ -60,6 +64,17 @@ mod tests {
         })
     }
 
+    async fn call_health(state: web::Data<AppState>) -> serde_json::Value {
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/health", web::get().to(health)),
+        )
+        .await;
+        test::call_and_read_body_json(&app, test::TestRequest::get().uri("/health").to_request())
+            .await
+    }
+
     #[actix_web::test]
     async fn health_returns_200() {
         let app = test::init_service(
@@ -75,65 +90,45 @@ mod tests {
 
     #[actix_web::test]
     async fn health_returns_project_name() {
-        let app = test::init_service(
-            App::new()
-                .app_data(disconnected_state())
-                .route("/health", web::get().to(health)),
-        )
-        .await;
-        let body: serde_json::Value = test::call_and_read_body_json(
-            &app,
-            test::TestRequest::get().uri("/health").to_request(),
-        )
-        .await;
+        let body = call_health(disconnected_state()).await;
         assert_eq!(body["data"]["name"], "stream-coin");
     }
 
     #[actix_web::test]
     async fn health_returns_project_version() {
-        let app = test::init_service(
-            App::new()
-                .app_data(disconnected_state())
-                .route("/health", web::get().to(health)),
-        )
-        .await;
-        let body: serde_json::Value = test::call_and_read_body_json(
-            &app,
-            test::TestRequest::get().uri("/health").to_request(),
-        )
-        .await;
+        let body = call_health(disconnected_state()).await;
         assert!(!body["data"]["version"].as_str().unwrap_or("").is_empty());
     }
 
     #[actix_web::test]
-    async fn health_returns_status_up() {
-        let app = test::init_service(
-            App::new()
-                .app_data(disconnected_state())
-                .route("/health", web::get().to(health)),
-        )
-        .await;
-        let body: serde_json::Value = test::call_and_read_body_json(
-            &app,
-            test::TestRequest::get().uri("/health").to_request(),
-        )
-        .await;
-        assert_eq!(body["data"]["status"], "up");
+    async fn health_status_is_down_when_redis_disconnected() {
+        let body = call_health(disconnected_state()).await;
+        assert_eq!(
+            body["data"]["status"], "down",
+            "status must reflect redis being unreachable"
+        );
     }
 
     #[actix_web::test]
-    async fn health_reports_redis_disconnected_in_dependencies() {
-        let app = test::init_service(
-            App::new()
-                .app_data(disconnected_state())
-                .route("/health", web::get().to(health)),
-        )
-        .await;
-        let body: serde_json::Value = test::call_and_read_body_json(
-            &app,
-            test::TestRequest::get().uri("/health").to_request(),
-        )
-        .await;
-        assert_eq!(body["data"]["dependencies"]["redis"], "disconnected");
+    async fn health_checks_map_contains_redis_key() {
+        let body = call_health(disconnected_state()).await;
+        assert!(
+            body["data"]["checks"]["redis"] != serde_json::Value::Null,
+            "checks must contain a 'redis' key"
+        );
+    }
+
+    #[actix_web::test]
+    async fn health_checks_redis_value_is_down_when_disconnected() {
+        let body = call_health(disconnected_state()).await;
+        assert_eq!(body["data"]["checks"]["redis"], "down");
+    }
+
+    /// Requires a running Redis instance; skipped in CI without one.
+    #[actix_web::test]
+    #[ignore]
+    async fn health_status_is_up_when_redis_connected() {
+        // To run: `REDIS_URL=redis://127.0.0.1:6379 cargo test health_status_is_up`
+        // Create a real MultiplexedConnection here when integration infra is available.
     }
 }

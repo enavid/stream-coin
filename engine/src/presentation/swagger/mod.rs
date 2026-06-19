@@ -1,11 +1,11 @@
 use utoipa::openapi::OpenApi as OpenApiSpec;
 use utoipa::{Modify, OpenApi};
 
-use crate::presentation::dto::health::{Dependencies, HealthStatus};
+use crate::presentation::dto::health::{HealthStatus, ServiceStatus};
 use crate::presentation::dto::ticker::{
     ActiveTicker, SymbolRequest, TickerList, TickerStarted, TickerStopped,
 };
-use crate::presentation::responses::ApiError;
+use crate::presentation::responses::{ApiError, FieldError};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -19,9 +19,9 @@ use crate::presentation::responses::ApiError;
     ),
     components(
         schemas(
-            HealthStatus, Dependencies,
+            HealthStatus, ServiceStatus,
             SymbolRequest, TickerStarted, TickerStopped, ActiveTicker, TickerList,
-            ApiError
+            ApiError, FieldError
         )
     ),
     tags(
