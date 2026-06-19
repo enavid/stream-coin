@@ -1,7 +1,9 @@
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::config::Config;
+use crate::response::{ApiError, ApiSuccess, TickerData, TickerListData};
 
 pub struct ApiClient {
     inner: Client,
@@ -54,24 +56,70 @@ impl ApiClient {
         resp.json::<Value>().await.map_err(|e| e.to_string())
     }
 
-    pub async fn ticker_start(&self, exchange: &str, symbol: &str) -> Result<Value, String> {
-        self.post(
-            &self.ticker_start_url(),
-            serde_json::json!({ "exchange": exchange, "symbol": symbol }),
-        )
-        .await
+    pub async fn ticker_start(
+        &self,
+        exchange: &str,
+        symbol: &str,
+    ) -> Result<ApiSuccess<TickerData>, ApiError> {
+        let value = self
+            .post(
+                &self.ticker_start_url(),
+                serde_json::json!({ "exchange": exchange, "symbol": symbol }),
+            )
+            .await
+            .map_err(|e| ApiError {
+                success: false,
+                message: e,
+                errors: vec![],
+            })?;
+        parse_response(value)
     }
 
-    pub async fn ticker_stop(&self, exchange: &str, symbol: &str) -> Result<Value, String> {
-        self.post(
-            &self.ticker_stop_url(),
-            serde_json::json!({ "exchange": exchange, "symbol": symbol }),
-        )
-        .await
+    pub async fn ticker_stop(
+        &self,
+        exchange: &str,
+        symbol: &str,
+    ) -> Result<ApiSuccess<TickerData>, ApiError> {
+        let value = self
+            .post(
+                &self.ticker_stop_url(),
+                serde_json::json!({ "exchange": exchange, "symbol": symbol }),
+            )
+            .await
+            .map_err(|e| ApiError {
+                success: false,
+                message: e,
+                errors: vec![],
+            })?;
+        parse_response(value)
     }
 
-    pub async fn ticker_list(&self) -> Result<Value, String> {
-        self.get(&self.ticker_list_url()).await
+    pub async fn ticker_list(&self) -> Result<ApiSuccess<TickerListData>, ApiError> {
+        let value = self
+            .get(&self.ticker_list_url())
+            .await
+            .map_err(|e| ApiError {
+                success: false,
+                message: e,
+                errors: vec![],
+            })?;
+        parse_response(value)
+    }
+}
+
+fn parse_response<T: DeserializeOwned>(value: Value) -> Result<ApiSuccess<T>, ApiError> {
+    if value["success"].as_bool().unwrap_or(false) {
+        serde_json::from_value(value).map_err(|e| ApiError {
+            success: false,
+            message: e.to_string(),
+            errors: vec![],
+        })
+    } else {
+        Err(serde_json::from_value(value).unwrap_or_else(|_| ApiError {
+            success: false,
+            message: "unexpected response format".to_string(),
+            errors: vec![],
+        }))
     }
 }
 
@@ -127,5 +175,41 @@ mod tests {
         assert!(client
             .ticker_start_url()
             .starts_with("http://prod.example.com:9000"));
+    }
+
+    #[test]
+    fn parse_response_success_extracts_data() {
+        let value = serde_json::json!({
+            "success": true,
+            "message": "Ticker started",
+            "data": { "exchange": "tabdeal", "pair": "USDT/IRT" }
+        });
+        let result: Result<ApiSuccess<TickerData>, _> = parse_response(value);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().data.pair, "USDT/IRT");
+    }
+
+    #[test]
+    fn parse_response_error_returns_api_error() {
+        let value = serde_json::json!({
+            "success": false,
+            "message": "Exchange not supported",
+            "errors": [{ "field": "exchange", "message": "unsupported exchange" }]
+        });
+        let result: Result<ApiSuccess<TickerData>, _> = parse_response(value);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().message, "Exchange not supported");
+    }
+
+    #[test]
+    fn parse_response_error_carries_field_errors() {
+        let value = serde_json::json!({
+            "success": false,
+            "message": "Validation failed",
+            "errors": [{ "field": "symbol", "message": "must be BASE/QUOTE format" }]
+        });
+        let result: Result<ApiSuccess<TickerData>, _> = parse_response(value);
+        let err = result.unwrap_err();
+        assert_eq!(err.errors[0].field, "symbol");
     }
 }

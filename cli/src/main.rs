@@ -4,6 +4,7 @@ use colored::Colorize;
 mod auth;
 mod client;
 mod config;
+mod response;
 mod ticker;
 
 use client::ApiClient;
