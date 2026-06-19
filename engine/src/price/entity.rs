@@ -36,7 +36,11 @@ impl fmt::Display for TradingPair {
 pub struct Price {
     pub exchange: ExchangeId,
     pub pair: TradingPair,
+    /// Price in Iranian Rial (IRR). 1 unit = 1 IRR.
+    /// Exchange adapters must normalize to this unit before constructing Price.
     pub ask: u64,
+    /// Price in Iranian Rial (IRR). 1 unit = 1 IRR.
+    /// Exchange adapters must normalize to this unit before constructing Price.
     pub bid: u64,
     pub timestamp: DateTime<Utc>,
 }

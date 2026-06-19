@@ -84,6 +84,8 @@ impl TabdealWsAdapter {
         })
     }
 
+    /// Parses a price string from Tabdeal's WS API into rial units.
+    /// Tabdeal prices are already in IRR; fractional rials are truncated (not rounded).
     fn parse_price_units(s: &str) -> Result<u64, String> {
         let v = s.parse::<f64>().map_err(|e| e.to_string())?;
         if !v.is_finite() {
@@ -502,5 +504,63 @@ mod tests {
         let price = TabdealWsAdapter::parse_depth_message(&msg).unwrap();
         assert_eq!(price.bid, 58000);
         assert_eq!(price.ask, 58100);
+    }
+
+    // --- parse_price_units unit tests ---
+
+    #[test]
+    fn parse_price_units_truncates_fractional_rials() {
+        assert_eq!(
+            TabdealWsAdapter::parse_price_units("58000.9").unwrap(),
+            58000
+        );
+    }
+
+    #[test]
+    fn parse_price_units_zero_is_valid() {
+        assert_eq!(TabdealWsAdapter::parse_price_units("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_price_units_zero_point_zero_is_valid() {
+        assert_eq!(TabdealWsAdapter::parse_price_units("0.0").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_price_units_integer_string_is_valid() {
+        assert_eq!(
+            TabdealWsAdapter::parse_price_units("175500").unwrap(),
+            175500
+        );
+    }
+
+    #[test]
+    fn parse_price_units_large_value_near_u64_max() {
+        assert!(TabdealWsAdapter::parse_price_units("18000000000000000000").is_ok());
+    }
+
+    #[test]
+    fn parse_price_units_negative_returns_err() {
+        assert!(TabdealWsAdapter::parse_price_units("-1").is_err());
+    }
+
+    #[test]
+    fn parse_price_units_nan_string_returns_err() {
+        assert!(TabdealWsAdapter::parse_price_units("NaN").is_err());
+    }
+
+    #[test]
+    fn parse_price_units_infinity_string_returns_err() {
+        assert!(TabdealWsAdapter::parse_price_units("Infinity").is_err());
+    }
+
+    #[test]
+    fn parse_price_units_non_numeric_string_returns_err() {
+        assert!(TabdealWsAdapter::parse_price_units("abc").is_err());
+    }
+
+    #[test]
+    fn parse_price_units_empty_string_returns_err() {
+        assert!(TabdealWsAdapter::parse_price_units("").is_err());
     }
 }
