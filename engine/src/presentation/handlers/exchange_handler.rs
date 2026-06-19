@@ -27,8 +27,12 @@ pub async fn start_kline_symbol_ticker(
     state: web::Data<AppState>,
     request: ValidatedJson<SymbolRequest>,
 ) -> impl Responder {
-    let adapter = match state.exchange_adapters.get(request.exchange.as_str()) {
-        Some(a) => Arc::clone(a),
+    let adapter = {
+        let adapters = state.exchange_adapters.read().await;
+        adapters.get(request.exchange.as_str()).map(Arc::clone)
+    };
+    let adapter = match adapter {
+        Some(a) => a,
         None => {
             tracing::warn!(
                 exchange = %request.exchange,
@@ -212,14 +216,15 @@ mod tests {
     use actix_web::{test, web, App};
     use async_trait::async_trait;
     use tokio::sync::mpsc::Sender;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, RwLock};
     use tokio::task::AbortHandle;
 
     use super::*;
     use crate::exchange::entity::ExchangeId;
     use crate::exchange::port::{ExchangeAdapter, ExchangeAdapterError};
+    use crate::exchange::registry::ExchangeRegistry;
     use crate::kafka::port::mock::MockPublisher;
-    use crate::presentation::shared::app_state::AppState;
+    use crate::presentation::shared::app_state::{AdapterFactory, AppState};
     use crate::price::entity::{Price, TradingPair};
 
     struct CountingAdapter {
@@ -280,7 +285,9 @@ mod tests {
     fn empty_state() -> web::Data<AppState> {
         web::Data::new(AppState {
             redis: None,
-            exchange_adapters: Arc::new(HashMap::new()),
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
@@ -293,7 +300,9 @@ mod tests {
         map.insert(key.to_string(), handle);
         web::Data::new(AppState {
             redis: None,
-            exchange_adapters: Arc::new(HashMap::new()),
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
             clients: Arc::new(Mutex::new(map)),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
@@ -412,7 +421,9 @@ mod tests {
         }));
         let state = web::Data::new(AppState {
             redis: None,
-            exchange_adapters: Arc::new(HashMap::new()),
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
             clients: Arc::clone(&clients),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
@@ -508,7 +519,9 @@ mod tests {
         map.insert("tabdeal:BTC/IRT".to_string(), handle2);
         let state = web::Data::new(AppState {
             redis: None,
-            exchange_adapters: Arc::new(HashMap::new()),
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
             clients: Arc::new(Mutex::new(map)),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
@@ -551,7 +564,9 @@ mod tests {
 
         let state = web::Data::new(AppState {
             redis: None,
-            exchange_adapters: Arc::new(adapters),
+            exchange_adapters: Arc::new(RwLock::new(adapters)),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: Some(failing_publisher),
             broadcaster,
@@ -596,7 +611,9 @@ mod tests {
         );
         let state = web::Data::new(AppState {
             redis: None,
-            exchange_adapters: Arc::new(adapters),
+            exchange_adapters: Arc::new(RwLock::new(adapters)),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
             clients: Arc::clone(&clients),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
@@ -663,7 +680,9 @@ mod tests {
         );
         let state = web::Data::new(AppState {
             redis: None,
-            exchange_adapters: Arc::new(adapters),
+            exchange_adapters: Arc::new(RwLock::new(adapters)),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
             clients: Arc::clone(&clients),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),

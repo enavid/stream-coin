@@ -49,15 +49,18 @@ mod tests {
     use actix_web::http::StatusCode;
     use actix_web::test;
     use actix_web::{web, App};
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, RwLock};
 
     use super::health;
-    use crate::presentation::shared::app_state::AppState;
+    use crate::exchange::registry::ExchangeRegistry;
+    use crate::presentation::shared::app_state::{AdapterFactory, AppState};
 
     fn disconnected_state() -> web::Data<AppState> {
         web::Data::new(AppState {
             redis: None,
-            exchange_adapters: Arc::new(HashMap::new()),
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),

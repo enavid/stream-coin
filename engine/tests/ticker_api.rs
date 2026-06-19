@@ -3,19 +3,23 @@ use std::sync::Arc;
 
 use actix_web::test;
 use actix_web::App;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use stream_coin::exchange::hitobit::HitobitWsAdapter;
 use stream_coin::exchange::port::ExchangeAdapter;
+use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
-use stream_coin::presentation::shared::app_state::AppState;
+use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
+use stream_coin::price::entity::MarketType;
 
 fn build_state() -> actix_web::web::Data<AppState> {
     actix_web::web::Data::new(AppState {
         redis: None,
-        exchange_adapters: Arc::new(HashMap::new()),
+        exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
@@ -27,7 +31,9 @@ fn build_state_with_hitobit() -> actix_web::web::Data<AppState> {
     adapters.insert("hitobit".to_string(), Arc::new(HitobitWsAdapter::default()));
     actix_web::web::Data::new(AppState {
         redis: None,
-        exchange_adapters: Arc::new(adapters),
+        exchange_adapters: Arc::new(RwLock::new(adapters)),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
@@ -40,7 +46,9 @@ fn build_state_with_both_adapters() -> actix_web::web::Data<AppState> {
     adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter::default()));
     actix_web::web::Data::new(AppState {
         redis: None,
-        exchange_adapters: Arc::new(adapters),
+        exchange_adapters: Arc::new(RwLock::new(adapters)),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
@@ -53,7 +61,9 @@ fn build_state_with_ticker(key: &str) -> actix_web::web::Data<AppState> {
     map.insert(key.to_string(), handle);
     actix_web::web::Data::new(AppState {
         redis: None,
-        exchange_adapters: Arc::new(HashMap::new()),
+        exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
         clients: Arc::new(Mutex::new(map)),
         publisher: None,
         broadcaster: AppState::new_broadcaster(),
@@ -668,4 +678,253 @@ async fn start_ticker_empty_exchange_errors_names_exchange_field() {
         body["errors"][0]["field"], "exchange",
         "empty exchange must produce a field error naming 'exchange'"
     );
+}
+
+// --- exchange registry tests (ROADMAP 1b) ---
+
+#[actix_web::test]
+async fn start_ticker_for_disabled_exchange_returns_400() {
+    let mut registry = ExchangeRegistry::new();
+    registry.add_exchange(ExchangeRecord {
+        name: "tabdeal".to_string(),
+        display_name: "Tabdeal".to_string(),
+        ws_url: "wss://tabdeal.example.com".to_string(),
+        enabled: false,
+    });
+
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(actix_web::web::Data::new(AppState {
+                redis: None,
+                exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+                exchange_registry: Arc::new(Mutex::new(registry)),
+                adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                publisher: None,
+                broadcaster: AppState::new_broadcaster(),
+            }))
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"tabdeal","symbol":"USDT/IRT"}"#)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "disabled exchange must return 400 (no adapter in map)"
+    );
+}
+
+#[actix_web::test]
+async fn disable_exchange_aborts_running_tickers() {
+    let handle = tokio::spawn(std::future::pending::<()>()).abort_handle();
+    let clients = Arc::new(Mutex::new({
+        let mut m = HashMap::new();
+        m.insert("tabdeal:USDT/IRT".to_string(), handle);
+        m
+    }));
+
+    let mut registry = ExchangeRegistry::new();
+    registry.add_exchange(ExchangeRecord {
+        name: "tabdeal".to_string(),
+        display_name: "Tabdeal".to_string(),
+        ws_url: "wss://tabdeal.example.com".to_string(),
+        enabled: true,
+    });
+
+    let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+    adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter::default()));
+
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(actix_web::web::Data::new(AppState {
+                redis: None,
+                exchange_adapters: Arc::new(RwLock::new(adapters)),
+                exchange_registry: Arc::new(Mutex::new(registry)),
+                adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+                clients: Arc::clone(&clients),
+                publisher: None,
+                broadcaster: AppState::new_broadcaster(),
+            }))
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/v1/admin/exchanges/disable")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"tabdeal"}"#)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200, "disable must return 200");
+    assert!(
+        clients.lock().await.is_empty(),
+        "all tickers for disabled exchange must be aborted"
+    );
+}
+
+#[actix_web::test]
+async fn enable_exchange_then_start_ticker_returns_200() {
+    let mut registry = ExchangeRegistry::new();
+    registry.add_exchange(ExchangeRecord {
+        name: "hitobit".to_string(),
+        display_name: "Hitobit".to_string(),
+        ws_url: "wss://stream.hitobit.com:443".to_string(),
+        enabled: false,
+    });
+
+    let factories: HashMap<String, AdapterFactory> = HashMap::from([(
+        "hitobit".to_string(),
+        Arc::new(|_ws_url: &str| Arc::new(HitobitWsAdapter::default()) as Arc<dyn ExchangeAdapter>)
+            as AdapterFactory,
+    )]);
+
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(actix_web::web::Data::new(AppState {
+                redis: None,
+                exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+                exchange_registry: Arc::new(Mutex::new(registry)),
+                adapter_factories: Arc::new(factories),
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                publisher: None,
+                broadcaster: AppState::new_broadcaster(),
+            }))
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let enable_req = test::TestRequest::post()
+        .uri("/v1/admin/exchanges/enable")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"hitobit"}"#)
+        .to_request();
+    let enable_resp = test::call_service(&app, enable_req).await;
+    assert_eq!(enable_resp.status(), 200, "enable must succeed");
+
+    let start_req = test::TestRequest::post()
+        .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
+        .insert_header(("Content-Type", "application/json"))
+        .set_payload(r#"{"exchange":"hitobit","symbol":"USDT/IRT"}"#)
+        .to_request();
+    let start_resp = test::call_service(&app, start_req).await;
+    assert_eq!(
+        start_resp.status(),
+        200,
+        "start ticker after enable must succeed"
+    );
+}
+
+#[actix_web::test]
+async fn list_pairs_returns_only_active_pairs() {
+    let mut registry = ExchangeRegistry::new();
+    registry.add_exchange(ExchangeRecord {
+        name: "tabdeal".to_string(),
+        display_name: "Tabdeal".to_string(),
+        ws_url: "wss://tabdeal.example.com".to_string(),
+        enabled: true,
+    });
+    registry.add_pair(TradingPairRecord {
+        exchange_name: "tabdeal".to_string(),
+        base: "USDT".to_string(),
+        quote: "IRT".to_string(),
+        market_type: MarketType::Spot,
+        active: true,
+    });
+    registry.add_pair(TradingPairRecord {
+        exchange_name: "tabdeal".to_string(),
+        base: "BTC".to_string(),
+        quote: "IRT".to_string(),
+        market_type: MarketType::Spot,
+        active: false,
+    });
+
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(actix_web::web::Data::new(AppState {
+                redis: None,
+                exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+                exchange_registry: Arc::new(Mutex::new(registry)),
+                adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                publisher: None,
+                broadcaster: AppState::new_broadcaster(),
+            }))
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/v1/exchanges/tabdeal/pairs")
+        .to_request();
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["success"], true);
+    let pairs = body["data"]["pairs"].as_array().unwrap();
+    assert_eq!(pairs.len(), 1, "only active pairs must be returned");
+    assert_eq!(pairs[0]["base"], "USDT");
+    assert_eq!(pairs[0]["quote"], "IRT");
+}
+
+#[actix_web::test]
+async fn list_pairs_filters_by_market_type() {
+    let mut registry = ExchangeRegistry::new();
+    registry.add_exchange(ExchangeRecord {
+        name: "tabdeal".to_string(),
+        display_name: "Tabdeal".to_string(),
+        ws_url: "wss://tabdeal.example.com".to_string(),
+        enabled: true,
+    });
+    registry.add_pair(TradingPairRecord {
+        exchange_name: "tabdeal".to_string(),
+        base: "USDT".to_string(),
+        quote: "IRT".to_string(),
+        market_type: MarketType::Spot,
+        active: true,
+    });
+    registry.add_pair(TradingPairRecord {
+        exchange_name: "tabdeal".to_string(),
+        base: "BTC".to_string(),
+        quote: "IRT".to_string(),
+        market_type: MarketType::Futures,
+        active: true,
+    });
+
+    let app = test::init_service(
+        App::new()
+            .configure(init_routes)
+            .app_data(actix_web::web::Data::new(AppState {
+                redis: None,
+                exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+                exchange_registry: Arc::new(Mutex::new(registry)),
+                adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                publisher: None,
+                broadcaster: AppState::new_broadcaster(),
+            }))
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/v1/exchanges/tabdeal/pairs?market_type=spot")
+        .to_request();
+    let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+    let pairs = body["data"]["pairs"].as_array().unwrap();
+    assert_eq!(
+        pairs.len(),
+        1,
+        "spot filter must return only spot pairs, got {pairs:?}"
+    );
+    assert_eq!(pairs[0]["market_type"], "spot");
 }

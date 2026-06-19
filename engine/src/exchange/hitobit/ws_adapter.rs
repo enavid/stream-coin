@@ -10,7 +10,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::exchange::entity::ExchangeId;
 use crate::exchange::port::{ExchangeAdapter, ExchangeAdapterError};
-use crate::price::entity::{Price, TradingPair};
+use crate::price::entity::{MarketType, Price, TradingPair};
 
 const WS_URL: &str = "wss://stream.hitobit.com:443";
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -113,7 +113,11 @@ impl ExchangeAdapter for HitobitWsAdapter {
     }
 
     fn symbol_for_pair(&self, pair: &TradingPair) -> String {
-        format!("{}{}", pair.base, pair.quote).to_lowercase()
+        let base = format!("{}{}", pair.base, pair.quote).to_lowercase();
+        match pair.market_type {
+            MarketType::Spot => base,
+            MarketType::Futures | MarketType::Swap => format!("{base}-perp"),
+        }
     }
 
     async fn subscribe(
@@ -197,7 +201,26 @@ mod tests {
         })
     }
 
-    // --- symbol_for_pair unit tests (ROADMAP 1a) ---
+    // --- symbol_for_pair unit tests (ROADMAP 1a + 1b) ---
+
+    #[test]
+    fn symbol_for_pair_uses_market_type_in_stream_name() {
+        let adapter = HitobitWsAdapter::new();
+        let spot = TradingPair::with_market_type("USDT", "IRT", MarketType::Spot);
+        let futures = TradingPair::with_market_type("USDT", "IRT", MarketType::Futures);
+        assert_ne!(
+            adapter.symbol_for_pair(&spot),
+            adapter.symbol_for_pair(&futures),
+            "spot and futures must produce different stream names"
+        );
+    }
+
+    #[test]
+    fn symbol_for_pair_futures_appends_perp_suffix() {
+        let adapter = HitobitWsAdapter::new();
+        let pair = TradingPair::with_market_type("USDT", "IRT", MarketType::Futures);
+        assert_eq!(adapter.symbol_for_pair(&pair), "usdtirt-perp");
+    }
 
     #[test]
     fn symbol_for_pair_usdt_irt() {

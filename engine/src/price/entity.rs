@@ -3,13 +3,34 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
+use utoipa::ToSchema;
 
 use crate::exchange::entity::ExchangeId;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MarketType {
+    #[default]
+    Spot,
+    Futures,
+    Swap,
+}
+
+impl fmt::Display for MarketType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MarketType::Spot => write!(f, "spot"),
+            MarketType::Futures => write!(f, "futures"),
+            MarketType::Swap => write!(f, "swap"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TradingPair {
     pub base: String,
     pub quote: String,
+    pub market_type: MarketType,
 }
 
 impl Serialize for TradingPair {
@@ -23,6 +44,15 @@ impl TradingPair {
         Self {
             base: base.to_string(),
             quote: quote.to_string(),
+            market_type: MarketType::Spot,
+        }
+    }
+
+    pub fn with_market_type(base: &str, quote: &str, market_type: MarketType) -> Self {
+        Self {
+            base: base.to_string(),
+            quote: quote.to_string(),
+            market_type,
         }
     }
 }
@@ -124,6 +154,24 @@ mod tests {
         let pair = TradingPair::new("BTC", "IRT");
         let json = serde_json::to_string(&pair).unwrap();
         assert_eq!(json, "\"BTC/IRT\"");
+    }
+
+    #[test]
+    fn trading_pair_spot_is_default_market_type() {
+        let pair = TradingPair::new("USDT", "IRT");
+        assert_eq!(pair.market_type, MarketType::Spot);
+    }
+
+    #[test]
+    fn trading_pair_with_market_type_futures_stores_futures() {
+        let pair = TradingPair::with_market_type("USDT", "IRT", MarketType::Futures);
+        assert_eq!(pair.market_type, MarketType::Futures);
+    }
+
+    #[test]
+    fn trading_pair_market_type_does_not_appear_in_string_repr() {
+        let pair = TradingPair::with_market_type("USDT", "IRT", MarketType::Futures);
+        assert_eq!(pair.to_string(), "USDT/IRT");
     }
 
     #[test]

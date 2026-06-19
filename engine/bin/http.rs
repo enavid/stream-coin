@@ -5,7 +5,7 @@ use std::sync::Arc;
 use actix_web::{web, App, HttpResponse, HttpServer};
 use dotenv::dotenv;
 use serde_json::json;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing_actix_web::TracingLogger;
 use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
@@ -13,14 +13,16 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use stream_coin::exchange::hitobit::HitobitWsAdapter;
 use stream_coin::exchange::port::ExchangeAdapter;
+use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::infrastructure::cache::redis;
 use stream_coin::kafka::port::MessagePublisher;
 use stream_coin::kafka::KafkaProducer;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
-use stream_coin::presentation::shared::app_state::AppState;
+use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
 use stream_coin::presentation::swagger::ApiDoc;
+use stream_coin::price::entity::MarketType;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -63,9 +65,57 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    // Hard-coded factory map: the only place exchange names appear in code.
+    // The registry (DB in 1d) controls which are active; this map provides constructors.
+    // NEVER add: nobitex, wallex, bitpin, ramzinex — OFAC sanctioned 2026-06-02
+    let mut factories: HashMap<String, AdapterFactory> = HashMap::new();
+    factories.insert(
+        "tabdeal".to_string(),
+        Arc::new(|_ws_url: &str| Arc::new(TabdealWsAdapter::new()) as Arc<dyn ExchangeAdapter>),
+    );
+    factories.insert(
+        "hitobit".to_string(),
+        Arc::new(|_ws_url: &str| Arc::new(HitobitWsAdapter::new()) as Arc<dyn ExchangeAdapter>),
+    );
+    let adapter_factories = Arc::new(factories);
+
+    // Bootstrap registry from environment. In Loop 1d this moves to PostgreSQL.
+    let mut registry = ExchangeRegistry::new();
+    registry.add_exchange(ExchangeRecord {
+        name: "tabdeal".to_string(),
+        display_name: "Tabdeal".to_string(),
+        ws_url: "wss://api1.tabdeal.org/stream/".to_string(),
+        enabled: true,
+    });
+    registry.add_exchange(ExchangeRecord {
+        name: "hitobit".to_string(),
+        display_name: "Hitobit".to_string(),
+        ws_url: "wss://stream.hitobit.com:443".to_string(),
+        enabled: true,
+    });
+    registry.add_pair(TradingPairRecord {
+        exchange_name: "tabdeal".to_string(),
+        base: "USDT".to_string(),
+        quote: "IRT".to_string(),
+        market_type: MarketType::Spot,
+        active: true,
+    });
+    registry.add_pair(TradingPairRecord {
+        exchange_name: "hitobit".to_string(),
+        base: "USDT".to_string(),
+        quote: "IRT".to_string(),
+        market_type: MarketType::Spot,
+        active: true,
+    });
+
+    // Build the live adapter map from the registry — only enabled exchanges get adapters.
     let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
-    adapters.insert("tabdeal".to_string(), Arc::new(TabdealWsAdapter::default()));
-    adapters.insert("hitobit".to_string(), Arc::new(HitobitWsAdapter::default()));
+    for exchange in registry.get_enabled_exchanges() {
+        if let Some(factory) = adapter_factories.get(&exchange.name) {
+            adapters.insert(exchange.name.clone(), factory(&exchange.ws_url));
+            tracing::info!(exchange = %exchange.name, "adapter loaded from registry");
+        }
+    }
 
     let publisher: Option<Arc<dyn MessagePublisher>> = match env::var("KAFKA_URL") {
         Ok(url) => match KafkaProducer::new(&url) {
@@ -86,7 +136,9 @@ async fn main() -> std::io::Result<()> {
 
     let app_state = web::Data::new(AppState {
         redis: redis_conn,
-        exchange_adapters: Arc::new(adapters),
+        exchange_adapters: Arc::new(RwLock::new(adapters)),
+        exchange_registry: Arc::new(Mutex::new(registry)),
+        adapter_factories,
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher,
         broadcaster: AppState::new_broadcaster(),
