@@ -43,7 +43,7 @@ pub struct Price {
 
 impl Price {
     pub fn spread(&self) -> u64 {
-        self.ask - self.bid
+        self.ask.saturating_sub(self.bid)
     }
 }
 
@@ -80,5 +80,41 @@ mod tests {
             timestamp: Utc::now(),
         };
         assert_eq!(price.spread(), 500_000);
+    }
+
+    #[test]
+    fn spread_inverted_quote_does_not_panic() {
+        let price = Price {
+            exchange: ExchangeId::new("tabdeal"),
+            pair: TradingPair::new("USDT", "IRR"),
+            ask: 100,
+            bid: 200,
+            timestamp: Utc::now(),
+        };
+        assert_eq!(price.spread(), 0);
+    }
+
+    #[test]
+    fn spread_equal_bid_ask_is_zero() {
+        let price = Price {
+            exchange: ExchangeId::new("tabdeal"),
+            pair: TradingPair::new("USDT", "IRR"),
+            ask: 500,
+            bid: 500,
+            timestamp: Utc::now(),
+        };
+        assert_eq!(price.spread(), 0);
+    }
+
+    #[test]
+    fn spread_max_u64_values_does_not_overflow() {
+        let price = Price {
+            exchange: ExchangeId::new("tabdeal"),
+            pair: TradingPair::new("USDT", "IRR"),
+            ask: u64::MAX,
+            bid: u64::MAX,
+            timestamp: Utc::now(),
+        };
+        assert_eq!(price.spread(), 0);
     }
 }
