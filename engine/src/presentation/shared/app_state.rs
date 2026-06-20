@@ -11,6 +11,7 @@ use crate::infrastructure::db::signal_repository::SignalRepository;
 use crate::infrastructure::db::strategy_repository::StrategyRepository;
 use crate::infrastructure::db::ticker_repository::TickerRepository;
 use crate::kafka::port::MessagePublisher;
+use crate::order::port::OrderAdapter;
 
 pub type ClientKey = String;
 pub type ClientMap = Arc<Mutex<HashMap<ClientKey, AbortHandle>>>;
@@ -61,6 +62,10 @@ pub struct AppState {
     pub strategy_repository: Option<Arc<dyn StrategyRepository>>,
     /// Persistent store for emitted signals. `None` = signals not persisted to DB.
     pub signal_repository: Option<Arc<dyn SignalRepository>>,
+    /// Live order adapters keyed by exchange name (e.g. `"tabdeal"`).
+    /// Populated from the exchange registry at startup. Empty until API keys
+    /// are configured — the Order Manager (3b) requires this to be non-empty.
+    pub order_adapters: Arc<HashMap<String, Arc<dyn OrderAdapter>>>,
 }
 
 impl AppState {

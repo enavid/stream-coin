@@ -31,6 +31,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
         signal_repository: None,
+        order_adapters: Arc::new(HashMap::new()),
     })
 }
 
@@ -50,6 +51,7 @@ fn build_state_with_hitobit() -> actix_web::web::Data<AppState> {
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
         signal_repository: None,
+        order_adapters: Arc::new(HashMap::new()),
     })
 }
 
@@ -70,6 +72,7 @@ fn build_state_with_both_adapters() -> actix_web::web::Data<AppState> {
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
         signal_repository: None,
+        order_adapters: Arc::new(HashMap::new()),
     })
 }
 
@@ -90,6 +93,7 @@ fn build_state_with_ticker(key: &str) -> actix_web::web::Data<AppState> {
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
         signal_repository: None,
+        order_adapters: Arc::new(HashMap::new()),
     })
 }
 
@@ -731,6 +735,7 @@ async fn start_ticker_for_disabled_exchange_returns_400() {
                 running_strategies: Arc::new(Mutex::new(HashMap::new())),
                 strategy_repository: None,
                 signal_repository: None,
+                order_adapters: Arc::new(HashMap::new()),
             }))
             .app_data(json_error_handler_config()),
     )
@@ -786,6 +791,7 @@ async fn disable_exchange_aborts_running_tickers() {
                 running_strategies: Arc::new(Mutex::new(HashMap::new())),
                 strategy_repository: None,
                 signal_repository: None,
+                order_adapters: Arc::new(HashMap::new()),
             }))
             .app_data(json_error_handler_config()),
     )
@@ -837,6 +843,7 @@ async fn enable_exchange_then_start_ticker_returns_200() {
                 running_strategies: Arc::new(Mutex::new(HashMap::new())),
                 strategy_repository: None,
                 signal_repository: None,
+                order_adapters: Arc::new(HashMap::new()),
             }))
             .app_data(json_error_handler_config()),
     )
@@ -903,6 +910,7 @@ async fn list_pairs_returns_only_active_pairs() {
                 running_strategies: Arc::new(Mutex::new(HashMap::new())),
                 strategy_repository: None,
                 signal_repository: None,
+                order_adapters: Arc::new(HashMap::new()),
             }))
             .app_data(json_error_handler_config()),
     )
@@ -959,6 +967,7 @@ async fn list_pairs_filters_by_market_type() {
                 running_strategies: Arc::new(Mutex::new(HashMap::new())),
                 strategy_repository: None,
                 signal_repository: None,
+                order_adapters: Arc::new(HashMap::new()),
             }))
             .app_data(json_error_handler_config()),
     )
@@ -996,6 +1005,7 @@ async fn start_ticker_without_token_returns_401() {
                 running_strategies: Arc::new(Mutex::new(HashMap::new())),
                 strategy_repository: None,
                 signal_repository: None,
+                order_adapters: Arc::new(HashMap::new()),
             }))
             .app_data(json_error_handler_config()),
     )
@@ -1035,6 +1045,7 @@ async fn start_ticker_with_valid_token_returns_200() {
                 running_strategies: Arc::new(Mutex::new(HashMap::new())),
                 strategy_repository: None,
                 signal_repository: None,
+                order_adapters: Arc::new(HashMap::new()),
             }))
             .app_data(json_error_handler_config()),
     )
@@ -1073,6 +1084,7 @@ async fn two_engine_instances_share_ticker_state() {
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
         signal_repository: None,
+        order_adapters: Arc::new(HashMap::new()),
     });
 
     let app1 = test::init_service(
@@ -1104,6 +1116,7 @@ async fn two_engine_instances_share_ticker_state() {
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
         signal_repository: None,
+        order_adapters: Arc::new(HashMap::new()),
     });
 
     restore_tickers(&state2).await;
