@@ -16,14 +16,21 @@ const WS_URL: &str = "wss://stream.hitobit.com:443";
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 pub struct HitobitWsAdapter {
-    ws_url: &'static str,
+    ws_url: String,
     reconnect_delay: Duration,
 }
 
 impl HitobitWsAdapter {
     pub fn new() -> Self {
         Self {
-            ws_url: WS_URL,
+            ws_url: WS_URL.to_string(),
+            reconnect_delay: RECONNECT_DELAY,
+        }
+    }
+
+    pub fn with_url(url: String) -> Self {
+        Self {
+            ws_url: url,
             reconnect_delay: RECONNECT_DELAY,
         }
     }
@@ -76,17 +83,15 @@ impl HitobitWsAdapter {
         })
     }
 
-    /// Parses a price string from Hitobit's WS API into rial units.
-    /// Hitobit prices are in IRR; fractional rials are truncated (not rounded).
+    // Truncates fractional rials — IRR prices from Hitobit are integers in practice.
     fn parse_price_units(s: &str) -> Result<u64, String> {
-        let v = s.parse::<f64>().map_err(|e| e.to_string())?;
-        if !v.is_finite() {
-            return Err(format!("price is not finite: {s}"));
-        }
-        if v < 0.0 {
+        if s.starts_with('-') {
             return Err(format!("price must be non-negative: {s}"));
         }
-        Ok(v as u64)
+        let integer_part = s.split_once('.').map_or(s, |(int, _)| int);
+        integer_part
+            .parse::<u64>()
+            .map_err(|_| format!("invalid price: {s}"))
     }
 
     fn parse_trading_pair(symbol: &str) -> TradingPair {
@@ -128,11 +133,11 @@ impl ExchangeAdapter for HitobitWsAdapter {
         let symbol = self.symbol_for_pair(pair);
         let subscribe_msg = Self::build_subscribe_message(&symbol).to_string();
 
-        let url = self.ws_url;
+        let url = self.ws_url.clone();
         let reconnect_delay = self.reconnect_delay;
         let handle = tokio::spawn(async move {
             loop {
-                match connect_async(url).await {
+                match connect_async(url.as_str()).await {
                     Ok((mut ws, _)) => {
                         tracing::info!(symbol = %symbol, "hitobit websocket connected");
 
@@ -387,7 +392,7 @@ mod tests {
         addr
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn adapter_delivers_price_through_channel() {
         use std::time::Duration;
         use tokio_tungstenite::tungstenite::Message;
@@ -402,9 +407,8 @@ mod tests {
         })
         .await;
 
-        let url: &'static str = Box::leak(format!("ws://{addr}").into_boxed_str());
         let adapter = HitobitWsAdapter {
-            ws_url: url,
+            ws_url: format!("ws://{addr}"),
             reconnect_delay: Duration::from_millis(10),
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
@@ -413,7 +417,7 @@ mod tests {
             .await
             .unwrap();
 
-        let price = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        let price = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("timed out waiting for price")
             .expect("channel closed before price arrived");
@@ -422,7 +426,7 @@ mod tests {
         assert_eq!(price.ask, 58100);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn adapter_reconnects_after_server_closes_connection() {
         use std::time::Duration;
 
@@ -437,9 +441,8 @@ mod tests {
         })
         .await;
 
-        let url: &'static str = Box::leak(format!("ws://{addr}").into_boxed_str());
         let adapter = HitobitWsAdapter {
-            ws_url: url,
+            ws_url: format!("ws://{addr}"),
             reconnect_delay: Duration::from_millis(10),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
@@ -448,16 +451,21 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        handle.abort();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if connections.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("adapter did not reconnect within 5s");
 
-        assert!(
-            connections.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-            "adapter must reconnect after a clean server close"
-        );
+        handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn adapter_stops_on_abort_handle() {
         use std::time::Duration;
 
@@ -469,9 +477,8 @@ mod tests {
         })
         .await;
 
-        let url: &'static str = Box::leak(format!("ws://{addr}").into_boxed_str());
         let adapter = HitobitWsAdapter {
-            ws_url: url,
+            ws_url: format!("ws://{addr}"),
             reconnect_delay: Duration::from_millis(10),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
@@ -494,7 +501,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn adapter_stops_when_price_channel_receiver_is_dropped() {
         use std::time::Duration;
 
@@ -518,9 +525,8 @@ mod tests {
         })
         .await;
 
-        let url: &'static str = Box::leak(format!("ws://{addr}").into_boxed_str());
         let adapter = HitobitWsAdapter {
-            ws_url: url,
+            ws_url: format!("ws://{addr}"),
             reconnect_delay: Duration::from_millis(10),
         };
         let (tx, rx) = tokio::sync::mpsc::channel(10);

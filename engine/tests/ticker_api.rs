@@ -598,7 +598,7 @@ async fn start_ticker_unsupported_exchange_errors_names_exchange_field() {
     let req = test::TestRequest::post()
         .uri("/v1/exchanges/futures/start_kline_symbol_ticker")
         .insert_header(("Content-Type", "application/json"))
-        .set_payload(r#"{"exchange":"nobitex","symbol":"USDT/IRT"}"#)
+        .set_payload(r#"{"exchange":"unknown_exchange","symbol":"USDT/IRT"}"#)
         .to_request();
 
     let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;

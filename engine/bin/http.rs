@@ -74,11 +74,15 @@ async fn main() -> std::io::Result<()> {
     let mut factories: HashMap<String, AdapterFactory> = HashMap::new();
     factories.insert(
         "tabdeal".to_string(),
-        Arc::new(|_ws_url: &str| Arc::new(TabdealWsAdapter::new()) as Arc<dyn ExchangeAdapter>),
+        Arc::new(|ws_url: &str| {
+            Arc::new(TabdealWsAdapter::with_url(ws_url.to_string())) as Arc<dyn ExchangeAdapter>
+        }),
     );
     factories.insert(
         "hitobit".to_string(),
-        Arc::new(|_ws_url: &str| Arc::new(HitobitWsAdapter::new()) as Arc<dyn ExchangeAdapter>),
+        Arc::new(|ws_url: &str| {
+            Arc::new(HitobitWsAdapter::with_url(ws_url.to_string())) as Arc<dyn ExchangeAdapter>
+        }),
     );
     let adapter_factories = Arc::new(factories);
 

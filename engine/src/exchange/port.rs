@@ -1,23 +1,15 @@
-use std::fmt;
-
 use async_trait::async_trait;
+use thiserror::Error;
 use tokio::sync::mpsc::Sender;
 use tokio::task::AbortHandle;
 
 use crate::exchange::entity::ExchangeId;
 use crate::price::entity::{Price, TradingPair};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ExchangeAdapterError {
+    #[error("connection failed: {0}")]
     ConnectionFailed(String),
-}
-
-impl fmt::Display for ExchangeAdapterError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ExchangeAdapterError::ConnectionFailed(msg) => write!(f, "connection failed: {}", msg),
-        }
-    }
 }
 
 /// Drives a single exchange's real-time price feed.
@@ -87,13 +79,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn exchange_adapter_returns_correct_exchange_id() {
         let adapter = MockAdapter;
         assert_eq!(adapter.exchange_id().to_string(), "mock");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn exchange_adapter_subscribe_delivers_price_to_channel() {
         let adapter = MockAdapter;
         let (tx, mut rx) = mpsc::channel(1);

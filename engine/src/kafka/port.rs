@@ -1,18 +1,10 @@
-use std::fmt;
-
 use async_trait::async_trait;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum PublisherError {
+    #[error("publish failed: {0}")]
     PublishFailed(String),
-}
-
-impl fmt::Display for PublisherError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PublisherError::PublishFailed(msg) => write!(f, "publish failed: {}", msg),
-        }
-    }
 }
 
 /// Publishes serialized price messages to an external message broker.
@@ -87,7 +79,7 @@ mod tests {
     use super::mock::MockPublisher;
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn publisher_records_topic_key_and_payload() {
         let publisher = MockPublisher::new();
         publisher
@@ -102,7 +94,7 @@ mod tests {
         assert_eq!(messages[0].2, r#"{"bid":175500}"#);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn publisher_records_multiple_messages_in_order() {
         let publisher = MockPublisher::new();
         publisher
@@ -120,7 +112,7 @@ mod tests {
         assert_eq!(messages[1].1, "nobitex:BTC/IRT");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn publisher_returns_error_on_failure() {
         let publisher = MockPublisher::failing();
         let result = publisher.publish("prices", "key", "payload").await;
