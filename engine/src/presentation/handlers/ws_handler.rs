@@ -180,6 +180,43 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn broadcast_signal_received_by_ws_client() {
+        use crate::presentation::ws_message::{SignalPayload, WsMessage};
+
+        let state = build_state();
+        let broadcaster = state.broadcaster.clone();
+
+        let mut srv = actix_test::start(move || {
+            App::new()
+                .app_data(state.clone())
+                .route("/ws", web::get().to(ws_index))
+        });
+
+        let mut conn = srv.ws_at("/ws").await.unwrap();
+
+        let payload = SignalPayload {
+            strategy_id: "spread_threshold".to_string(),
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            action: "buy".to_string(),
+            confidence: 0.85,
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&WsMessage::Signal(payload)).unwrap();
+        broadcaster.send(json).unwrap();
+
+        let item = conn.next().await.unwrap().unwrap();
+        if let ws::Frame::Text(bytes) = item {
+            let received: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(received["type"], "signal");
+            assert_eq!(received["exchange"], "tabdeal");
+            assert_eq!(received["action"], "buy");
+        } else {
+            panic!("expected a text frame carrying the signal JSON");
+        }
+    }
+
+    #[actix_web::test]
     async fn ws_connection_closes_cleanly_when_client_disconnects() {
         let state = build_state();
 

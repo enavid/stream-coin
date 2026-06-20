@@ -9,6 +9,17 @@ use crate::price::entity::Price;
 pub enum WsMessage {
     PriceUpdate(PricePayload),
     Candle(CandlePayload),
+    Signal(SignalPayload),
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+pub struct SignalPayload {
+    pub strategy_id: String,
+    pub exchange: String,
+    pub pair: String,
+    pub action: String,
+    pub confidence: f64,
+    pub timestamp: DateTime<Utc>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -143,6 +154,50 @@ mod tests {
             "fields must not be wrapped under a data key"
         );
         assert_eq!(json["interval"], "1m");
+    }
+
+    fn sample_signal_payload() -> SignalPayload {
+        SignalPayload {
+            strategy_id: "spread_threshold".to_string(),
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            action: "buy".to_string(),
+            confidence: 0.85,
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn signal_serializes_with_type_signal() {
+        let msg = WsMessage::Signal(sample_signal_payload());
+        let json: Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "signal");
+    }
+
+    #[test]
+    fn signal_fields_at_root_not_under_data_key() {
+        let msg = WsMessage::Signal(sample_signal_payload());
+        let json: Value = serde_json::to_value(&msg).unwrap();
+        assert!(
+            json["strategy_id"].is_string(),
+            "strategy_id must be at root"
+        );
+        assert!(json["exchange"].is_string(), "exchange must be at root");
+        assert!(
+            json["data"].is_null(),
+            "there must be no 'data' wrapper key"
+        );
+    }
+
+    #[test]
+    fn price_consumer_ignores_signal_type_without_error() {
+        let json = r#"{"type":"signal","strategy_id":"s1","exchange":"tabdeal","pair":"USDT/IRT","action":"buy","confidence":0.9,"timestamp":"2026-06-20T00:00:00Z"}"#;
+        let msg: WsMessage = serde_json::from_str(json).unwrap();
+        let is_price = matches!(msg, WsMessage::PriceUpdate(_));
+        assert!(
+            !is_price,
+            "a signal message must not match the price_update variant"
+        );
     }
 
     #[test]
