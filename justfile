@@ -14,7 +14,7 @@ fmt-check:
 
 # Run linter (warnings = errors, all targets including test code)
 lint:
-    cargo clippy --all-targets --features stream-coin/test-utils -- -D warnings
+    cargo clippy --all-targets -- -D warnings
 
 # Run unit tests (engine lib + cli bin)
 test:
@@ -22,7 +22,7 @@ test:
 
 # Run integration tests
 test-integration:
-    cargo test --tests --features stream-coin/test-utils
+    cargo test --tests
 
 # Build the engine in a clean container with no host-installed system libs.
 # Catches missing system deps (e.g. rdkafka's cmake/curl headers) that a
@@ -30,18 +30,16 @@ test-integration:
 check-clean-env:
     docker build --target builder -t stream-coin-check .
 
-# Full quality cycle: fmt → lint → unit tests → integration tests → clean-env build
+# Full quality cycle: fmt → lint → unit tests → integration tests
 check:
     @echo "→ Formatting..."
     cargo fmt
     @echo "→ Linting..."
-    cargo clippy --all-targets --features stream-coin/test-utils -- -D warnings
+    cargo clippy --all-targets -- -D warnings
     @echo "→ Testing (unit)..."
     cargo test --lib --bins
     @echo "→ Testing (integration)..."
-    cargo test --tests --features stream-coin/test-utils
-    @echo "→ Clean-environment build (mirrors CI runner)..."
-    just check-clean-env
+    cargo test --tests
     @echo "✓ All checks passed"
 
 # Build debug

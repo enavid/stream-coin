@@ -26,6 +26,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: taiki-e/install-action@just
+
       - uses: actions/cache@v4
         with:
           path: |
@@ -37,8 +39,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: just fmt-check
+      - run: just lint
 
   test:
     name: Test
@@ -52,6 +54,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: taiki-e/install-action@just
+
       - uses: actions/cache@v4
         with:
           path: |
@@ -64,10 +68,10 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Unit tests
-        run: cargo test --lib --bins
+        run: just test
 
       - name: Integration tests
-        run: cargo test --tests
+        run: just test-integration
 
   docker:
     name: Build & push
