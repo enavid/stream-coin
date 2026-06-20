@@ -1,44 +1,15 @@
-use std::sync::Arc;
-
 use actix_web::{web, HttpResponse};
 use chrono::Utc;
 
-use crate::infrastructure::db::strategy_repository::StrategyRecord;
+use crate::infrastructure::db::strategy_repository::{StrategyRecord, StrategyRegistration};
 use crate::presentation::dto::strategy::{
-    ActiveStrategy, StartStrategyRequest, StopStrategyRequest, StrategyList,
+    ActiveStrategy, RegisterStrategyRequest, StartStrategyRequest, StopStrategyRequest,
+    StrategyList,
 };
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::{AppState, StrategyHandle};
-use crate::strategy::builtin::price_delta::PriceDeltaStrategy;
-use crate::strategy::builtin::spread_threshold::SpreadThresholdStrategy;
-use crate::strategy::port::Strategy;
+use crate::strategy::factory::build_strategy;
 use crate::strategy::runner::spawn_strategy_runner;
-
-fn build_strategy(record: &StrategyRecord) -> Option<Arc<dyn Strategy>> {
-    match record.strategy_type.as_str() {
-        "spread_threshold" => {
-            let threshold = record.params_json["threshold"].as_u64()?;
-            Some(Arc::new(SpreadThresholdStrategy::new(
-                &record.strategy_id,
-                &record.exchange,
-                &record.pair,
-                threshold,
-            )))
-        }
-        "price_delta" => {
-            let window = record.params_json["window"].as_u64().unwrap_or(5) as usize;
-            let threshold = record.params_json["threshold"].as_f64().unwrap_or(0.02);
-            Some(Arc::new(PriceDeltaStrategy::new(
-                &record.strategy_id,
-                &record.exchange,
-                &record.pair,
-                window,
-                threshold,
-            )))
-        }
-        _ => None,
-    }
-}
 
 pub async fn start_strategy(
     state: web::Data<AppState>,
@@ -46,25 +17,25 @@ pub async fn start_strategy(
 ) -> HttpResponse {
     let req = body.into_inner();
 
-    let mut running = state.running_strategies.lock().await;
-    if running.contains_key(&req.strategy_id) {
-        return ApiError::new(
-            &format!("strategy '{}' is already running", req.strategy_id),
-            vec![],
-        )
-        .to_response();
+    // Fast duplicate check before any async work
+    {
+        let running = state.running_strategies.lock().await;
+        if running.contains_key(&req.strategy_id) {
+            return ApiError::new(
+                &format!("strategy '{}' is already running", req.strategy_id),
+                vec![],
+            )
+            .to_response();
+        }
     }
 
-    let record = StrategyRecord {
-        strategy_id: req.strategy_id.clone(),
-        strategy_type: req.strategy_type.clone(),
-        exchange: req.exchange.clone(),
-        pair: req.pair.clone(),
-        params_json: req.params.clone(),
-        started_at: Utc::now(),
-    };
-
-    let strategy = match build_strategy(&record) {
+    let strategy = match build_strategy(
+        &req.strategy_id,
+        &req.strategy_type,
+        &req.exchange,
+        &req.pair,
+        &req.params,
+    ) {
         Some(s) => s,
         None => {
             return ApiError::new(
@@ -75,9 +46,42 @@ pub async fn start_strategy(
         }
     };
 
-    let abort_handle =
-        spawn_strategy_runner(strategy, state.broadcaster.clone(), state.publisher.clone());
+    // Persist first — if this fails, we don't start the runner
+    let record = StrategyRecord {
+        strategy_id: req.strategy_id.clone(),
+        strategy_type: req.strategy_type.clone(),
+        exchange: req.exchange.clone(),
+        pair: req.pair.clone(),
+        params_json: req.params.clone(),
+        started_at: Utc::now(),
+    };
+    if let Some(ref repo) = state.strategy_repository {
+        if let Err(e) = repo.save(&record).await {
+            tracing::error!(error = %e, strategy_id = %req.strategy_id, "failed to persist strategy record");
+            return ApiError::new("failed to persist strategy", vec![]).to_response();
+        }
+    }
 
+    let abort_handle = spawn_strategy_runner(
+        strategy,
+        state.broadcaster.clone(),
+        state.publisher.clone(),
+        state.signal_repository.clone(),
+    );
+
+    let mut running = state.running_strategies.lock().await;
+    // Double-check after re-acquiring the lock (TOCTOU guard)
+    if running.contains_key(&req.strategy_id) {
+        abort_handle.abort();
+        if let Some(ref repo) = state.strategy_repository {
+            let _ = repo.remove(&req.strategy_id).await;
+        }
+        return ApiError::new(
+            &format!("strategy '{}' is already running", req.strategy_id),
+            vec![],
+        )
+        .to_response();
+    }
     running.insert(
         req.strategy_id.clone(),
         StrategyHandle {
@@ -89,11 +93,13 @@ pub async fn start_strategy(
     );
     drop(running);
 
-    if let Some(ref repo) = state.strategy_repository {
-        if let Err(e) = repo.save(&record).await {
-            tracing::error!(error = %e, "failed to persist strategy record");
-        }
-    }
+    tracing::info!(
+        strategy_id = %req.strategy_id,
+        strategy_type = %req.strategy_type,
+        exchange = %req.exchange,
+        pair = %req.pair,
+        "strategy started"
+    );
 
     success_response(
         "Strategy started",
@@ -118,9 +124,11 @@ pub async fn stop_strategy(
 
             if let Some(ref repo) = state.strategy_repository {
                 if let Err(e) = repo.remove(&req.strategy_id).await {
-                    tracing::error!(error = %e, "failed to remove strategy record");
+                    tracing::error!(error = %e, strategy_id = %req.strategy_id, "failed to remove strategy record");
                 }
             }
+
+            tracing::info!(strategy_id = %req.strategy_id, "strategy stopped");
 
             success_response(
                 "Strategy stopped",
@@ -149,6 +157,48 @@ pub async fn list_strategies(state: web::Data<AppState>) -> HttpResponse {
     success_response("Active strategies", StrategyList { strategies })
 }
 
+pub async fn register_strategy(
+    state: web::Data<AppState>,
+    body: web::Json<RegisterStrategyRequest>,
+) -> HttpResponse {
+    let req = body.into_inner();
+
+    if req.strategy_type != "builtin" && req.strategy_type != "external" {
+        return ApiError::new("strategy_type must be 'builtin' or 'external'", vec![])
+            .to_response();
+    }
+
+    let reg = StrategyRegistration {
+        strategy_id: req.strategy_id.clone(),
+        name: req.name.clone(),
+        strategy_type: req.strategy_type.clone(),
+        registered_at: Utc::now(),
+    };
+
+    if let Some(ref repo) = state.strategy_repository {
+        if let Err(e) = repo.register(&reg).await {
+            tracing::error!(error = %e, strategy_id = %req.strategy_id, "failed to register strategy");
+            return ApiError::new("failed to register strategy", vec![]).to_response();
+        }
+    }
+
+    tracing::info!(
+        strategy_id = %req.strategy_id,
+        name = %req.name,
+        strategy_type = %req.strategy_type,
+        "strategy registered"
+    );
+
+    success_response(
+        "Strategy registered",
+        serde_json::json!({
+            "strategy_id": req.strategy_id,
+            "name": req.name,
+            "strategy_type": req.strategy_type,
+        }),
+    )
+}
+
 /// Loads active strategy records from the repository and restarts each one.
 /// Called on engine startup to restore state that survived a restart.
 pub async fn restore_strategies(state: &web::Data<AppState>) {
@@ -170,18 +220,28 @@ pub async fn restore_strategies(state: &web::Data<AppState>) {
         if running.contains_key(&record.strategy_id) {
             continue;
         }
-        let strategy = match build_strategy(&record) {
+        let strategy = match build_strategy(
+            &record.strategy_id,
+            &record.strategy_type,
+            &record.exchange,
+            &record.pair,
+            &record.params_json,
+        ) {
             Some(s) => s,
             None => {
                 tracing::warn!(
                     strategy_type = %record.strategy_type,
-                    "unknown strategy type during restore"
+                    "unknown strategy type during restore — skipping"
                 );
                 continue;
             }
         };
-        let abort_handle =
-            spawn_strategy_runner(strategy, state.broadcaster.clone(), state.publisher.clone());
+        let abort_handle = spawn_strategy_runner(
+            strategy,
+            state.broadcaster.clone(),
+            state.publisher.clone(),
+            state.signal_repository.clone(),
+        );
         running.insert(
             record.strategy_id.clone(),
             StrategyHandle {
@@ -191,6 +251,6 @@ pub async fn restore_strategies(state: &web::Data<AppState>) {
                 abort_handle,
             },
         );
-        tracing::info!(strategy_id = %record.strategy_id, "restored strategy");
+        tracing::info!(strategy_id = %record.strategy_id, strategy_type = %record.strategy_type, "strategy restored");
     }
 }

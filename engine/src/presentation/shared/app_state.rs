@@ -7,6 +7,7 @@ use tokio::task::AbortHandle;
 
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
+use crate::infrastructure::db::signal_repository::SignalRepository;
 use crate::infrastructure::db::strategy_repository::StrategyRepository;
 use crate::infrastructure::db::ticker_repository::TickerRepository;
 use crate::kafka::port::MessagePublisher;
@@ -58,6 +59,8 @@ pub struct AppState {
     pub running_strategies: Arc<Mutex<HashMap<String, StrategyHandle>>>,
     /// Persistent store for active strategy records. `None` = in-memory only (no DB).
     pub strategy_repository: Option<Arc<dyn StrategyRepository>>,
+    /// Persistent store for emitted signals. `None` = signals not persisted to DB.
+    pub signal_repository: Option<Arc<dyn SignalRepository>>,
 }
 
 impl AppState {

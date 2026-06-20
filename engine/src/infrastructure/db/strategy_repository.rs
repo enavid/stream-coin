@@ -13,6 +13,14 @@ pub struct StrategyRecord {
     pub started_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StrategyRegistration {
+    pub strategy_id: String,
+    pub name: String,
+    pub strategy_type: String,
+    pub registered_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Error)]
 pub enum StrategyRepositoryError {
     #[error("database error: {0}")]
@@ -24,10 +32,12 @@ pub trait StrategyRepository: Send + Sync {
     async fn save(&self, record: &StrategyRecord) -> Result<(), StrategyRepositoryError>;
     async fn remove(&self, strategy_id: &str) -> Result<(), StrategyRepositoryError>;
     async fn list_active(&self) -> Result<Vec<StrategyRecord>, StrategyRepositoryError>;
+    async fn register(&self, reg: &StrategyRegistration) -> Result<(), StrategyRepositoryError>;
 }
 
 pub struct FakeStrategyRepository {
     inner: Mutex<Vec<StrategyRecord>>,
+    registrations: Mutex<Vec<StrategyRegistration>>,
 }
 
 impl Default for FakeStrategyRepository {
@@ -40,12 +50,14 @@ impl FakeStrategyRepository {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(vec![]),
+            registrations: Mutex::new(vec![]),
         }
     }
 
     pub fn with_records(records: Vec<StrategyRecord>) -> Self {
         Self {
             inner: Mutex::new(records),
+            registrations: Mutex::new(vec![]),
         }
     }
 }
@@ -67,5 +79,12 @@ impl StrategyRepository for FakeStrategyRepository {
 
     async fn list_active(&self) -> Result<Vec<StrategyRecord>, StrategyRepositoryError> {
         Ok(self.inner.lock().await.clone())
+    }
+
+    async fn register(&self, reg: &StrategyRegistration) -> Result<(), StrategyRepositoryError> {
+        let mut regs = self.registrations.lock().await;
+        regs.retain(|r| r.strategy_id != reg.strategy_id);
+        regs.push(reg.clone());
+        Ok(())
     }
 }

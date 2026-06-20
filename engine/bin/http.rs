@@ -186,6 +186,7 @@ async fn main() -> std::io::Result<()> {
         ticker_repository,
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
+        signal_repository: None,
     });
 
     restore_tickers(&app_state).await;

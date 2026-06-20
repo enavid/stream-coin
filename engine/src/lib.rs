@@ -5,3 +5,4 @@ pub mod kafka;
 pub mod presentation;
 pub mod price;
 pub mod strategy;
+pub mod wire_message;

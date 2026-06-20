@@ -7,6 +7,10 @@ pub fn strategy_router(cfg: &mut web::ServiceConfig) {
         web::scope("/strategies")
             .route("/start", web::post().to(strategy_handler::start_strategy))
             .route("/stop", web::post().to(strategy_handler::stop_strategy))
+            .route(
+                "/register",
+                web::post().to(strategy_handler::register_strategy),
+            )
             .route("", web::get().to(strategy_handler::list_strategies)),
     );
 }

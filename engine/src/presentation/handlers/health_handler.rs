@@ -68,6 +68,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         })
     }
 

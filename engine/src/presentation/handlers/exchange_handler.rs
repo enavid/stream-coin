@@ -459,6 +459,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         })
     }
 
@@ -478,6 +479,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         })
     }
 
@@ -603,6 +605,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         });
         let app = test::init_service(
             App::new()
@@ -705,6 +708,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         });
         let app = test::init_service(
             App::new()
@@ -754,6 +758,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -817,6 +822,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -871,6 +877,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -944,6 +951,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -1012,6 +1020,7 @@ mod tests {
             ticker_repository: Some(Arc::clone(&repo) as Arc<dyn TickerRepository>),
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -1059,6 +1068,7 @@ mod tests {
             ticker_repository: Some(Arc::clone(&repo) as Arc<dyn TickerRepository>),
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         });
 
         restore_tickers(&state).await;

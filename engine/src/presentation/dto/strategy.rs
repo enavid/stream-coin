@@ -14,6 +14,13 @@ pub struct StopStrategyRequest {
     pub strategy_id: String,
 }
 
+#[derive(Deserialize)]
+pub struct RegisterStrategyRequest {
+    pub strategy_id: String,
+    pub name: String,
+    pub strategy_type: String,
+}
+
 #[derive(Serialize)]
 pub struct ActiveStrategy {
     pub strategy_id: String,

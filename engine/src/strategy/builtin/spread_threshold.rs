@@ -81,4 +81,54 @@ mod tests {
         let signal = strategy.on_price(&price);
         assert!(signal.is_none());
     }
+
+    #[test]
+    fn spread_threshold_returns_none_at_exactly_threshold() {
+        let strategy = SpreadThresholdStrategy::new("test-id", "tabdeal", "USDT/IRT", 500);
+        // spread = 500, threshold = 500; condition is '>' not '>=' so must return None
+        let price = make_price(175_000, 175_500);
+        let signal = strategy.on_price(&price);
+        assert!(
+            signal.is_none(),
+            "spread equal to threshold must not trigger a signal (condition is strict >)"
+        );
+    }
+
+    #[test]
+    fn spread_threshold_ignores_wrong_exchange() {
+        let strategy = SpreadThresholdStrategy::new("test-id", "tabdeal", "USDT/IRT", 100);
+        let mut price = make_price(175_000, 177_000);
+        price.exchange = ExchangeId::new("hitobit");
+        let signal = strategy.on_price(&price);
+        assert!(
+            signal.is_none(),
+            "strategy must ignore prices from a different exchange"
+        );
+    }
+
+    #[test]
+    fn spread_threshold_ignores_wrong_pair() {
+        let strategy = SpreadThresholdStrategy::new("test-id", "tabdeal", "USDT/IRT", 100);
+        let mut price = make_price(175_000, 177_000);
+        price.pair = TradingPair::new("BTC", "IRT");
+        let signal = strategy.on_price(&price);
+        assert!(
+            signal.is_none(),
+            "strategy must ignore prices for a different pair"
+        );
+    }
+
+    #[test]
+    fn spread_threshold_signal_fields_match_input() {
+        let strategy = SpreadThresholdStrategy::new("my-id", "tabdeal", "USDT/IRT", 1_000);
+        let price = make_price(175_000, 177_500);
+        let signal = strategy
+            .on_price(&price)
+            .expect("spread > threshold must emit a signal");
+        assert_eq!(signal.strategy_id, "my-id");
+        assert_eq!(signal.exchange, "tabdeal");
+        assert_eq!(signal.pair, "USDT/IRT");
+        assert_eq!(signal.action, Action::Buy);
+        assert_eq!(signal.confidence, 1.0);
+    }
 }

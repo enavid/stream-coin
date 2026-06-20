@@ -77,6 +77,7 @@ mod tests {
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
+            signal_repository: None,
         })
     }
 
@@ -197,6 +198,7 @@ mod tests {
         let mut conn = srv.ws_at("/ws").await.unwrap();
 
         let payload = SignalPayload {
+            signal_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             strategy_id: "spread_threshold".to_string(),
             exchange: "tabdeal".to_string(),
             pair: "USDT/IRT".to_string(),
