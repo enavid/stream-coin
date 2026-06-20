@@ -96,7 +96,7 @@ pub fn spawn_strategy_runner(
                     );
                     strategy.on_candle(&candle_from_payload(c))
                 }
-                WsMessage::Signal(_) => None,
+                WsMessage::Signal(_) | WsMessage::OrderUpdate(_) => None,
             };
 
             if let Some(sig) = signal {

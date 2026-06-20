@@ -11,6 +11,7 @@ use crate::infrastructure::db::signal_repository::SignalRepository;
 use crate::infrastructure::db::strategy_repository::StrategyRepository;
 use crate::infrastructure::db::ticker_repository::TickerRepository;
 use crate::kafka::port::MessagePublisher;
+use crate::order::manager::OrderManager;
 use crate::order::port::OrderAdapter;
 
 pub type ClientKey = String;
@@ -64,8 +65,12 @@ pub struct AppState {
     pub signal_repository: Option<Arc<dyn SignalRepository>>,
     /// Live order adapters keyed by exchange name (e.g. `"tabdeal"`).
     /// Populated from the exchange registry at startup. Empty until API keys
-    /// are configured — the Order Manager (3b) requires this to be non-empty.
+    /// are configured.
     pub order_adapters: Arc<HashMap<String, Arc<dyn OrderAdapter>>>,
+    /// Order Manager — processes signals into orders, enforces safety controls.
+    /// `None` when no `OrderRepository` is available or in test stubs that do not
+    /// exercise order placement.
+    pub order_manager: Option<Arc<OrderManager>>,
 }
 
 impl AppState {

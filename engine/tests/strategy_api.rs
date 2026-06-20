@@ -32,6 +32,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         strategy_repository: None,
         signal_repository: None,
         order_adapters: Arc::new(HashMap::new()),
+        order_manager: None,
     })
 }
 
@@ -52,6 +53,7 @@ fn build_state_with_strategy_repo(
         strategy_repository: Some(repo),
         signal_repository: None,
         order_adapters: Arc::new(HashMap::new()),
+        order_manager: None,
     })
 }
 
@@ -306,6 +308,7 @@ async fn start_strategy_without_token_returns_401() {
         strategy_repository: None,
         signal_repository: None,
         order_adapters: Arc::new(HashMap::new()),
+        order_manager: None,
     });
 
     let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));

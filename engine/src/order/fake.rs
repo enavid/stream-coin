@@ -20,6 +20,8 @@ pub struct FakeOrderAdapter {
     pub placed_orders: Arc<Mutex<Vec<OrderRequest>>>,
     /// Canned response for `place_order`. Defaults to `Ok(OrderId("fake-order-id"))`.
     place_response: Arc<Mutex<Option<FakeResponse>>>,
+    /// Canned status returned by `get_order_status`. Defaults to `Open`.
+    status_response: Arc<Mutex<OrderStatus>>,
 }
 
 impl FakeOrderAdapter {
@@ -28,7 +30,13 @@ impl FakeOrderAdapter {
             exchange: ExchangeId::new(exchange),
             placed_orders: Arc::new(Mutex::new(vec![])),
             place_response: Arc::new(Mutex::new(None)),
+            status_response: Arc::new(Mutex::new(OrderStatus::Open)),
         }
+    }
+
+    /// Pre-configure the status returned by `get_order_status`.
+    pub async fn will_return_status(&self, status: OrderStatus) {
+        *self.status_response.lock().await = status;
     }
 
     /// Pre-configure the adapter to return an error on the next `place_order` call.
@@ -71,7 +79,7 @@ impl OrderAdapter for FakeOrderAdapter {
         &self,
         _order_id: &OrderId,
     ) -> Result<OrderStatus, OrderAdapterError> {
-        Ok(OrderStatus::Open)
+        Ok(self.status_response.lock().await.clone())
     }
 }
 

@@ -10,6 +10,24 @@ pub enum WsMessage {
     PriceUpdate(PricePayload),
     Candle(CandlePayload),
     Signal(SignalPayload),
+    OrderUpdate(OrderUpdatePayload),
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+pub struct OrderUpdatePayload {
+    pub order_id: String,
+    pub client_order_id: String,
+    pub exchange: String,
+    pub pair: String,
+    pub market_type: String,
+    pub side: String,
+    /// "open" | "filled" | "partially_filled" | "cancelled" | "failed" | "dry_run"
+    pub status: String,
+    /// Decimal serialized as string — never f64.
+    pub quantity: String,
+    pub fill_price: Option<String>,
+    pub strategy_id: Option<String>,
+    pub timestamp: DateTime<Utc>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
@@ -213,6 +231,93 @@ mod tests {
             !is_price,
             "a signal message must not match the price_update variant"
         );
+    }
+
+    fn sample_order_update_payload() -> OrderUpdatePayload {
+        OrderUpdatePayload {
+            order_id: "exchange-ord-001".to_string(),
+            client_order_id: "client-uuid-001".to_string(),
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            market_type: "spot".to_string(),
+            side: "buy".to_string(),
+            status: "open".to_string(),
+            quantity: "100".to_string(),
+            fill_price: None,
+            strategy_id: Some("spread-1".to_string()),
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn order_update_payload_serializes_with_type_order_update() {
+        let msg = WsMessage::OrderUpdate(sample_order_update_payload());
+        let json: Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "order_update");
+    }
+
+    #[test]
+    fn order_update_fields_are_at_root_not_under_data_key() {
+        let msg = WsMessage::OrderUpdate(sample_order_update_payload());
+        let json: Value = serde_json::to_value(&msg).unwrap();
+        assert!(json["order_id"].is_string(), "order_id must be at root");
+        assert!(json["client_order_id"].is_string());
+        assert!(json["exchange"].is_string());
+        assert!(json["pair"].is_string());
+        assert!(json["status"].is_string());
+        assert!(
+            json["quantity"].is_string(),
+            "quantity must be a string, never f64"
+        );
+        assert!(json["data"].is_null(), "no data wrapper key");
+    }
+
+    #[test]
+    fn order_update_fill_price_is_none_when_order_open() {
+        let payload = sample_order_update_payload();
+        assert!(
+            payload.fill_price.is_none(),
+            "fill_price must be None for open orders"
+        );
+        let msg = WsMessage::OrderUpdate(payload);
+        let json: Value = serde_json::to_value(&msg).unwrap();
+        assert!(json["fill_price"].is_null());
+    }
+
+    #[test]
+    fn order_update_fill_price_is_string_when_filled() {
+        let mut payload = sample_order_update_payload();
+        payload.status = "filled".to_string();
+        payload.fill_price = Some("58000".to_string());
+        let msg = WsMessage::OrderUpdate(payload);
+        let json: Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["fill_price"], "58000");
+        assert_eq!(json["status"], "filled");
+    }
+
+    #[test]
+    fn order_update_quantity_is_string_not_number() {
+        let msg = WsMessage::OrderUpdate(sample_order_update_payload());
+        let json: Value = serde_json::to_value(&msg).unwrap();
+        assert!(
+            json["quantity"].is_string(),
+            "quantity must be serialized as a string to avoid float precision loss"
+        );
+    }
+
+    #[test]
+    fn order_update_round_trips_serialize_deserialize() {
+        let original = WsMessage::OrderUpdate(sample_order_update_payload());
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn price_consumer_ignores_order_update_type_without_error() {
+        let json = r#"{"type":"order_update","order_id":"123","client_order_id":"abc","exchange":"tabdeal","pair":"USDT/IRT","market_type":"spot","side":"buy","status":"open","quantity":"100","fill_price":null,"strategy_id":null,"timestamp":"2026-06-20T00:00:00Z"}"#;
+        let msg: WsMessage = serde_json::from_str(json).unwrap();
+        assert!(!matches!(msg, WsMessage::PriceUpdate(_)));
     }
 
     #[test]

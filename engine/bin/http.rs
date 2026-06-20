@@ -188,6 +188,7 @@ async fn main() -> std::io::Result<()> {
         strategy_repository: None,
         signal_repository: None,
         order_adapters: Arc::new(HashMap::new()),
+        order_manager: None,
     });
 
     restore_tickers(&app_state).await;

@@ -461,6 +461,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         })
     }
 
@@ -482,6 +483,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         })
     }
 
@@ -609,6 +611,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         });
         let app = test::init_service(
             App::new()
@@ -713,6 +716,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         });
         let app = test::init_service(
             App::new()
@@ -764,6 +768,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -829,6 +834,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -885,6 +891,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -960,6 +967,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -1030,6 +1038,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -1079,6 +1088,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
+            order_manager: None,
         });
 
         restore_tickers(&state).await;

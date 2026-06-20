@@ -1,5 +1,6 @@
 mod exchange_routers;
 mod health_router;
+mod order_router;
 mod registry_router;
 mod strategy_router;
 
@@ -17,6 +18,7 @@ pub fn init_routes(cfg: &mut web::ServiceConfig) {
             .configure(exchange_routers::exchange_router)
             .configure(registry_router::registry_router)
             .configure(strategy_router::strategy_router)
+            .configure(order_router::order_router)
             .route("/ws", web::get().to(ws_handler::ws_index)),
     );
 }
