@@ -184,6 +184,8 @@ async fn main() -> std::io::Result<()> {
         broadcaster: AppState::new_broadcaster(),
         jwt_secret,
         ticker_repository,
+        running_strategies: Arc::new(Mutex::new(HashMap::new())),
+        strategy_repository: None,
     });
 
     restore_tickers(&app_state).await;

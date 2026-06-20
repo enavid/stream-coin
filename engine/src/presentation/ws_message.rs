@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::candle::entity::CandlePayload;
 use crate::price::entity::Price;
+use crate::strategy::entity::Signal;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -29,6 +30,19 @@ pub struct PricePayload {
     pub bid: u64,
     pub ask: u64,
     pub timestamp: DateTime<Utc>,
+}
+
+impl From<&Signal> for SignalPayload {
+    fn from(s: &Signal) -> Self {
+        SignalPayload {
+            strategy_id: s.strategy_id.clone(),
+            exchange: s.exchange.clone(),
+            pair: s.pair.clone(),
+            action: s.action.as_str().to_string(),
+            confidence: s.confidence,
+            timestamp: s.timestamp,
+        }
+    }
 }
 
 impl From<&Price> for PricePayload {

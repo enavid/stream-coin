@@ -1,6 +1,7 @@
 mod exchange_routers;
 mod health_router;
 mod registry_router;
+mod strategy_router;
 
 use actix_web::middleware::from_fn;
 use actix_web::web;
@@ -15,6 +16,7 @@ pub fn init_routes(cfg: &mut web::ServiceConfig) {
             .configure(health_router::health_router)
             .configure(exchange_routers::exchange_router)
             .configure(registry_router::registry_router)
+            .configure(strategy_router::strategy_router)
             .route("/ws", web::get().to(ws_handler::ws_index)),
     );
 }

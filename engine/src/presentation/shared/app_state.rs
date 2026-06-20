@@ -7,6 +7,7 @@ use tokio::task::AbortHandle;
 
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
+use crate::infrastructure::db::strategy_repository::StrategyRepository;
 use crate::infrastructure::db::ticker_repository::TickerRepository;
 use crate::kafka::port::MessagePublisher;
 
@@ -19,6 +20,15 @@ pub type AdapterFactory = Arc<dyn Fn(&str) -> Arc<dyn ExchangeAdapter> + Send + 
 /// Capacity of the price broadcast channel; lagging WS clients drop oldest
 /// messages rather than blocking publishers.
 pub const BROADCAST_CAPACITY: usize = 256;
+
+/// Metadata for a running strategy, stored alongside its abort handle.
+#[derive(Clone, Debug)]
+pub struct StrategyHandle {
+    pub strategy_type: String,
+    pub exchange: String,
+    pub pair: String,
+    pub abort_handle: AbortHandle,
+}
 
 /// Shared server state injected into every actix-web handler via `web::Data`.
 #[derive(Clone)]
@@ -44,6 +54,10 @@ pub struct AppState {
     pub jwt_secret: Option<Arc<String>>,
     /// Persistent store for active ticker subscriptions. `None` = in-memory only (no DB).
     pub ticker_repository: Option<Arc<dyn TickerRepository>>,
+    /// Handles of currently-running strategy tasks, keyed by `strategy_id`.
+    pub running_strategies: Arc<Mutex<HashMap<String, StrategyHandle>>>,
+    /// Persistent store for active strategy records. `None` = in-memory only (no DB).
+    pub strategy_repository: Option<Arc<dyn StrategyRepository>>,
 }
 
 impl AppState {

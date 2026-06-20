@@ -457,6 +457,8 @@ mod tests {
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
             ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         })
     }
 
@@ -474,6 +476,8 @@ mod tests {
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
             ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         })
     }
 
@@ -597,6 +601,8 @@ mod tests {
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
             ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         });
         let app = test::init_service(
             App::new()
@@ -697,6 +703,8 @@ mod tests {
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
             ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         });
         let app = test::init_service(
             App::new()
@@ -744,6 +752,8 @@ mod tests {
             broadcaster,
             jwt_secret: None,
             ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -805,6 +815,8 @@ mod tests {
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
             ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -857,6 +869,8 @@ mod tests {
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
             ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -928,6 +942,8 @@ mod tests {
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
             ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -994,6 +1010,8 @@ mod tests {
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
             ticker_repository: Some(Arc::clone(&repo) as Arc<dyn TickerRepository>),
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -1039,6 +1057,8 @@ mod tests {
             broadcaster: AppState::new_broadcaster(),
             jwt_secret: None,
             ticker_repository: Some(Arc::clone(&repo) as Arc<dyn TickerRepository>),
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
         });
 
         restore_tickers(&state).await;

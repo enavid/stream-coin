@@ -21,6 +21,8 @@ fn build_state() -> actix_web::web::Data<AppState> {
         broadcaster: AppState::new_broadcaster(),
         jwt_secret: None,
         ticker_repository: None,
+        running_strategies: Arc::new(Mutex::new(HashMap::new())),
+        strategy_repository: None,
     })
 }
 
