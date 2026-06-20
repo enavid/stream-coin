@@ -16,10 +16,15 @@ use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::infrastructure::cache::redis;
+use stream_coin::infrastructure::db::order_repository::FakeOrderRepository;
 use stream_coin::infrastructure::db::postgres::PostgresTickerRepository;
 use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
 use stream_coin::kafka::port::MessagePublisher;
 use stream_coin::kafka::KafkaProducer;
+use stream_coin::order::entity::SafetyConfig;
+use stream_coin::order::manager::{spawn_order_manager_listener, OrderManager};
+use stream_coin::order::port::OrderAdapter;
+use stream_coin::order::tabdeal::TabdealOrderAdapter;
 use stream_coin::presentation::handlers::exchange_handler::restore_tickers;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
@@ -174,6 +179,36 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    let broadcaster = AppState::new_broadcaster();
+
+    // Order adapters — keyed by exchange name, driven by TABDEAL_API_KEY env var.
+    // Each exchange that needs REST order execution must have a key configured here.
+    // FakeOrderRepository is used until Loop 1d database is wired to orders.
+    let mut order_adapter_map: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
+    if let Ok(api_key) = env::var("TABDEAL_API_KEY") {
+        order_adapter_map.insert(
+            "tabdeal".to_string(),
+            Arc::new(TabdealOrderAdapter::new(&api_key)),
+        );
+        tracing::info!("tabdeal order adapter loaded");
+    } else {
+        tracing::warn!("TABDEAL_API_KEY not set — tabdeal order placement disabled");
+    }
+    let order_adapters = Arc::new(order_adapter_map);
+
+    let order_repository = Arc::new(FakeOrderRepository::new());
+    let safety_config = SafetyConfig::default();
+    tracing::info!(dry_run = safety_config.dry_run, "order manager starting");
+
+    let order_manager = Arc::new(OrderManager::new(
+        order_adapters.clone(),
+        order_repository,
+        broadcaster.clone(),
+        safety_config,
+    ));
+    let _listener_handle =
+        spawn_order_manager_listener(Arc::clone(&order_manager), broadcaster.clone());
+
     let app_state = web::Data::new(AppState {
         redis: redis_conn,
         exchange_adapters: Arc::new(RwLock::new(adapters)),
@@ -181,14 +216,14 @@ async fn main() -> std::io::Result<()> {
         adapter_factories,
         clients: Arc::new(Mutex::new(HashMap::new())),
         publisher,
-        broadcaster: AppState::new_broadcaster(),
+        broadcaster,
         jwt_secret,
         ticker_repository,
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
         signal_repository: None,
-        order_adapters: Arc::new(HashMap::new()),
-        order_manager: None,
+        order_adapters,
+        order_manager: Some(order_manager),
     });
 
     restore_tickers(&app_state).await;

@@ -61,6 +61,31 @@ impl fmt::Display for OrderStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderId(pub String);
 
+/// Result of a status query, including the optional fill price for filled orders.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderStatusResult {
+    pub status: OrderStatus,
+    /// Actual fill price returned by the exchange. `None` for non-filled statuses
+    /// or when the exchange does not include price in the status response.
+    pub fill_price: Option<Decimal>,
+}
+
+impl OrderStatusResult {
+    pub fn new(status: OrderStatus) -> Self {
+        Self {
+            status,
+            fill_price: None,
+        }
+    }
+
+    pub fn filled(fill_price: Decimal) -> Self {
+        Self {
+            status: OrderStatus::Filled,
+            fill_price: Some(fill_price),
+        }
+    }
+}
+
 impl fmt::Display for OrderId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -150,8 +175,12 @@ pub trait OrderAdapter: Send + Sync {
     async fn cancel_order(&self, order_id: &OrderId) -> Result<(), OrderAdapterError>;
 
     /// Fetches the current status of an order. Used to reconcile after a
-    /// `NetworkTimeout` on placement.
-    async fn get_order_status(&self, order_id: &OrderId) -> Result<OrderStatus, OrderAdapterError>;
+    /// `NetworkTimeout` on placement and by the fill poller.
+    /// Returns `OrderStatusResult` which includes the fill price when available.
+    async fn get_order_status(
+        &self,
+        order_id: &OrderId,
+    ) -> Result<OrderStatusResult, OrderAdapterError>;
 }
 
 #[cfg(test)]
@@ -244,5 +273,20 @@ mod tests {
             strategy_id: None,
         };
         assert_eq!(req.client_order_id, "test-uuid-1234");
+    }
+
+    #[test]
+    fn order_status_result_new_has_no_fill_price() {
+        let r = OrderStatusResult::new(OrderStatus::Open);
+        assert_eq!(r.status, OrderStatus::Open);
+        assert!(r.fill_price.is_none());
+    }
+
+    #[test]
+    fn order_status_result_filled_carries_fill_price() {
+        let price = Decimal::new(58_000, 0);
+        let r = OrderStatusResult::filled(price);
+        assert_eq!(r.status, OrderStatus::Filled);
+        assert_eq!(r.fill_price, Some(price));
     }
 }

@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use crate::exchange::entity::ExchangeId;
 use crate::order::port::{
-    OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderType,
+    OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderStatusResult,
+    OrderType,
 };
 
 const PLACE_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -145,7 +146,7 @@ impl ExirOrderAdapter {
     pub fn parse_order_status_response(
         status: u16,
         body: &str,
-    ) -> Result<OrderStatus, OrderAdapterError> {
+    ) -> Result<OrderStatusResult, OrderAdapterError> {
         match status {
             200 => {
                 let v: Value = serde_json::from_str(body).map_err(|e| {
@@ -159,7 +160,16 @@ impl ExirOrderAdapter {
                     "cancelled" | "canceled" => OrderStatus::Cancelled,
                     _ => OrderStatus::Failed,
                 };
-                Ok(order_status)
+                let fill_price = v["filled_average_price"]
+                    .as_str()
+                    .or_else(|| v["average_price"].as_str())
+                    .or_else(|| v["price"].as_str())
+                    .and_then(|s| s.parse::<rust_decimal::Decimal>().ok())
+                    .filter(|p| *p > rust_decimal::Decimal::ZERO);
+                Ok(OrderStatusResult {
+                    status: order_status,
+                    fill_price,
+                })
             }
             401 | 403 => Err(OrderAdapterError::AuthFailed),
             _ if status >= 500 => Err(OrderAdapterError::ServerError {
@@ -262,7 +272,10 @@ impl OrderAdapter for ExirOrderAdapter {
     }
 
     #[tracing::instrument(skip(self), fields(exchange = "exir", order_id = %order_id))]
-    async fn get_order_status(&self, order_id: &OrderId) -> Result<OrderStatus, OrderAdapterError> {
+    async fn get_order_status(
+        &self,
+        order_id: &OrderId,
+    ) -> Result<OrderStatusResult, OrderAdapterError> {
         let url = format!("{}/v2/order/{}", self.base_url, order_id.0);
 
         let response = tokio::time::timeout(STATUS_TIMEOUT, async {
@@ -387,15 +400,27 @@ mod tests {
     #[test]
     fn adapter_status_open_maps_from_new() {
         let body = r#"{"id":"abc","status":"new","side":"buy"}"#;
-        let result = ExirOrderAdapter::parse_order_status_response(200, body);
-        assert_eq!(result.unwrap(), OrderStatus::Open);
+        let result = ExirOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.status, OrderStatus::Open);
+        assert!(result.fill_price.is_none());
     }
 
     #[test]
     fn adapter_status_filled_maps_from_completed() {
         let body = r#"{"id":"abc","status":"completed"}"#;
-        let result = ExirOrderAdapter::parse_order_status_response(200, body);
-        assert_eq!(result.unwrap(), OrderStatus::Filled);
+        let result = ExirOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn adapter_status_filled_includes_fill_price() {
+        let body = r#"{"id":"abc","status":"filled","filled_average_price":"58000.50"}"#;
+        let result = ExirOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.status, OrderStatus::Filled);
+        assert!(
+            result.fill_price.is_some(),
+            "filled_average_price must be parsed as fill_price"
+        );
     }
 
     #[test]

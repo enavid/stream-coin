@@ -15,7 +15,8 @@ use crate::infrastructure::db::order_repository::{
 use crate::order::circuit_breaker::{CircuitBreaker, CircuitBreakerError};
 use crate::order::entity::SafetyConfig;
 use crate::order::port::{
-    OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderSide, OrderStatus, OrderType,
+    OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderSide, OrderStatus,
+    OrderStatusResult, OrderType,
 };
 use crate::wire_message::{OrderUpdatePayload, SignalPayload, WsMessage};
 
@@ -47,6 +48,8 @@ pub struct OrderManager {
     circuit_breaker: Arc<Mutex<CircuitBreaker>>,
     /// Interval between fill-status polls. Shorter in tests.
     fill_poll_interval: Duration,
+    /// Tracks active fill-poller tasks by client_order_id so they can be aborted on cancel.
+    poll_handles: Arc<Mutex<HashMap<String, AbortHandle>>>,
 }
 
 impl OrderManager {
@@ -83,6 +86,7 @@ impl OrderManager {
             safety_config,
             circuit_breaker: Arc::new(Mutex::new(cb)),
             fill_poll_interval,
+            poll_handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -93,6 +97,12 @@ impl OrderManager {
 
     pub async fn circuit_breaker_is_tripped(&self) -> bool {
         self.circuit_breaker.lock().await.is_tripped()
+    }
+
+    /// Returns `true` if a fill poller task is currently running for the given order.
+    #[cfg(test)]
+    pub async fn has_active_poll(&self, client_order_id: &str) -> bool {
+        self.poll_handles.lock().await.contains_key(client_order_id)
     }
 
     /// Entry point for strategy-driven orders. Converts a signal into an order request.
@@ -181,6 +191,15 @@ impl OrderManager {
             .await
             .map_err(OrderManagerError::Adapter)?;
 
+        // Abort the fill poller before updating DB so it cannot overwrite "cancelled"
+        if let Some(handle) = self.poll_handles.lock().await.remove(client_order_id) {
+            handle.abort();
+            tracing::debug!(
+                client_order_id = %client_order_id,
+                "fill poller aborted on cancel"
+            );
+        }
+
         self.order_repository
             .update_status(client_order_id, "cancelled", None, None)
             .await?;
@@ -203,16 +222,7 @@ impl OrderManager {
     }
 
     async fn execute_order(&self, req: OrderRequest) -> Result<(), OrderManagerError> {
-        // Circuit breaker — checked before any DB or network call
-        {
-            let mut cb = self.circuit_breaker.lock().await;
-            cb.record_order()
-                .map_err(|CircuitBreakerError::Tripped(_, _)| {
-                    OrderManagerError::CircuitBreakerTripped
-                })?;
-        }
-
-        // Position limit — total open quantity must not exceed max_position_size
+        // Position limit checked first — must not count rejected orders against the circuit breaker
         let open_qty = self
             .order_repository
             .get_open_quantity(&req.exchange, &req.pair)
@@ -231,6 +241,15 @@ impl OrderManager {
                 projected,
                 self.safety_config.max_position_size,
             ));
+        }
+
+        // Circuit breaker — only incremented after position limit passes
+        {
+            let mut cb = self.circuit_breaker.lock().await;
+            cb.record_order()
+                .map_err(|CircuitBreakerError::Tripped(_, _)| {
+                    OrderManagerError::CircuitBreakerTripped
+                })?;
         }
 
         // Dry-run — full pipeline runs but no real exchange call
@@ -306,7 +325,7 @@ impl OrderManager {
 
         self.broadcast_update(&placed, None);
 
-        // Spawn fill poller — lightweight background task, supervised by its caller
+        // Spawn fill poller and track the abort handle so cancel_order can stop it
         let poll_interval = self.fill_poll_interval;
         let client_oid = req.client_order_id.clone();
         let exchange = req.exchange.clone();
@@ -316,8 +335,10 @@ impl OrderManager {
         let strategy_id = req.strategy_id.clone();
         let repo = self.order_repository.clone();
         let broadcaster = self.broadcaster.clone();
+        let poll_handles = self.poll_handles.clone();
+        let client_oid_cleanup = client_oid.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             poll_fill_status(FillPollContext {
                 order_id,
                 client_order_id: client_oid,
@@ -332,7 +353,14 @@ impl OrderManager {
                 interval: poll_interval,
             })
             .await;
+            // Remove handle from map when poller exits naturally
+            poll_handles.lock().await.remove(&client_oid_cleanup);
         });
+
+        self.poll_handles
+            .lock()
+            .await
+            .insert(req.client_order_id.clone(), handle.abort_handle());
 
         Ok(())
     }
@@ -419,8 +447,11 @@ async fn poll_fill_status(ctx: FillPollContext) {
     for attempt in 0..MAX_ATTEMPTS {
         tokio::time::sleep(interval).await;
 
-        let status = match adapter.get_order_status(&order_id).await {
-            Ok(s) => s,
+        let OrderStatusResult {
+            status,
+            fill_price: raw_fill_price,
+        } = match adapter.get_order_status(&order_id).await {
+            Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -438,11 +469,7 @@ async fn poll_fill_status(ctx: FillPollContext) {
             status,
             OrderStatus::Filled | OrderStatus::Cancelled | OrderStatus::Failed
         );
-        let fill_price = if status == OrderStatus::Filled {
-            Some("0".to_string()) // Real adapters provide this in the status response
-        } else {
-            None
-        };
+        let fill_price = raw_fill_price.map(|p| p.to_string());
 
         if let Err(e) = repo
             .update_status(&client_order_id, &status_str, Some(&order_id.0), None)
@@ -917,5 +944,135 @@ mod tests {
             assert_eq!(payload.client_order_id, "client-001");
             assert!(payload.fill_price.is_none());
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_order_aborts_fill_poller() {
+        let (broadcaster, _rx) = broadcast::channel(64);
+        let repo = Arc::new(FakeOrderRepository::new());
+        let cfg = live_config();
+
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter.will_succeed_with("exch-cancel-001").await;
+        // Status stays Open — poller would run forever without abort
+        let mut adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
+        adapters.insert("tabdeal".to_string(), Arc::new(adapter));
+
+        let manager = Arc::new(OrderManager::with_poll_interval(
+            Arc::new(adapters),
+            repo,
+            broadcaster,
+            cfg,
+            Duration::from_millis(50),
+        ));
+
+        let req = OrderRequest {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::new(100, 0),
+            price: None,
+            client_order_id: "client-cancel-001".to_string(),
+            strategy_id: None,
+        };
+
+        manager.place_order(req).await.unwrap();
+
+        assert!(
+            manager.has_active_poll("client-cancel-001").await,
+            "fill poller must be tracked after placement"
+        );
+
+        manager.cancel_order("client-cancel-001").await.unwrap();
+
+        assert!(
+            !manager.has_active_poll("client-cancel-001").await,
+            "fill poller handle must be removed after cancel"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fill_poll_broadcasts_actual_fill_price_not_zero() {
+        use crate::order::port::OrderStatusResult;
+
+        let (broadcaster, mut rx) = broadcast::channel(32);
+        let repo = Arc::new(FakeOrderRepository::new());
+        let cfg = live_config();
+
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter.will_succeed_with("exch-fill-price").await;
+        let fill_price = Decimal::new(58_000, 0);
+        adapter
+            .will_return_status(OrderStatusResult::filled(fill_price))
+            .await;
+
+        let mut adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
+        adapters.insert("tabdeal".to_string(), Arc::new(adapter));
+
+        let manager = OrderManager::with_poll_interval(
+            Arc::new(adapters),
+            repo,
+            broadcaster,
+            cfg,
+            Duration::from_millis(10),
+        );
+
+        manager
+            .process_signal(&make_signal("buy", 0.9))
+            .await
+            .unwrap();
+
+        // Wait for fill poller to run (it sleeps 10ms before first poll)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drain broadcast messages, find the "filled" update
+        let mut saw_filled_with_price = false;
+        while let Ok(text) = rx.try_recv() {
+            if let Ok(WsMessage::OrderUpdate(p)) = serde_json::from_str::<WsMessage>(&text) {
+                if p.status == "filled" {
+                    assert_ne!(
+                        p.fill_price.as_deref(),
+                        Some("0"),
+                        "fill_price must not be \"0\""
+                    );
+                    assert_eq!(
+                        p.fill_price.as_deref(),
+                        Some("58000"),
+                        "fill_price must match exchange-returned value"
+                    );
+                    saw_filled_with_price = true;
+                }
+            }
+        }
+        assert!(
+            saw_filled_with_price,
+            "must have received a filled OrderUpdate with fill_price"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn position_limit_rejection_does_not_trip_circuit_breaker() {
+        let cfg = SafetyConfig {
+            dry_run: false,
+            max_position_size: Decimal::ZERO,
+            default_order_quantity: Decimal::new(1, 0),
+            circuit_breaker_max_orders: 3,
+            circuit_breaker_window_secs: 60,
+            min_confidence: 0.0,
+        };
+        let (manager, _rx) = build_manager(cfg, FakeOrderAdapter::new("tabdeal"));
+
+        for _ in 0..5 {
+            let res = manager.process_signal(&make_signal("buy", 0.9)).await;
+            assert!(
+                matches!(res, Err(OrderManagerError::PositionLimitExceeded(_, _))),
+                "every order must fail due to position limit, not circuit breaker"
+            );
+        }
+        assert!(
+            !manager.circuit_breaker_is_tripped().await,
+            "circuit breaker must not trip on position-limit rejections"
+        );
     }
 }

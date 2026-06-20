@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::exchange::entity::ExchangeId;
-use crate::order::port::{OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus};
+use crate::order::port::{
+    OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderStatusResult,
+};
 
 /// Configures how `FakeOrderAdapter` responds to place/cancel/status calls.
 pub enum FakeResponse {
@@ -20,8 +22,8 @@ pub struct FakeOrderAdapter {
     pub placed_orders: Arc<Mutex<Vec<OrderRequest>>>,
     /// Canned response for `place_order`. Defaults to `Ok(OrderId("fake-order-id"))`.
     place_response: Arc<Mutex<Option<FakeResponse>>>,
-    /// Canned status returned by `get_order_status`. Defaults to `Open`.
-    status_response: Arc<Mutex<OrderStatus>>,
+    /// Canned result returned by `get_order_status`. Defaults to `Open` with no fill price.
+    status_response: Arc<Mutex<OrderStatusResult>>,
 }
 
 impl FakeOrderAdapter {
@@ -30,13 +32,13 @@ impl FakeOrderAdapter {
             exchange: ExchangeId::new(exchange),
             placed_orders: Arc::new(Mutex::new(vec![])),
             place_response: Arc::new(Mutex::new(None)),
-            status_response: Arc::new(Mutex::new(OrderStatus::Open)),
+            status_response: Arc::new(Mutex::new(OrderStatusResult::new(OrderStatus::Open))),
         }
     }
 
-    /// Pre-configure the status returned by `get_order_status`.
-    pub async fn will_return_status(&self, status: OrderStatus) {
-        *self.status_response.lock().await = status;
+    /// Pre-configure the result returned by `get_order_status`.
+    pub async fn will_return_status(&self, result: OrderStatusResult) {
+        *self.status_response.lock().await = result;
     }
 
     /// Pre-configure the adapter to return an error on the next `place_order` call.
@@ -78,7 +80,7 @@ impl OrderAdapter for FakeOrderAdapter {
     async fn get_order_status(
         &self,
         _order_id: &OrderId,
-    ) -> Result<OrderStatus, OrderAdapterError> {
+    ) -> Result<OrderStatusResult, OrderAdapterError> {
         Ok(self.status_response.lock().await.clone())
     }
 }
@@ -159,12 +161,29 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fake_adapter_get_order_status_returns_open() {
+    async fn fake_adapter_get_order_status_returns_open_by_default() {
         let adapter = FakeOrderAdapter::new("tabdeal");
         let result = adapter
             .get_order_status(&OrderId("12345".to_string()))
             .await
             .unwrap();
-        assert_eq!(result, OrderStatus::Open);
+        assert_eq!(result.status, OrderStatus::Open);
+        assert!(result.fill_price.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_adapter_get_order_status_returns_configured_fill_price() {
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        let price = rust_decimal::Decimal::new(58_000, 0);
+        adapter
+            .will_return_status(OrderStatusResult::filled(price))
+            .await;
+
+        let result = adapter
+            .get_order_status(&OrderId("12345".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(result.status, OrderStatus::Filled);
+        assert_eq!(result.fill_price, Some(price));
     }
 }

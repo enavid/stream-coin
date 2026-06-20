@@ -13,7 +13,7 @@ use stream_coin::infrastructure::db::order_repository::FakeOrderRepository;
 use stream_coin::order::entity::SafetyConfig;
 use stream_coin::order::fake::FakeOrderAdapter;
 use stream_coin::order::manager::OrderManager;
-use stream_coin::order::port::{OrderAdapter, OrderStatus};
+use stream_coin::order::port::{OrderAdapter, OrderStatusResult};
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
 use stream_coin::wire_message::WsMessage;
@@ -310,7 +310,11 @@ async fn ws_client_receives_order_update_on_fill() {
     let adapter = FakeOrderAdapter::new("tabdeal");
     adapter.will_succeed_with("exch-fill-001").await;
     // After placement, status polls return Filled immediately
-    adapter.will_return_status(OrderStatus::Filled).await;
+    adapter
+        .will_return_status(OrderStatusResult::filled(rust_decimal::Decimal::new(
+            58_000, 0,
+        )))
+        .await;
 
     let (state, _repo) = build_state_with_order_manager(live_config(), adapter);
 

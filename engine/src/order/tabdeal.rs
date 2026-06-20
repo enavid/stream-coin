@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use crate::exchange::entity::ExchangeId;
 use crate::order::port::{
-    OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderType,
+    OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderStatusResult,
+    OrderType,
 };
 
 const PLACE_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -139,7 +140,7 @@ impl TabdealOrderAdapter {
     pub fn parse_order_status_response(
         status: u16,
         body: &str,
-    ) -> Result<OrderStatus, OrderAdapterError> {
+    ) -> Result<OrderStatusResult, OrderAdapterError> {
         match status {
             200 => {
                 let v: Value = serde_json::from_str(body).map_err(|e| {
@@ -153,7 +154,15 @@ impl TabdealOrderAdapter {
                     "CANCELED" | "CANCELLED" => OrderStatus::Cancelled,
                     _ => OrderStatus::Failed,
                 };
-                Ok(order_status)
+                let fill_price = v["avgPrice"]
+                    .as_str()
+                    .or_else(|| v["price"].as_str())
+                    .and_then(|s| s.parse::<rust_decimal::Decimal>().ok())
+                    .filter(|p| *p > rust_decimal::Decimal::ZERO);
+                Ok(OrderStatusResult {
+                    status: order_status,
+                    fill_price,
+                })
             }
             401 | 403 => Err(OrderAdapterError::AuthFailed),
             _ if status >= 500 => Err(OrderAdapterError::ServerError {
@@ -256,7 +265,10 @@ impl OrderAdapter for TabdealOrderAdapter {
     }
 
     #[tracing::instrument(skip(self), fields(exchange = "tabdeal", order_id = %order_id))]
-    async fn get_order_status(&self, order_id: &OrderId) -> Result<OrderStatus, OrderAdapterError> {
+    async fn get_order_status(
+        &self,
+        order_id: &OrderId,
+    ) -> Result<OrderStatusResult, OrderAdapterError> {
         let url = format!("{}/api/v1/order?orderId={}", self.base_url, order_id.0);
 
         let response = tokio::time::timeout(STATUS_TIMEOUT, async {
@@ -405,22 +417,34 @@ mod tests {
     #[test]
     fn adapter_status_open_parses_new() {
         let body = r#"{"orderId":"123","status":"NEW","symbol":"USDTIRT"}"#;
-        let result = TabdealOrderAdapter::parse_order_status_response(200, body);
-        assert_eq!(result.unwrap(), OrderStatus::Open);
+        let result = TabdealOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.status, OrderStatus::Open);
+        assert!(result.fill_price.is_none());
     }
 
     #[test]
     fn adapter_status_filled_parses_filled() {
         let body = r#"{"orderId":"123","status":"FILLED"}"#;
-        let result = TabdealOrderAdapter::parse_order_status_response(200, body);
-        assert_eq!(result.unwrap(), OrderStatus::Filled);
+        let result = TabdealOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.status, OrderStatus::Filled);
+    }
+
+    #[test]
+    fn adapter_status_filled_includes_avg_price() {
+        let body = r#"{"orderId":"123","status":"FILLED","avgPrice":"58000.00"}"#;
+        let result = TabdealOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.status, OrderStatus::Filled);
+        assert!(
+            result.fill_price.is_some(),
+            "avgPrice must be parsed as fill_price"
+        );
     }
 
     #[test]
     fn adapter_status_cancelled_parses_canceled() {
         let body = r#"{"orderId":"123","status":"CANCELED"}"#;
-        let result = TabdealOrderAdapter::parse_order_status_response(200, body);
-        assert_eq!(result.unwrap(), OrderStatus::Cancelled);
+        let result = TabdealOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.status, OrderStatus::Cancelled);
     }
 
     #[test]
