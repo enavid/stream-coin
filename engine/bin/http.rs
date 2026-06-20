@@ -197,8 +197,48 @@ async fn main() -> std::io::Result<()> {
     let order_adapters = Arc::new(order_adapter_map);
 
     let order_repository = Arc::new(FakeOrderRepository::new());
-    let safety_config = SafetyConfig::default();
-    tracing::info!(dry_run = safety_config.dry_run, "order manager starting");
+
+    // Safety config driven by environment variables so operators can tune without redeploying.
+    // All values fall back to SafetyConfig::default() which has dry_run=true for safety.
+    let safety_config = {
+        let mut cfg = SafetyConfig::default();
+        if let Ok(v) = env::var("DRY_RUN") {
+            cfg.dry_run = v.to_lowercase() != "false";
+        }
+        if let Ok(v) = env::var("MIN_CONFIDENCE") {
+            if let Ok(f) = v.parse::<f64>() {
+                cfg.min_confidence = f;
+            }
+        }
+        if let Ok(v) = env::var("MAX_POSITION_SIZE") {
+            if let Ok(d) = v.parse::<rust_decimal::Decimal>() {
+                cfg.max_position_size = d;
+            }
+        }
+        if let Ok(v) = env::var("DEFAULT_ORDER_QUANTITY") {
+            if let Ok(d) = v.parse::<rust_decimal::Decimal>() {
+                cfg.default_order_quantity = d;
+            }
+        }
+        if let Ok(v) = env::var("CIRCUIT_BREAKER_MAX_ORDERS") {
+            if let Ok(n) = v.parse::<u32>() {
+                cfg.circuit_breaker_max_orders = n;
+            }
+        }
+        if let Ok(v) = env::var("CIRCUIT_BREAKER_WINDOW_SECS") {
+            if let Ok(n) = v.parse::<u64>() {
+                cfg.circuit_breaker_window_secs = n;
+            }
+        }
+        cfg
+    };
+    tracing::info!(
+        dry_run = safety_config.dry_run,
+        min_confidence = safety_config.min_confidence,
+        max_position_size = %safety_config.max_position_size,
+        circuit_breaker_max_orders = safety_config.circuit_breaker_max_orders,
+        "order manager starting"
+    );
 
     let order_manager = Arc::new(OrderManager::new(
         order_adapters.clone(),

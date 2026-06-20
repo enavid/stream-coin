@@ -362,3 +362,56 @@ async fn ws_client_receives_order_update_on_fill() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Input validation — exchange and pair
+
+#[actix_web::test]
+async fn place_order_unknown_exchange_returns_400() {
+    let (state, _repo) =
+        build_state_with_order_manager(live_config(), FakeOrderAdapter::new("tabdeal"));
+    let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let resp = app
+        .post("/v1/orders/place")
+        .send_json(&json!({
+            "exchange": "hitobit",
+            "pair": "USDT/IRT",
+            "side": "buy",
+            "type": "market",
+            "quantity": "100"
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "unknown exchange must be rejected with 400"
+    );
+}
+
+#[actix_web::test]
+async fn place_order_malformed_pair_returns_400() {
+    let (state, _repo) =
+        build_state_with_order_manager(live_config(), FakeOrderAdapter::new("tabdeal"));
+    let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let resp = app
+        .post("/v1/orders/place")
+        .send_json(&json!({
+            "exchange": "tabdeal",
+            "pair": "USDTIRT",
+            "side": "buy",
+            "type": "market",
+            "quantity": "100"
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "pair without '/' must be rejected with 400"
+    );
+}

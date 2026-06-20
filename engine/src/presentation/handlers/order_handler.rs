@@ -12,6 +12,17 @@ use crate::presentation::dto::order::{
 use crate::presentation::responses::{success_response, ApiError, FieldError};
 use crate::presentation::shared::app_state::AppState;
 
+#[utoipa::path(
+    post,
+    path = "/v1/orders/place",
+    tag = "Orders",
+    request_body = PlaceOrderRequest,
+    responses(
+        (status = 200, description = "Order placed successfully", body = OrderPlacedResponse),
+        (status = 400, description = "Validation error or position limit exceeded", body = ApiError),
+        (status = 503, description = "Order manager not available")
+    )
+)]
 pub async fn place_order(
     state: web::Data<AppState>,
     body: web::Json<PlaceOrderRequest>,
@@ -27,6 +38,17 @@ pub async fn place_order(
     };
 
     let req = body.into_inner();
+
+    if req.pair.chars().filter(|&c| c == '/').count() != 1 {
+        return ApiError::new(
+            "validation failed",
+            vec![FieldError::new(
+                "pair",
+                "must be in BASE/QUOTE format (e.g. USDT/IRT)",
+            )],
+        )
+        .to_response();
+    }
 
     let side = match req.side.to_lowercase().as_str() {
         "buy" => OrderSide::Buy,
@@ -112,6 +134,17 @@ pub async fn place_order(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/orders/cancel",
+    tag = "Orders",
+    request_body = CancelOrderRequest,
+    responses(
+        (status = 200, description = "Order cancelled successfully"),
+        (status = 400, description = "Order not found or already closed", body = ApiError),
+        (status = 503, description = "Order manager not available")
+    )
+)]
 pub async fn cancel_order(
     state: web::Data<AppState>,
     body: web::Json<CancelOrderRequest>,
@@ -135,6 +168,19 @@ pub async fn cancel_order(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/orders",
+    tag = "Orders",
+    params(
+        ("exchange" = Option<String>, Query, description = "Filter by exchange name"),
+        ("pair" = Option<String>, Query, description = "Filter by trading pair (e.g. USDT/IRT)")
+    ),
+    responses(
+        (status = 200, description = "Order list", body = OrderListResponse),
+        (status = 503, description = "Order manager not available")
+    )
+)]
 pub async fn list_orders(
     state: web::Data<AppState>,
     query: web::Query<HashMap<String, String>>,
@@ -180,6 +226,15 @@ pub async fn list_orders(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/admin/circuit-breaker/reset",
+    tag = "Orders",
+    responses(
+        (status = 200, description = "Circuit breaker reset successfully"),
+        (status = 503, description = "Order manager not available")
+    )
+)]
 pub async fn reset_circuit_breaker(state: web::Data<AppState>) -> HttpResponse {
     let manager = match &state.order_manager {
         Some(m) => m.clone(),

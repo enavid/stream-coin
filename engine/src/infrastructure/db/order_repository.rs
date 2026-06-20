@@ -52,6 +52,12 @@ pub trait OrderRepository: Send + Sync {
         pair: &str,
     ) -> Result<Decimal, OrderRepositoryError>;
 
+    /// Fetches a single order by its client-assigned idempotency key.
+    async fn get_by_client_order_id(
+        &self,
+        client_order_id: &str,
+    ) -> Result<OrderRecord, OrderRepositoryError>;
+
     /// Lists orders, optionally filtered by exchange and/or pair.
     async fn list(
         &self,
@@ -129,6 +135,19 @@ impl OrderRepository for FakeOrderRepository {
             .map(|r| r.quantity)
             .fold(Decimal::ZERO, |acc, q| acc + q);
         Ok(total)
+    }
+
+    async fn get_by_client_order_id(
+        &self,
+        client_order_id: &str,
+    ) -> Result<OrderRecord, OrderRepositoryError> {
+        self.records
+            .lock()
+            .await
+            .iter()
+            .find(|r| r.client_order_id == client_order_id)
+            .cloned()
+            .ok_or_else(|| OrderRepositoryError::NotFound(client_order_id.to_string()))
     }
 
     async fn list(
@@ -251,6 +270,23 @@ mod tests {
             .unwrap();
         let all = repo.list(None, None).await.unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_get_by_client_order_id_returns_record() {
+        let repo = FakeOrderRepository::new();
+        repo.insert(&make_record("uuid-target", "open", Decimal::new(100, 0)))
+            .await
+            .unwrap();
+        let rec = repo.get_by_client_order_id("uuid-target").await.unwrap();
+        assert_eq!(rec.client_order_id, "uuid-target");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_get_by_client_order_id_returns_not_found() {
+        let repo = FakeOrderRepository::new();
+        let result = repo.get_by_client_order_id("nonexistent").await;
+        assert!(matches!(result, Err(OrderRepositoryError::NotFound(_))));
     }
 
     #[tokio::test(flavor = "current_thread")]

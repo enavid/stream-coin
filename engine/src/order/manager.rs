@@ -112,9 +112,12 @@ impl OrderManager {
     pub async fn process_signal(&self, signal: &SignalPayload) -> Result<(), OrderManagerError> {
         if signal.confidence < self.safety_config.min_confidence {
             tracing::debug!(
+                signal_id = %signal.signal_id,
                 confidence = signal.confidence,
                 floor = self.safety_config.min_confidence,
                 strategy_id = %signal.strategy_id,
+                exchange = %signal.exchange,
+                pair = %signal.pair,
                 "signal dropped: confidence below floor"
             );
             return Err(OrderManagerError::ConfidenceBelowFloor(
@@ -141,6 +144,17 @@ impl OrderManager {
             strategy_id: Some(signal.strategy_id.clone()),
         };
 
+        tracing::info!(
+            signal_id = %signal.signal_id,
+            strategy_id = %signal.strategy_id,
+            exchange = %signal.exchange,
+            pair = %signal.pair,
+            action = %signal.action,
+            confidence = signal.confidence,
+            client_order_id = %req.client_order_id,
+            "signal accepted, executing order"
+        );
+
         self.execute_order(req).await
     }
 
@@ -153,17 +167,10 @@ impl OrderManager {
 
     /// Cancels an open order identified by `client_order_id`.
     pub async fn cancel_order(&self, client_order_id: &str) -> Result<(), OrderManagerError> {
-        let records = self.order_repository.list(None, None).await?;
-        let record = records
-            .into_iter()
-            .find(|r| r.client_order_id == client_order_id)
-            .ok_or_else(|| {
-                OrderManagerError::Repository(
-                    crate::infrastructure::db::order_repository::OrderRepositoryError::NotFound(
-                        client_order_id.to_string(),
-                    ),
-                )
-            })?;
+        let record = self
+            .order_repository
+            .get_by_client_order_id(client_order_id)
+            .await?;
 
         let exchange_order_id = record.exchange_order_id.clone().ok_or_else(|| {
             OrderManagerError::Repository(
@@ -291,7 +298,16 @@ impl OrderManager {
             "placing order with exchange"
         );
 
-        let order_id = match adapter.place_order(&req).await {
+        const PLACE_TIMEOUT: Duration = Duration::from_secs(15);
+        let place_result = tokio::time::timeout(PLACE_TIMEOUT, adapter.place_order(&req))
+            .await
+            .unwrap_or_else(|_| {
+                Err(OrderAdapterError::NetworkTimeout(
+                    "place_order timed out after 15s in order manager".to_string(),
+                ))
+            });
+
+        let order_id = match place_result {
             Ok(id) => id,
             Err(e) => {
                 tracing::error!(
@@ -543,6 +559,7 @@ pub fn spawn_order_manager_listener(
 
             if let WsMessage::Signal(signal) = msg {
                 tracing::debug!(
+                    signal_id = %signal.signal_id,
                     strategy_id = %signal.strategy_id,
                     action = %signal.action,
                     confidence = signal.confidence,
@@ -674,21 +691,34 @@ mod tests {
             dry_run: true,
             ..SafetyConfig::default()
         };
-        let adapter = FakeOrderAdapter::new("tabdeal");
-        let (manager, _rx) = build_manager(cfg, adapter);
 
-        // Need to get the adapter to check placed_count — use a separate reference
+        // Keep an Arc reference to the adapter so we can inspect placed_count after
+        let adapter = Arc::new(FakeOrderAdapter::new("tabdeal"));
+        let (broadcaster, _rx) = broadcast::channel(32);
+        let repo = Arc::new(FakeOrderRepository::new());
+        let mut adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
+        adapters.insert(
+            "tabdeal".to_string(),
+            Arc::clone(&adapter) as Arc<dyn OrderAdapter>,
+        );
+        let manager = OrderManager::with_poll_interval(
+            Arc::new(adapters),
+            repo,
+            broadcaster,
+            cfg,
+            Duration::from_millis(10),
+        );
+
         manager
             .process_signal(&make_signal("buy", 0.9))
             .await
             .unwrap();
 
-        // The adapter inside the manager was cloned, so count from original adapter = 0
-        // But we can verify via repository
-        // The key behavior: no network call = dry_run mode
-        // We can't check placed_count without a shared Arc here, but the manager
-        // has its own adapter reference. This is tested via the status in the repo.
-        // The test exercises the code path — no panic = pass.
+        assert_eq!(
+            adapter.placed_count().await,
+            0,
+            "place_order must never be called in dry-run mode"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -2,6 +2,9 @@ use utoipa::openapi::OpenApi as OpenApiSpec;
 use utoipa::{Modify, OpenApi};
 
 use crate::presentation::dto::health::{HealthStatus, ServiceStatus};
+use crate::presentation::dto::order::{
+    CancelOrderRequest, OrderItem, OrderListResponse, OrderPlacedResponse, PlaceOrderRequest,
+};
 use crate::presentation::dto::ticker::{
     ActiveTicker, SymbolRequest, TickerList, TickerStarted, TickerStopped,
 };
@@ -16,17 +19,23 @@ use crate::presentation::responses::{ApiError, FieldError};
         crate::presentation::handlers::exchange_handler::start_kline_symbol_ticker,
         crate::presentation::handlers::exchange_handler::stop_kline_symbol_ticker,
         crate::presentation::handlers::exchange_handler::list_tickers,
+        crate::presentation::handlers::order_handler::place_order,
+        crate::presentation::handlers::order_handler::cancel_order,
+        crate::presentation::handlers::order_handler::list_orders,
+        crate::presentation::handlers::order_handler::reset_circuit_breaker,
     ),
     components(
         schemas(
             HealthStatus, ServiceStatus,
             SymbolRequest, TickerStarted, TickerStopped, ActiveTicker, TickerList,
+            PlaceOrderRequest, CancelOrderRequest, OrderPlacedResponse, OrderItem, OrderListResponse,
             ApiError, FieldError
         )
     ),
     tags(
         (name = "Health", description = "Service health and status"),
-        (name = "Exchanges", description = "APIs for retrieving exchange data")
+        (name = "Exchanges", description = "APIs for retrieving exchange data"),
+        (name = "Orders", description = "Order placement, cancellation, and circuit breaker control")
     )
 )]
 pub struct ApiDoc;
@@ -96,5 +105,32 @@ mod tests {
             .paths
             .paths
             .contains_key("/v1/exchanges/futures/tickers"));
+    }
+
+    #[test]
+    fn swagger_registers_place_order_path() {
+        let api = ApiDoc::openapi();
+        assert!(api.paths.paths.contains_key("/v1/orders/place"));
+    }
+
+    #[test]
+    fn swagger_registers_cancel_order_path() {
+        let api = ApiDoc::openapi();
+        assert!(api.paths.paths.contains_key("/v1/orders/cancel"));
+    }
+
+    #[test]
+    fn swagger_registers_list_orders_path() {
+        let api = ApiDoc::openapi();
+        assert!(api.paths.paths.contains_key("/v1/orders"));
+    }
+
+    #[test]
+    fn swagger_registers_circuit_breaker_reset_path() {
+        let api = ApiDoc::openapi();
+        assert!(api
+            .paths
+            .paths
+            .contains_key("/v1/admin/circuit-breaker/reset"));
     }
 }

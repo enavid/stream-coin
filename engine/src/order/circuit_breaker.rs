@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use thiserror::Error;
+use tokio::time::Instant;
 
 #[derive(Debug, Error)]
 pub enum CircuitBreakerError {
@@ -144,5 +145,25 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains('5'), "error must mention max_orders");
         assert!(msg.contains("30"), "error must mention window_secs");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn circuit_breaker_window_expires_allows_new_orders() {
+        tokio::time::pause();
+        let mut cb = CircuitBreaker::new(3, 60);
+
+        cb.record_order().unwrap();
+        cb.record_order().unwrap();
+
+        // Advance past the 60-second window — previous timestamps should expire
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+
+        // After expiry, 2 new orders fit within the fresh window
+        cb.record_order().unwrap();
+        assert!(
+            cb.record_order().is_ok(),
+            "orders after window expiry must not be counted against old timestamps"
+        );
+        assert!(!cb.is_tripped());
     }
 }

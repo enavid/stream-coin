@@ -20,5 +20,6 @@ CREATE TABLE IF NOT EXISTS safety_config (
     circuit_breaker_max_orders  INTEGER NOT NULL,
     circuit_breaker_window_secs INTEGER NOT NULL,
     min_confidence              REAL    NOT NULL DEFAULT 0.7,
-    dry_run                     BOOLEAN NOT NULL DEFAULT true
+    dry_run                     BOOLEAN NOT NULL DEFAULT true,
+    default_order_quantity      NUMERIC NOT NULL DEFAULT 100
 );
