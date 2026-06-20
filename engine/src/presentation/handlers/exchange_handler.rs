@@ -3,6 +3,8 @@ use std::sync::Arc;
 use actix_web::{web, Responder};
 use tokio::sync::mpsc;
 
+use crate::candle::aggregator::CandleAggregator;
+use crate::candle::entity::Interval;
 use crate::kafka::port::MessagePublisher;
 use crate::presentation::dto::ticker::{
     ActiveTicker, SymbolRequest, TickerList, TickerStarted, TickerStopped,
@@ -16,11 +18,15 @@ fn spawn_price_forwarder(
     mut rx: tokio::sync::mpsc::Receiver<Price>,
     broadcaster: tokio::sync::broadcast::Sender<String>,
     publisher: Option<Arc<dyn MessagePublisher>>,
+    mut aggregators: Vec<CandleAggregator>,
 ) {
+    use crate::candle::entity::CandlePayload;
     use crate::kafka::producer::KafkaProducer;
     use crate::presentation::ws_message::{PricePayload, WsMessage};
 
-    let topic = std::env::var("KAFKA_TOPIC_PRICES").unwrap_or_else(|_| "prices".to_string());
+    let price_topic = std::env::var("KAFKA_TOPIC_PRICES").unwrap_or_else(|_| "prices".to_string());
+    let candle_topic =
+        std::env::var("KAFKA_TOPIC_CANDLES").unwrap_or_else(|_| "candles".to_string());
 
     tokio::spawn(async move {
         while let Some(price) = rx.recv().await {
@@ -42,8 +48,27 @@ fn spawn_price_forwarder(
             let _ = broadcaster.send(payload.clone());
             if let Some(ref pub_) = publisher {
                 let key = KafkaProducer::price_to_key(&price);
-                if let Err(e) = pub_.publish(&topic, &key, &payload).await {
+                if let Err(e) = pub_.publish(&price_topic, &key, &payload).await {
                     tracing::error!(error = %e, "failed to publish price to kafka");
+                }
+            }
+
+            for agg in &mut aggregators {
+                if let Some(candle) = agg.push(&price) {
+                    let key = format!("{}:{}", candle.exchange, candle.pair);
+                    match serde_json::to_string(&WsMessage::Candle(CandlePayload::from(&candle))) {
+                        Ok(json) => {
+                            let _ = broadcaster.send(json.clone());
+                            if let Some(ref pub_) = publisher {
+                                if let Err(e) = pub_.publish(&candle_topic, &key, &json).await {
+                                    tracing::error!(error = %e, "failed to publish candle to kafka");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to serialize candle");
+                        }
+                    }
                 }
             }
         }
@@ -104,7 +129,16 @@ pub async fn restore_tickers(state: &web::Data<AppState>) {
             }
         };
 
-        spawn_price_forwarder(rx, state.broadcaster.clone(), state.publisher.clone());
+        let aggregators = Interval::all()
+            .into_iter()
+            .map(|i| CandleAggregator::new(sub.exchange.clone(), sub.symbol.clone(), i))
+            .collect::<Vec<_>>();
+        spawn_price_forwarder(
+            rx,
+            state.broadcaster.clone(),
+            state.publisher.clone(),
+            aggregators,
+        );
 
         state.clients.lock().await.insert(key, abort);
         tracing::info!(exchange = %sub.exchange, pair = %sub.symbol, "ticker restored");
@@ -178,7 +212,16 @@ pub async fn start_kline_symbol_ticker(
         }
     };
 
-    spawn_price_forwarder(rx, state.broadcaster.clone(), state.publisher.clone());
+    let aggregators = Interval::all()
+        .into_iter()
+        .map(|i| CandleAggregator::new(request.exchange.to_string(), request.symbol.to_string(), i))
+        .collect::<Vec<_>>();
+    spawn_price_forwarder(
+        rx,
+        state.broadcaster.clone(),
+        state.publisher.clone(),
+        aggregators,
+    );
 
     clients.insert(key.clone(), abort);
 
@@ -306,6 +349,8 @@ mod tests {
 
     use super::*;
     use crate::exchange::entity::ExchangeId;
+    use chrono::{TimeZone, Utc};
+
     use crate::exchange::port::{ExchangeAdapter, ExchangeAdapterError};
     use crate::exchange::registry::ExchangeRegistry;
     use crate::infrastructure::db::ticker_repository::{
@@ -314,6 +359,37 @@ mod tests {
     use crate::kafka::port::mock::MockPublisher;
     use crate::presentation::shared::app_state::{AdapterFactory, AppState};
     use crate::price::entity::{Price, TradingPair};
+
+    struct TwoPriceAdapter {
+        price1: Price,
+        price2: Price,
+    }
+
+    #[async_trait]
+    impl ExchangeAdapter for TwoPriceAdapter {
+        fn exchange_id(&self) -> ExchangeId {
+            ExchangeId::new("tabdeal")
+        }
+
+        fn symbol_for_pair(&self, pair: &TradingPair) -> String {
+            format!("{}{}", pair.base, pair.quote).to_lowercase()
+        }
+
+        async fn subscribe(
+            &self,
+            _pair: &TradingPair,
+            tx: Sender<Price>,
+        ) -> Result<AbortHandle, ExchangeAdapterError> {
+            let p1 = self.price1.clone();
+            let p2 = self.price2.clone();
+            let handle = tokio::spawn(async move {
+                let _ = tx.send(p1).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let _ = tx.send(p2).await;
+            });
+            Ok(handle.abort_handle())
+        }
+    }
 
     struct CountingAdapter {
         count: Arc<AtomicUsize>,
@@ -691,6 +767,70 @@ mod tests {
             payload.contains("tabdeal"),
             "broadcast payload must contain the exchange name"
         );
+    }
+
+    #[actix_web::test]
+    async fn closed_candle_published_to_kafka() {
+        // Two prices in different 1m windows: 10:00:30 and 10:01:00.
+        // The second tick closes the 10:00 candle → publisher must receive it on "candles".
+        let price1 = Price {
+            exchange: ExchangeId::new("tabdeal"),
+            pair: TradingPair::new("USDT", "IRT"),
+            bid: 58000,
+            ask: 58100,
+            timestamp: Utc.with_ymd_and_hms(2026, 6, 20, 10, 0, 30).unwrap(),
+        };
+        let price2 = Price {
+            exchange: ExchangeId::new("tabdeal"),
+            pair: TradingPair::new("USDT", "IRT"),
+            bid: 59000,
+            ask: 59100,
+            timestamp: Utc.with_ymd_and_hms(2026, 6, 20, 10, 1, 0).unwrap(),
+        };
+
+        let publisher = Arc::new(MockPublisher::new());
+        let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+        adapters.insert(
+            "tabdeal".to_string(),
+            Arc::new(TwoPriceAdapter { price1, price2 }),
+        );
+
+        let state = web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(adapters)),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            publisher: Some(Arc::clone(&publisher) as Arc<dyn crate::kafka::port::MessagePublisher>),
+            broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
+            ticker_repository: None,
+        });
+
+        let dummy_req = test::TestRequest::default().to_http_request();
+        start_kline_symbol_ticker(
+            state,
+            ValidatedJson(SymbolRequest {
+                exchange: ExchangeId::new("tabdeal"),
+                symbol: TradingPair::new("USDT", "IRT"),
+            }),
+        )
+        .await
+        .respond_to(&dummy_req);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let messages = publisher.published();
+                if messages.iter().any(|(topic, _, payload)| {
+                    topic == "candles" && payload.contains("\"type\":\"candle\"")
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a closed candle must be published to the candles Kafka topic within 5s");
     }
 
     // --- concurrent-start race tests ---

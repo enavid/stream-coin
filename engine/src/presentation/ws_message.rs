@@ -1,12 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::candle::entity::CandlePayload;
 use crate::price::entity::Price;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsMessage {
     PriceUpdate(PricePayload),
+    Candle(CandlePayload),
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -111,6 +113,36 @@ mod tests {
         let json = r#"{"exchange":"tabdeal","pair":"USDT/IRT","bid":175500,"ask":175520,"timestamp":"2026-06-19T00:00:00Z"}"#;
         let result: Result<WsMessage, _> = serde_json::from_str(json);
         assert!(result.is_err(), "missing type field must be rejected");
+    }
+
+    #[test]
+    fn candle_payload_serializes_with_type_candle() {
+        use crate::candle::entity::CandlePayload;
+
+        let payload = CandlePayload {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            interval: "1m".to_string(),
+            time: Utc::now(),
+            open: 58000,
+            high: 58500,
+            low: 57800,
+            close: 58200,
+            volume: 0,
+        };
+        let msg = WsMessage::Candle(payload);
+        let json: Value = serde_json::to_value(&msg).unwrap();
+
+        assert_eq!(
+            json["type"], "candle",
+            "candle variant must serialize with type=candle"
+        );
+        assert!(json["exchange"].is_string(), "exchange must be at root");
+        assert!(
+            json["data"].is_null(),
+            "fields must not be wrapped under a data key"
+        );
+        assert_eq!(json["interval"], "1m");
     }
 
     #[test]
