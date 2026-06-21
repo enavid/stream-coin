@@ -34,6 +34,7 @@ use stream_coin::order::port::OrderAdapter;
 use stream_coin::order::tabdeal::TabdealOrderAdapter;
 use stream_coin::presentation::handlers::exchange_handler::restore_tickers;
 use stream_coin::presentation::handlers::strategy_handler::restore_python_strategies;
+use stream_coin::presentation::middlewares::cors::configure_cors;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
@@ -363,6 +364,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .configure(init_routes)
+            .wrap(configure_cors())
             .wrap(TracingLogger::default())
             .app_data(app_state.clone())
             .app_data(json_error_handler_config())
