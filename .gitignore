@@ -460,11 +460,9 @@ MigrationBackup/
 .env
 docker-volumes/
 
-# Auto-generated Kafka internal SSL certs (JKS)
+# All certificates — auto-generated Kafka internal SSL (JKS) and real TLS
+# (Let's Encrypt / custom) for nginx. Never commit private keys.
 certs/
-
-# Real TLS certificates (Let's Encrypt / custom) — never commit private keys
-cert/
 
 # Nginx basic auth password file
 nginx/auth/.htpasswd
