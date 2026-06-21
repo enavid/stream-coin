@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use crate::api::ApiClient;
 use crate::components::{Header, LiveFeed, TickerGrid};
+use crate::pages::current_token;
 use crate::state::AppState;
 
 /// The dashboard's visual composition: header, ticker cards, live feed.
@@ -28,9 +29,12 @@ pub fn Dashboard(server_url: String) -> Element {
 
     let on_stop = move |key: String| {
         let api = api();
+        let Some(token) = current_token(&state) else {
+            return;
+        };
         spawn(async move {
             if let Some((exchange, pair)) = key.split_once(':') {
-                let _ = api.stop_ticker(exchange, pair).await;
+                let _ = api.stop_ticker(&token, exchange, pair).await;
             }
             state.remove_ticker(&key);
         });
@@ -38,10 +42,13 @@ pub fn Dashboard(server_url: String) -> Element {
 
     let on_start = move |(exchange, symbol): (String, String)| {
         let api = api();
+        let Some(token) = current_token(&state) else {
+            return;
+        };
         spawn(async move {
             // The resulting price update arrives over the WebSocket feed
             // and the card is created reactively — no local insert needed.
-            let _ = api.start_ticker(&exchange, &symbol).await;
+            let _ = api.start_ticker(&token, &exchange, &symbol).await;
         });
     };
 

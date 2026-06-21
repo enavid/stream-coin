@@ -31,20 +31,6 @@ impl ApiClient {
         format!("{}/v1{path}", self.base_url)
     }
 
-    pub fn start_url(&self) -> String {
-        format!(
-            "{}/v1/exchanges/futures/start_kline_symbol_ticker",
-            self.base_url
-        )
-    }
-
-    pub fn stop_url(&self) -> String {
-        format!(
-            "{}/v1/exchanges/futures/stop_kline_symbol_ticker",
-            self.base_url
-        )
-    }
-
     pub fn ws_url(&self) -> String {
         let base = self
             .base_url
@@ -61,33 +47,32 @@ impl ApiClient {
         format!("{}?token={token}", self.ws_url())
     }
 
-    pub async fn start_ticker(&self, exchange: &str, symbol: &str) -> Result<(), String> {
-        self.post(&self.start_url(), exchange, symbol).await
+    pub async fn start_ticker(
+        &self,
+        token: &str,
+        exchange: &str,
+        symbol: &str,
+    ) -> Result<(), String> {
+        self.post_json(
+            "/exchanges/futures/start_kline_symbol_ticker",
+            Some(token),
+            &serde_json::json!({ "exchange": exchange, "symbol": symbol }),
+        )
+        .await
     }
 
     /// `pair` is the display form (e.g. `USDT/IRT`); the backend's stop
     /// endpoint expects the raw symbol it was started with (`USDTIRT`),
     /// which for every current adapter is just the pair without the
     /// separating slash.
-    pub async fn stop_ticker(&self, exchange: &str, pair: &str) -> Result<(), String> {
+    pub async fn stop_ticker(&self, token: &str, exchange: &str, pair: &str) -> Result<(), String> {
         let symbol = pair.replace('/', "");
-        self.post(&self.stop_url(), exchange, &symbol).await
-    }
-
-    async fn post(&self, url: &str, exchange: &str, symbol: &str) -> Result<(), String> {
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(url)
-            .json(&serde_json::json!({ "exchange": exchange, "symbol": symbol }))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(format!("request failed with status {}", resp.status()))
-        }
+        self.post_json(
+            "/exchanges/futures/stop_kline_symbol_ticker",
+            Some(token),
+            &serde_json::json!({ "exchange": exchange, "symbol": symbol }),
+        )
+        .await
     }
 
     // --- generic authenticated request helpers ---
@@ -352,19 +337,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn start_url_is_built_from_base_url() {
+    fn v1_url_builds_start_ticker_path() {
         let client = ApiClient::new("http://localhost:8080");
         assert_eq!(
-            client.start_url(),
+            client.v1("/exchanges/futures/start_kline_symbol_ticker"),
             "http://localhost:8080/v1/exchanges/futures/start_kline_symbol_ticker"
         );
     }
 
     #[test]
-    fn stop_url_is_built_from_base_url() {
+    fn v1_url_builds_stop_ticker_path() {
         let client = ApiClient::new("http://localhost:8080");
         assert_eq!(
-            client.stop_url(),
+            client.v1("/exchanges/futures/stop_kline_symbol_ticker"),
             "http://localhost:8080/v1/exchanges/futures/stop_kline_symbol_ticker"
         );
     }
@@ -373,7 +358,7 @@ mod tests {
     fn trailing_slash_on_base_url_is_stripped() {
         let client = ApiClient::new("http://localhost:8080/");
         assert_eq!(
-            client.start_url(),
+            client.v1("/exchanges/futures/start_kline_symbol_ticker"),
             "http://localhost:8080/v1/exchanges/futures/start_kline_symbol_ticker"
         );
     }
@@ -424,6 +409,26 @@ mod tests {
             client.v1("/exchanges/hitobit/credentials"),
             "http://localhost:8080/v1/exchanges/hitobit/credentials"
         );
+    }
+
+    #[test]
+    fn start_ticker_request_attaches_bearer_token() {
+        let client = ApiClient::new("http://localhost:8080");
+        let req = reqwest::Client::new()
+            .post(client.v1("/exchanges/futures/start_kline_symbol_ticker"))
+            .bearer_auth("test-token")
+            .json(&serde_json::json!({ "exchange": "tabdeal", "symbol": "USDTIRT" }))
+            .build()
+            .unwrap();
+
+        let header = req
+            .headers()
+            .get("authorization")
+            .expect("start ticker request must carry an authorization header")
+            .to_str()
+            .unwrap();
+
+        assert_eq!(header, "Bearer test-token");
     }
 
     #[test]
