@@ -266,6 +266,7 @@ async fn main() -> std::io::Result<()> {
         order_adapters,
         order_manager: Some(order_manager),
         python_strategy_repository: None,
+        candle_repository: None,
     });
 
     restore_tickers(&app_state).await;

@@ -7,6 +7,7 @@ use tokio::task::AbortHandle;
 
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
+use crate::infrastructure::db::candle_repository::CandleRepository;
 use crate::infrastructure::db::python_strategy_repository::PythonStrategyRepository;
 use crate::infrastructure::db::signal_repository::SignalRepository;
 use crate::infrastructure::db::strategy_repository::StrategyRepository;
@@ -74,6 +75,9 @@ pub struct AppState {
     pub order_manager: Option<Arc<OrderManager>>,
     /// Persistent store for deployed Python strategy code. `None` = no DB.
     pub python_strategy_repository: Option<Arc<dyn PythonStrategyRepository>>,
+    /// Historical candle store used by the backtest engine. `None` = backtesting
+    /// unavailable (no DB configured).
+    pub candle_repository: Option<Arc<dyn CandleRepository>>,
 }
 
 impl AppState {

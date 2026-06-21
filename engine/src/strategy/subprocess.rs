@@ -91,7 +91,7 @@ del _sc_setup
 #[cfg(not(target_os = "linux"))]
 const SECCOMP_PREAMBLE: &str = "";
 
-fn build_launcher_script(strategy_id: &str, user_code: &str) -> String {
+pub(crate) fn build_launcher_script(strategy_id: &str, user_code: &str) -> String {
     // strategy_id is a UUID — safe to embed in a Python single-quoted string literal
     format!(
         "import os as _os\n_STRATEGY_ID = _os.environ.get('STRATEGY_ID', '{strategy_id}')\n{preamble}\n{user_code}\n",

@@ -81,6 +81,7 @@ mod tests {
             order_adapters: Arc::new(HashMap::new()),
             order_manager: None,
             python_strategy_repository: None,
+            candle_repository: None,
         })
     }
 
