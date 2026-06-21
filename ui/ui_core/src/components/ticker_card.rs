@@ -40,7 +40,7 @@ pub fn TickerCard(
             div { class: "tcard-divider" }
             div { class: "spread-line",
                 span { class: "lbl", "Spread" }
-                span { class: "spread-badge", "{format_spread(ticker.spread())}" }
+                span { class: "spread-badge", "{format_spread(ticker.spread())} {ticker.quote_currency()}" }
             }
         }
     }

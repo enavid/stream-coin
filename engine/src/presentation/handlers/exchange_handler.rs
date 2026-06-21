@@ -188,13 +188,29 @@ pub async fn start_kline_symbol_ticker(
     // both passing the duplicate check before either has inserted its handle.
     let mut clients = state.clients.lock().await;
 
-    if clients.contains_key(&key) {
-        tracing::warn!(
-            exchange = %request.exchange,
-            pair = %request.symbol,
-            "ticker already running"
-        );
-        return ApiError::new("Ticker already running", vec![]).to_response();
+    // `contains_key` alone isn't enough: if the underlying task already
+    // finished (panicked, or the exchange adapter gave up after losing its
+    // upstream connection — there is no supervisor that restarts it or
+    // cleans up its entry, see ROADMAP's error-handling section) its
+    // `AbortHandle` lingers in `clients` forever. Without this check every
+    // future start attempt was permanently rejected as "already running"
+    // even though nothing was actually streaming any more.
+    if let Some(existing) = clients.get(&key) {
+        if existing.is_finished() {
+            tracing::warn!(
+                exchange = %request.exchange,
+                pair = %request.symbol,
+                "replacing dead ticker handle"
+            );
+            clients.remove(&key);
+        } else {
+            tracing::warn!(
+                exchange = %request.exchange,
+                pair = %request.symbol,
+                "ticker already running"
+            );
+            return ApiError::new("Ticker already running", vec![]).to_response();
+        }
     }
 
     let (tx, rx) = mpsc::channel(100);
@@ -1057,6 +1073,128 @@ mod tests {
             count.load(Ordering::SeqCst),
             1,
             "subscribe must be called exactly once for the new start"
+        );
+    }
+
+    /// A `tokio::spawn`ed task whose future has already resolved, so its
+    /// `AbortHandle::is_finished()` reports `true` — simulates a ticker
+    /// task that died (e.g. the upstream exchange WS dropped) without
+    /// anyone calling `stop` to clean up its entry in `clients`.
+    async fn finished_abort_handle() -> AbortHandle {
+        let join = tokio::spawn(async {});
+        let abort = join.abort_handle();
+        join.await.expect("the no-op task must not panic");
+        abort
+    }
+
+    #[actix_web::test]
+    async fn start_replaces_a_dead_handle_instead_of_rejecting_as_already_running() {
+        // Root cause of a real production bug: a ticker task died (its
+        // future resolved) but `clients` still held its `AbortHandle`.
+        // `start_kline_symbol_ticker` only ever checked `contains_key`,
+        // so every subsequent start attempt was rejected with "Ticker
+        // already running" forever — even though nothing was actually
+        // running, and the WS feed delivered no further price updates.
+        let stale = finished_abort_handle().await;
+        assert!(
+            stale.is_finished(),
+            "the simulated dead task must have already resolved"
+        );
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let clients: Arc<Mutex<HashMap<String, AbortHandle>>> = Arc::new(Mutex::new({
+            let mut m = HashMap::new();
+            m.insert("tabdeal:USDT/IRT".to_string(), stale);
+            m
+        }));
+        let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+        adapters.insert(
+            "tabdeal".to_string(),
+            Arc::new(CountingAdapter {
+                count: Arc::clone(&count),
+            }),
+        );
+        let state = web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(adapters)),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+            clients: Arc::clone(&clients),
+            publisher: None,
+            broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
+            ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
+            signal_repository: None,
+            order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            order_manager: None,
+            python_strategy_repository: None,
+            candle_repository: None,
+            exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
+        });
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/ticker", web::post().to(start_kline_symbol_ticker)),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri("/ticker")
+            .set_json(SymbolRequest {
+                exchange: ExchangeId::new("tabdeal"),
+                symbol: TradingPair::new("USDT", "IRT"),
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a dead handle must not block restarting the ticker"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "subscribe must be called for the fresh start"
+        );
+        assert!(
+            !clients
+                .lock()
+                .await
+                .get("tabdeal:USDT/IRT")
+                .unwrap()
+                .is_finished(),
+            "the stale handle must be replaced with a live one"
+        );
+    }
+
+    #[actix_web::test]
+    async fn start_still_rejects_when_the_existing_handle_is_actually_alive() {
+        let state = state_with_ticker("tabdeal:USDT/IRT");
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/ticker", web::post().to(start_kline_symbol_ticker)),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri("/ticker")
+            .set_json(SymbolRequest {
+                exchange: ExchangeId::new("tabdeal"),
+                symbol: TradingPair::new("USDT", "IRT"),
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a genuinely running ticker must still be rejected as a duplicate"
         );
     }
 

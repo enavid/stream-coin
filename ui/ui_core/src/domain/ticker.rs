@@ -51,6 +51,16 @@ impl Ticker {
     pub fn spread(&self) -> f64 {
         self.ask - self.bid
     }
+
+    /// The currency a price/spread is denominated in — the part of
+    /// `BASE/QUOTE` after the slash (e.g. `"IRT"` for `"USDT/IRT"`). Used
+    /// to label numbers in the UI so a bare `67` doesn't leave the user
+    /// guessing whether it's rial, toman, or a different pair's quote
+    /// currency entirely. Falls back to the raw pair when it's missing
+    /// the separator rather than panicking.
+    pub fn quote_currency(&self) -> &str {
+        self.pair.split_once('/').map_or(&self.pair, |(_, q)| q)
+    }
 }
 
 #[cfg(test)]
@@ -96,5 +106,17 @@ mod tests {
         let a = Ticker::new("tabdeal", "USDT/IRT", 1.0, 2.0);
         let b = Ticker::new("nobitex", "USDT/IRT", 1.0, 2.0);
         assert_ne!(a.key(), b.key());
+    }
+
+    #[test]
+    fn quote_currency_returns_the_part_after_the_slash() {
+        let t = Ticker::new("tabdeal", "USDT/IRT", 1.0, 2.0);
+        assert_eq!(t.quote_currency(), "IRT");
+    }
+
+    #[test]
+    fn quote_currency_falls_back_to_the_raw_pair_without_a_slash() {
+        let t = Ticker::new("tabdeal", "USDTIRT", 1.0, 2.0);
+        assert_eq!(t.quote_currency(), "USDTIRT");
     }
 }

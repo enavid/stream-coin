@@ -9,8 +9,10 @@ use wasm_bindgen::prelude::*;
 use ui_core::auth::Session;
 use ui_core::router::Route;
 use ui_core::state::AppState;
+use ui_core::theme::Theme;
 
 const SESSION_STORAGE_KEY: &str = "stream_coin_session_token";
+const THEME_STORAGE_KEY: &str = "stream_coin_theme";
 
 fn local_storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
@@ -45,6 +47,27 @@ pub fn persist_session(token: Option<&str>) {
             let _ = storage.remove_item(SESSION_STORAGE_KEY);
         }
     }
+}
+
+/// Restores a previously chosen theme on boot — without this, every page
+/// load would silently reset to the default dark theme regardless of
+/// what the user picked last time.
+pub fn restore_theme(state: &mut AppState) {
+    let Some(storage) = local_storage() else {
+        return;
+    };
+    let Ok(Some(saved)) = storage.get_item(THEME_STORAGE_KEY) else {
+        return;
+    };
+    state.set_theme(Theme::parse(&saved));
+}
+
+/// Call after every theme change to keep `localStorage` in sync.
+pub fn persist_theme(theme: Theme) {
+    let Some(storage) = local_storage() else {
+        return;
+    };
+    let _ = storage.set_item(THEME_STORAGE_KEY, theme.as_str());
 }
 
 fn current_path() -> String {

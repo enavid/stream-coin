@@ -29,6 +29,12 @@ impl FeedRow {
             ask: ticker.ask,
         }
     }
+
+    /// See [`Ticker::quote_currency`] — same `BASE/QUOTE` convention, just
+    /// read off the feed row's own `pair` instead of a live `Ticker`.
+    pub fn quote_currency(&self) -> &str {
+        self.pair.split_once('/').map_or(&self.pair, |(_, q)| q)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -82,6 +88,16 @@ impl TickerStore {
 
     pub fn flash_for(&self, key: &str) -> Option<Direction> {
         self.flash.get(key).copied()
+    }
+
+    /// Ends a ticker card's up/down highlight. The flash is meant to mark
+    /// *this* tick, not become a permanent border color — without an
+    /// explicit clear it never resets, since `apply()` only ever inserts
+    /// or overwrites a flash, never removes one. The platform layer calls
+    /// this after a short delay (see `ui/web/src/ws.rs`); kept here as a
+    /// pure, timer-free mutation so it's unit testable.
+    pub fn clear_flash(&mut self, key: &str) {
+        self.flash.remove(key);
     }
 }
 
@@ -236,6 +252,13 @@ mod tests {
     }
 
     #[test]
+    fn feed_row_quote_currency_returns_the_part_after_the_slash() {
+        let mut store = TickerStore::new();
+        store.apply(&msg("tabdeal", "USDT/IRT", 92815, 92936));
+        assert_eq!(store.feed()[0].quote_currency(), "IRT");
+    }
+
+    #[test]
     fn apply_inserts_a_new_ticker() {
         let mut store = TickerStore::new();
         store.apply(&msg("tabdeal", "USDT/IRT", 92815, 92936));
@@ -323,6 +346,25 @@ mod tests {
         store.apply(&msg("tabdeal", "USDT/IRT", 92000, 92100));
 
         assert_eq!(store.flash_for("tabdeal:USDT/IRT"), Some(Direction::Down));
+    }
+
+    #[test]
+    fn clear_flash_removes_the_flash_for_a_key() {
+        let mut store = TickerStore::new();
+        store.apply(&msg("tabdeal", "USDT/IRT", 92815, 92936));
+        store.apply(&msg("tabdeal", "USDT/IRT", 93000, 93100));
+        assert_eq!(store.flash_for("tabdeal:USDT/IRT"), Some(Direction::Up));
+
+        store.clear_flash("tabdeal:USDT/IRT");
+
+        assert_eq!(store.flash_for("tabdeal:USDT/IRT"), None);
+    }
+
+    #[test]
+    fn clear_flash_on_unknown_key_is_a_no_op() {
+        let mut store = TickerStore::new();
+        store.clear_flash("does:not-exist");
+        assert_eq!(store.flash_for("does:not-exist"), None);
     }
 
     #[test]

@@ -53,6 +53,23 @@ impl Session {
     pub fn has(&self, permission: &str) -> bool {
         self.permissions.contains(permission)
     }
+
+    /// A human-facing stand-in for a role name. The JWT carries a flat
+    /// permission set, not a role (`engine/migrations/0008_*.sql` seeds
+    /// `admin`/`trader`/`viewer` roles, but they're resolved into
+    /// permissions server-side and never sent over the wire) — showing
+    /// the raw permission count in the header chip ("5 permissions") is
+    /// meaningless to an end user, so derive the closest equivalent label
+    /// from the permissions that are actually visible here.
+    pub fn role_label(&self) -> &'static str {
+        if self.has("users.manage") || self.has("roles.manage") {
+            "Administrator"
+        } else if self.has("orders.manage") || self.has("exchange_credentials.write") {
+            "Trader"
+        } else {
+            "Viewer"
+        }
+    }
 }
 
 #[cfg(test)]
@@ -106,5 +123,26 @@ mod tests {
         let token = make_token("1", &["users.manage"]);
         let session = Session::from_token(token).unwrap();
         assert!(!session.has("roles.manage"));
+    }
+
+    #[test]
+    fn role_label_is_administrator_when_users_manage_is_present() {
+        let token = make_token("1", &["users.manage"]);
+        assert_eq!(
+            Session::from_token(token).unwrap().role_label(),
+            "Administrator"
+        );
+    }
+
+    #[test]
+    fn role_label_is_trader_when_orders_manage_is_present_without_admin_perms() {
+        let token = make_token("1", &["orders.manage"]);
+        assert_eq!(Session::from_token(token).unwrap().role_label(), "Trader");
+    }
+
+    #[test]
+    fn role_label_is_viewer_when_no_recognized_permission_is_present() {
+        let token = make_token("1", &[]);
+        assert_eq!(Session::from_token(token).unwrap().role_label(), "Viewer");
     }
 }

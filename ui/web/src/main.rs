@@ -28,11 +28,16 @@ fn App() -> Element {
     // page's lifetime.
     browser::restore_session(&mut state);
     browser::restore_route(&mut state);
+    browser::restore_theme(&mut state);
     browser::listen_popstate(state);
 
     use_effect(move || {
         let token = (state.session)().map(|s| s.token);
         browser::persist_session(token.as_deref());
+    });
+
+    use_effect(move || {
+        browser::persist_theme((state.theme)());
     });
 
     use_effect(move || {

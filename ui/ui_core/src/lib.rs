@@ -18,6 +18,7 @@ pub mod pages;
 pub mod protocol;
 pub mod router;
 pub mod state;
+pub mod theme;
 
 pub use app_shell::AppShell;
 pub use dashboard::Dashboard;

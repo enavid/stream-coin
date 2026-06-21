@@ -9,6 +9,12 @@ use ui_core::state::AppState;
 
 const RECONNECT_DELAY_MS: u32 = 2_000;
 
+/// How long a ticker card's up/down flash stays lit after a tick. Long
+/// enough to register as "this just moved," short enough that it's
+/// visibly transient rather than reading as a permanent state — see
+/// `TickerStore::clear_flash`.
+const FLASH_DURATION_MS: u32 = 900;
+
 /// Connects to the backend's `/v1/ws` feed and applies every price/signal/
 /// order message to `state`, reconnecting with a fixed delay on disconnect.
 /// `/v1/ws` requires a JWT like every other route, but a browser's native
@@ -37,7 +43,15 @@ pub async fn connect_and_listen(api: ApiClient, mut state: AppState) {
             while let Some(msg) = socket.next().await {
                 match msg {
                     Ok(Message::Text(text)) => match WsEvent::parse(&text) {
-                        Ok(WsEvent::PriceUpdate(price)) => state.apply_price(&price),
+                        Ok(WsEvent::PriceUpdate(price)) => {
+                            state.apply_price(&price);
+                            let key = price.ticker_key();
+                            let mut state = state;
+                            spawn(async move {
+                                gloo_timers::future::TimeoutFuture::new(FLASH_DURATION_MS).await;
+                                state.clear_flash(&key);
+                            });
+                        }
                         Ok(WsEvent::Signal(signal)) => state.apply_signal(&signal),
                         Ok(WsEvent::OrderUpdate(order)) => state.apply_order_update(&order),
                         Ok(WsEvent::Candle(_)) | Err(_) => {}

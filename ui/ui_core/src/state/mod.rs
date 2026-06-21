@@ -12,6 +12,7 @@ use crate::api::{ExchangeResponse, PairResponse};
 use crate::auth::Session;
 use crate::protocol::{OrderUpdateMessage, PriceMessage, SignalMessage};
 use crate::router::Route;
+use crate::theme::Theme;
 
 /// Reactive app state, provided via Dioxus context so any component in
 /// the tree can read tickers/feed/signals/orders, the current route, or
@@ -28,6 +29,7 @@ pub struct AppState {
     pub signals: Signal<SignalStore>,
     pub orders: Signal<OrderStore>,
     pub catalog: Signal<ExchangeCatalog>,
+    pub theme: Signal<Theme>,
 }
 
 impl Default for AppState {
@@ -46,6 +48,7 @@ impl AppState {
             signals: Signal::new(SignalStore::new()),
             orders: Signal::new(OrderStore::new()),
             catalog: Signal::new(ExchangeCatalog::new()),
+            theme: Signal::new(Theme::default()),
         }
     }
 
@@ -55,6 +58,13 @@ impl AppState {
 
     pub fn remove_ticker(&mut self, key: &str) {
         self.store.write().remove(key);
+    }
+
+    /// See [`TickerStore::clear_flash`] — called by the platform's WS
+    /// transport a short delay after each price tick so the up/down
+    /// highlight fades instead of sticking permanently.
+    pub fn clear_flash(&mut self, key: &str) {
+        self.store.write().clear_flash(key);
     }
 
     pub fn set_connected(&mut self, connected: bool) {
@@ -79,6 +89,15 @@ impl AppState {
 
     pub fn navigate(&mut self, route: Route) {
         self.route.set(route);
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme.set(theme);
+    }
+
+    pub fn toggle_theme(&mut self) {
+        let next = (self.theme)().toggled();
+        self.theme.set(next);
     }
 
     pub fn set_session(&mut self, session: Session) {

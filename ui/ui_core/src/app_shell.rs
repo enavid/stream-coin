@@ -2,12 +2,13 @@ use dioxus::prelude::*;
 
 use crate::api::ApiClient;
 use crate::icons::{
-    IconAdmin, IconBacktest, IconDashboard, IconLogout, IconMenu, IconOrders, IconSettings,
-    IconStrategy,
+    IconAdmin, IconBacktest, IconDashboard, IconLogout, IconMenu, IconMoon, IconOrders,
+    IconSettings, IconStrategy, IconSun,
 };
 use crate::pages::{Admin, Backtest, Login, Orders, Settings, Strategies};
 use crate::router::Route;
 use crate::state::AppState;
+use crate::theme::Theme;
 use crate::Dashboard;
 
 struct NavItem {
@@ -18,7 +19,8 @@ struct NavItem {
     requires: Option<&'static str>,
 }
 
-const NAV_ITEMS: &[NavItem] = &[
+/// The day-to-day destinations a trader actually works from.
+const PRIMARY_NAV_ITEMS: &[NavItem] = &[
     NavItem {
         route: Route::Dashboard,
         label: "Dashboard",
@@ -43,6 +45,12 @@ const NAV_ITEMS: &[NavItem] = &[
         icon: || rsx! { IconOrders {} },
         requires: None,
     },
+];
+
+/// Account/admin utilities — not a daily destination, so every common
+/// sidebar pattern (Slack, Notion, Linear, Discord) pins these to the
+/// bottom, separated from the primary nav, instead of mixing them in.
+const SECONDARY_NAV_ITEMS: &[NavItem] = &[
     NavItem {
         route: Route::Admin,
         label: "Users & Roles",
@@ -99,11 +107,31 @@ pub fn AppShell(server_url: String) -> Element {
 
     let connected = (state.connected)();
     let current_route = (state.route)();
+    let theme = (state.theme)();
 
     let on_logout = move |_| state.clear_session();
+    let on_toggle_theme = move |_| state.toggle_theme();
+
+    let render_nav_item = move |item: &'static NavItem| {
+        rsx! {
+            a {
+                key: "{item.label}",
+                class: if current_route == item.route { "nav-link active" } else { "nav-link" },
+                onclick: {
+                    let route = item.route;
+                    move |_| {
+                        state.navigate(route);
+                        mobile_nav_open.set(false);
+                    }
+                },
+                span { class: "ic", { (item.icon)() } }
+                "{item.label}"
+            }
+        }
+    };
 
     rsx! {
-        div { id: "app", class: "active",
+        div { id: "app", class: "active", "data-theme": theme.as_str(),
             header { class: "topbar",
                 div { class: "logo",
                     button {
@@ -119,11 +147,17 @@ pub fn AppShell(server_url: String) -> Element {
                         div { class: if connected { "ws-dot" } else { "ws-dot disconnected" } }
                         span { if connected { "Connected" } else { "Disconnected" } }
                     }
+                    button {
+                        class: "theme-toggle",
+                        title: if theme == Theme::Dark { "Switch to light theme" } else { "Switch to dark theme" },
+                        onclick: on_toggle_theme,
+                        if theme == Theme::Dark { IconSun {} } else { IconMoon {} }
+                    }
                     div { class: "user-chip",
                         div { class: "avatar", "{session.user_id.chars().next().unwrap_or('U')}" }
                         div { class: "user-meta",
                             span { class: "user-name", "User {session.user_id}" }
-                            span { class: "user-role", "{session.permissions.len()} permissions" }
+                            span { class: "user-role", "{session.role_label()}" }
                         }
                     }
                     button { class: "logout-btn", onclick: on_logout, IconLogout {} }
@@ -131,21 +165,26 @@ pub fn AppShell(server_url: String) -> Element {
             }
 
             nav { class: if mobile_nav_open() { "sidebar open" } else { "sidebar" },
-                for item in NAV_ITEMS.iter() {
+                for item in PRIMARY_NAV_ITEMS.iter() {
                     if item.requires.is_none_or(|p| session.has(p)) {
-                        a {
-                            key: "{item.label}",
-                            class: if current_route == item.route { "nav-link active" } else { "nav-link" },
-                            onclick: {
-                                let route = item.route;
-                                move |_| {
-                                    state.navigate(route);
-                                    mobile_nav_open.set(false);
-                                }
-                            },
-                            span { class: "ic", { (item.icon)() } }
-                            "{item.label}"
+                        {render_nav_item(item)}
+                    }
+                }
+                div { class: "sidebar-bottom",
+                    if SECONDARY_NAV_ITEMS.iter().any(|item| item.requires.is_none_or(|p| session.has(p))) {
+                        div { class: "nav-sep" }
+                        for item in SECONDARY_NAV_ITEMS.iter() {
+                            if item.requires.is_none_or(|p| session.has(p)) {
+                                {render_nav_item(item)}
+                            }
                         }
+                    }
+                    div { class: "sidebar-footer",
+                        div { class: "sidebar-status",
+                            div { class: if connected { "ws-dot" } else { "ws-dot disconnected" } }
+                            span { if connected { "Engine online" } else { "Engine offline" } }
+                        }
+                        span { class: "sidebar-version", "stream-coin · v0.1" }
                     }
                 }
             }

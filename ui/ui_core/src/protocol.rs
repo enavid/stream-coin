@@ -31,6 +31,14 @@ impl PriceMessage {
             WireMessage::PriceUpdate(msg) => Ok(msg),
         }
     }
+
+    /// The same `"{exchange}:{pair}"` identity as `Ticker::key()`, computed
+    /// straight from the wire message — lets the platform's WS transport
+    /// (e.g. `ui/web/src/ws.rs`, to schedule a flash-clear timer) address a
+    /// ticker without first building a `Ticker` just to throw it away.
+    pub fn ticker_key(&self) -> String {
+        Ticker::from(self).key()
+    }
 }
 
 impl From<&PriceMessage> for Ticker {
@@ -106,6 +114,12 @@ mod tests {
         assert_eq!(msg.bid, 92815);
         assert_eq!(msg.ask, 92936);
         assert_eq!(msg.timestamp, "2026-06-18T10:26:33.123Z");
+    }
+
+    #[test]
+    fn ticker_key_combines_exchange_and_pair_like_ticker_key() {
+        let msg = PriceMessage::parse(sample_json()).unwrap();
+        assert_eq!(msg.ticker_key(), "tabdeal:USDT/IRT");
     }
 
     #[test]
