@@ -53,6 +53,14 @@ impl ApiClient {
         format!("{base}/v1/ws")
     }
 
+    /// A browser's native WebSocket API can't set an `Authorization`
+    /// header on the upgrade request, so the JWT travels in the URL
+    /// instead — the one exemption the backend's JWT middleware makes
+    /// for `/v1/ws` specifically (`engine/src/presentation/middlewares/jwt.rs`).
+    pub fn ws_url_with_token(&self, token: &str) -> String {
+        format!("{}?token={token}", self.ws_url())
+    }
+
     pub async fn start_ticker(&self, exchange: &str, symbol: &str) -> Result<(), String> {
         self.post(&self.start_url(), exchange, symbol).await
     }
@@ -380,6 +388,15 @@ mod tests {
     fn ws_url_upgrades_https_to_wss() {
         let client = ApiClient::new("https://stream-coin.example.com");
         assert_eq!(client.ws_url(), "wss://stream-coin.example.com/v1/ws");
+    }
+
+    #[test]
+    fn ws_url_with_token_appends_token_query_param() {
+        let client = ApiClient::new("http://localhost:8080");
+        assert_eq!(
+            client.ws_url_with_token("abc.def.ghi"),
+            "ws://localhost:8080/v1/ws?token=abc.def.ghi"
+        );
     }
 
     #[test]

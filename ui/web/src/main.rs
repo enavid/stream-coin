@@ -40,8 +40,7 @@ fn App() -> Element {
     });
 
     use_future(move || async move {
-        let ws_url = ApiClient::new(SERVER_URL).ws_url();
-        ws::connect_and_listen(ws_url, state).await;
+        ws::connect_and_listen(ApiClient::new(SERVER_URL), state).await;
     });
 
     rsx! {

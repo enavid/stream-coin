@@ -72,6 +72,21 @@ pub fn extract_bearer_token(headers: &actix_web::http::header::HeaderMap) -> Opt
     auth.strip_prefix("Bearer ").map(|t| t.to_string())
 }
 
+/// Extracts `token` from a raw query string (`a=1&token=xyz&b=2`). JWTs are
+/// base64url (`A-Za-z0-9-_.` only), so no percent-decoding is needed —
+/// every character a token can contain is already URL-safe.
+///
+/// Only used for `/v1/ws`: a browser's native WebSocket API cannot set an
+/// `Authorization` header on the upgrade request, so the token has to
+/// travel in the URL for that one endpoint. Every other route still
+/// requires the header.
+fn extract_query_token(query: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == "token" && !value.is_empty()).then(|| value.to_string())
+    })
+}
+
 /// Validates an HS256 JWT against the given secret.
 pub fn validate_jwt(token: &str, secret: &str) -> Result<Claims, String> {
     let key = DecodingKey::from_secret(secret.as_bytes());
@@ -145,7 +160,11 @@ pub async fn jwt_middleware<B: actix_web::body::MessageBody + 'static>(
         Some(s) => s,
     };
 
-    let token = extract_bearer_token(req.headers());
+    let token = extract_bearer_token(req.headers()).or_else(|| {
+        (req.path() == "/v1/ws")
+            .then(|| extract_query_token(req.query_string()))
+            .flatten()
+    });
     let token = match token {
         Some(t) => t,
         None => {
@@ -235,6 +254,37 @@ mod tests {
             extract_bearer_token(&headers).is_none(),
             "non-Bearer auth scheme must return None"
         );
+    }
+
+    #[test]
+    fn extract_query_token_finds_token_param() {
+        assert_eq!(
+            extract_query_token("token=abc.def.ghi"),
+            Some("abc.def.ghi".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_query_token_finds_token_among_other_params() {
+        assert_eq!(
+            extract_query_token("foo=1&token=abc.def.ghi&bar=2"),
+            Some("abc.def.ghi".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_query_token_returns_none_when_absent() {
+        assert_eq!(extract_query_token("foo=1&bar=2"), None);
+    }
+
+    #[test]
+    fn extract_query_token_returns_none_for_empty_value() {
+        assert_eq!(extract_query_token("token="), None);
+    }
+
+    #[test]
+    fn extract_query_token_returns_none_for_empty_query_string() {
+        assert_eq!(extract_query_token(""), None);
     }
 
     #[test]
