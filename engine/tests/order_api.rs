@@ -52,6 +52,7 @@ fn build_state_with_order_manager(
         signal_repository: None,
         order_adapters,
         order_manager: Some(manager),
+        python_strategy_repository: None,
     });
 
     (state, repo)

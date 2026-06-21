@@ -9,9 +9,15 @@ use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
 use stream_coin::exchange::registry::ExchangeRegistry;
+use stream_coin::infrastructure::db::order_repository::FakeOrderRepository;
+use stream_coin::infrastructure::db::python_strategy_repository::FakePythonStrategyRepository;
 use stream_coin::infrastructure::db::strategy_repository::{
     FakeStrategyRepository, StrategyRecord,
 };
+use stream_coin::order::entity::SafetyConfig;
+use stream_coin::order::fake::FakeOrderAdapter;
+use stream_coin::order::manager::{spawn_order_manager_listener, OrderManager};
+use stream_coin::order::port::OrderAdapter;
 use stream_coin::presentation::handlers::strategy_handler::restore_strategies;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
@@ -33,6 +39,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         signal_repository: None,
         order_adapters: Arc::new(HashMap::new()),
         order_manager: None,
+        python_strategy_repository: None,
     })
 }
 
@@ -54,6 +61,7 @@ fn build_state_with_strategy_repo(
         signal_repository: None,
         order_adapters: Arc::new(HashMap::new()),
         order_manager: None,
+        python_strategy_repository: None,
     })
 }
 
@@ -309,6 +317,7 @@ async fn start_strategy_without_token_returns_401() {
         signal_repository: None,
         order_adapters: Arc::new(HashMap::new()),
         order_manager: None,
+        python_strategy_repository: None,
     });
 
     let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
@@ -351,5 +360,141 @@ async fn strategy_restored_on_engine_restart() {
     assert!(
         running.contains_key("seeded-spread"),
         "restored strategy must appear in running_strategies"
+    );
+}
+
+fn build_state_with_deploy_support() -> (actix_web::web::Data<AppState>, Arc<FakeOrderRepository>) {
+    let broadcaster = AppState::new_broadcaster();
+    let repo = Arc::new(FakeOrderRepository::new());
+
+    let mut order_adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
+    order_adapters.insert(
+        "tabdeal".to_string(),
+        Arc::new(FakeOrderAdapter::new("tabdeal")),
+    );
+    let order_adapters = Arc::new(order_adapters);
+
+    let manager = Arc::new(OrderManager::with_poll_interval(
+        order_adapters.clone(),
+        repo.clone(),
+        broadcaster.clone(),
+        SafetyConfig {
+            dry_run: true,
+            min_confidence: 0.5,
+            ..SafetyConfig::default()
+        },
+        Duration::from_millis(20),
+    ));
+    let _listener = spawn_order_manager_listener(Arc::clone(&manager), broadcaster.clone());
+
+    let state = actix_web::web::Data::new(AppState {
+        redis: None,
+        exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher: None,
+        broadcaster,
+        jwt_secret: None,
+        ticker_repository: None,
+        running_strategies: Arc::new(Mutex::new(HashMap::new())),
+        strategy_repository: None,
+        signal_repository: None,
+        order_adapters,
+        order_manager: Some(manager),
+        python_strategy_repository: Some(Arc::new(FakePythonStrategyRepository::new())),
+    });
+    (state, repo)
+}
+
+#[actix_web::test]
+async fn deployed_strategy_produces_order() {
+    use actix_http::ws;
+    use futures_util::StreamExt;
+
+    // Python code: read one candle from stdin, emit a buy signal, then exit
+    let code = r#"
+import sys, json, uuid
+from datetime import datetime, timezone
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    candle = json.loads(line)
+    print(json.dumps({
+        "signal_id": str(uuid.uuid4()),
+        "strategy_id": "will-be-overridden",
+        "exchange": candle["exchange"],
+        "pair": candle["pair"],
+        "action": "buy",
+        "confidence": 0.9,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }), flush=True)
+    break
+"#;
+
+    let (state, order_repo) = build_state_with_deploy_support();
+    let broadcaster = state.broadcaster.clone();
+
+    let mut srv =
+        actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    // Connect WS client to receive order updates
+    let mut ws_conn = srv.ws_at("/v1/ws").await.unwrap();
+
+    // Deploy the Python strategy
+    let resp = srv
+        .post("/v1/strategies/deploy")
+        .send_json(&json!({
+            "name": "Test Buy Strategy",
+            "code": code,
+            "params": {}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "deploy must return 200");
+
+    // Wait for subprocess to start
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Inject a candle event via the broadcaster
+    let candle = WsMessage::Candle(stream_coin::candle::entity::CandlePayload {
+        exchange: "tabdeal".to_string(),
+        pair: "USDT/IRT".to_string(),
+        interval: "1m".to_string(),
+        time: chrono::Utc::now(),
+        open: 58_000,
+        high: 58_500,
+        low: 57_800,
+        close: 58_200,
+        volume: 100,
+    });
+    broadcaster
+        .send(serde_json::to_string(&candle).unwrap())
+        .unwrap();
+
+    // Wait for an OrderUpdate on the WS feed (dry-run mode)
+    let deadline = Duration::from_secs(15);
+    let mut saw_order_update = false;
+    loop {
+        match tokio::time::timeout(deadline, ws_conn.next()).await {
+            Ok(Some(Ok(ws::Frame::Text(bytes)))) => {
+                let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if val["type"] == "order_update" {
+                    saw_order_update = true;
+                    assert_eq!(val["status"], "dry_run");
+                    assert_eq!(val["side"], "buy");
+                    break;
+                }
+            }
+            Ok(Some(Ok(_))) => continue,
+            _ => break,
+        }
+    }
+
+    assert!(
+        saw_order_update || !order_repo.all_records().await.is_empty(),
+        "deployed python strategy must produce an order (via WS or DB)"
     );
 }

@@ -26,6 +26,7 @@ use stream_coin::order::manager::{spawn_order_manager_listener, OrderManager};
 use stream_coin::order::port::OrderAdapter;
 use stream_coin::order::tabdeal::TabdealOrderAdapter;
 use stream_coin::presentation::handlers::exchange_handler::restore_tickers;
+use stream_coin::presentation::handlers::strategy_handler::restore_python_strategies;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
@@ -264,9 +265,11 @@ async fn main() -> std::io::Result<()> {
         signal_repository: None,
         order_adapters,
         order_manager: Some(order_manager),
+        python_strategy_repository: None,
     });
 
     restore_tickers(&app_state).await;
+    restore_python_strategies(&app_state).await;
 
     tracing::info!(host = %host, port = %port, "server starting");
 

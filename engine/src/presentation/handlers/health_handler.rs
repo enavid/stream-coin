@@ -71,6 +71,7 @@ mod tests {
             signal_repository: None,
             order_adapters: Arc::new(HashMap::new()),
             order_manager: None,
+            python_strategy_repository: None,
         })
     }
 

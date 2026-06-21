@@ -7,6 +7,7 @@ use tokio::task::AbortHandle;
 
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
+use crate::infrastructure::db::python_strategy_repository::PythonStrategyRepository;
 use crate::infrastructure::db::signal_repository::SignalRepository;
 use crate::infrastructure::db::strategy_repository::StrategyRepository;
 use crate::infrastructure::db::ticker_repository::TickerRepository;
@@ -71,6 +72,8 @@ pub struct AppState {
     /// `None` when no `OrderRepository` is available or in test stubs that do not
     /// exercise order placement.
     pub order_manager: Option<Arc<OrderManager>>,
+    /// Persistent store for deployed Python strategy code. `None` = no DB.
+    pub python_strategy_repository: Option<Arc<dyn PythonStrategyRepository>>,
 }
 
 impl AppState {

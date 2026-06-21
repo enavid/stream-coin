@@ -1,15 +1,17 @@
 use actix_web::{web, HttpResponse};
 use chrono::Utc;
 
+use crate::infrastructure::db::python_strategy_repository::PythonStrategyRecord;
 use crate::infrastructure::db::strategy_repository::{StrategyRecord, StrategyRegistration};
 use crate::presentation::dto::strategy::{
-    ActiveStrategy, RegisterStrategyRequest, StartStrategyRequest, StopStrategyRequest,
-    StrategyList,
+    ActiveStrategy, DeployStrategyRequest, RegisterStrategyRequest, StartStrategyRequest,
+    StopStrategyRequest, StrategyList,
 };
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::{AppState, StrategyHandle};
 use crate::strategy::factory::build_strategy;
 use crate::strategy::runner::spawn_strategy_runner;
+use crate::strategy::subprocess::{spawn_subprocess_runner, SubprocessConfig};
 
 pub async fn start_strategy(
     state: web::Data<AppState>,
@@ -197,6 +199,135 @@ pub async fn register_strategy(
             "strategy_type": req.strategy_type,
         }),
     )
+}
+
+/// Deploys a Python strategy: saves code to the repository and spawns the subprocess.
+///
+/// The engine prepends a seccomp preamble (Linux) that blocks socket/connect/bind
+/// before executing the user's code. The subprocess reads candle JSON lines from
+/// stdin and writes signal JSON lines to stdout.
+pub async fn deploy_strategy(
+    state: web::Data<AppState>,
+    body: web::Json<DeployStrategyRequest>,
+) -> HttpResponse {
+    let req = body.into_inner();
+
+    if req.name.is_empty() {
+        return ApiError::new("name must not be empty", vec![]).to_response();
+    }
+    if req.code.is_empty() {
+        return ApiError::new("code must not be empty", vec![]).to_response();
+    }
+
+    let strategy_id = uuid::Uuid::new_v4().to_string();
+
+    {
+        let running = state.running_strategies.lock().await;
+        // No conflict possible since strategy_id is a fresh UUID — just guard duplicates
+        // in case of hash collision (cosmetic, practically impossible)
+        if running.contains_key(&strategy_id) {
+            return ApiError::new("strategy id collision, retry", vec![]).to_response();
+        }
+    }
+
+    let record = PythonStrategyRecord {
+        strategy_id: strategy_id.clone(),
+        name: req.name.clone(),
+        code: req.code.clone(),
+        params_json: req.params.clone(),
+        created_at: Utc::now(),
+    };
+
+    if let Some(ref repo) = state.python_strategy_repository {
+        if let Err(e) = repo.save(&record).await {
+            tracing::error!(
+                error = %e,
+                strategy_id = %strategy_id,
+                "failed to persist python strategy"
+            );
+            return ApiError::new("failed to persist strategy", vec![]).to_response();
+        }
+    }
+
+    let abort_handle = spawn_subprocess_runner(
+        SubprocessConfig {
+            strategy_id: strategy_id.clone(),
+            code: req.code.clone(),
+        },
+        state.broadcaster.clone(),
+        state.signal_repository.clone(),
+    );
+
+    let mut running = state.running_strategies.lock().await;
+    running.insert(
+        strategy_id.clone(),
+        StrategyHandle {
+            strategy_type: "python".to_string(),
+            exchange: "*".to_string(),
+            pair: "*".to_string(),
+            abort_handle,
+        },
+    );
+    drop(running);
+
+    tracing::info!(
+        strategy_id = %strategy_id,
+        name = %req.name,
+        "python strategy deployed and subprocess started"
+    );
+
+    success_response(
+        "Strategy deployed",
+        serde_json::json!({
+            "strategy_id": strategy_id,
+            "name": req.name,
+        }),
+    )
+}
+
+/// Restores deployed Python strategies from the repository on engine startup.
+pub async fn restore_python_strategies(state: &web::Data<AppState>) {
+    let repo = match &state.python_strategy_repository {
+        Some(r) => r.clone(),
+        None => return,
+    };
+
+    let records = match repo.list_active().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to load python strategies from repository");
+            return;
+        }
+    };
+
+    let mut running = state.running_strategies.lock().await;
+    for record in records {
+        if running.contains_key(&record.strategy_id) {
+            continue;
+        }
+        let abort_handle = spawn_subprocess_runner(
+            SubprocessConfig {
+                strategy_id: record.strategy_id.clone(),
+                code: record.code.clone(),
+            },
+            state.broadcaster.clone(),
+            state.signal_repository.clone(),
+        );
+        running.insert(
+            record.strategy_id.clone(),
+            StrategyHandle {
+                strategy_type: "python".to_string(),
+                exchange: "*".to_string(),
+                pair: "*".to_string(),
+                abort_handle,
+            },
+        );
+        tracing::info!(
+            strategy_id = %record.strategy_id,
+            name = %record.name,
+            "python strategy subprocess restored"
+        );
+    }
 }
 
 /// Loads active strategy records from the repository and restarts each one.

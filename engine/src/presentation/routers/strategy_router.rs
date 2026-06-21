@@ -11,6 +11,7 @@ pub fn strategy_router(cfg: &mut web::ServiceConfig) {
                 "/register",
                 web::post().to(strategy_handler::register_strategy),
             )
+            .route("/deploy", web::post().to(strategy_handler::deploy_strategy))
             .route("", web::get().to(strategy_handler::list_strategies)),
     );
 }

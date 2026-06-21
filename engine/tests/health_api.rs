@@ -26,6 +26,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         signal_repository: None,
         order_adapters: Arc::new(HashMap::new()),
         order_manager: None,
+        python_strategy_repository: None,
     })
 }
 
