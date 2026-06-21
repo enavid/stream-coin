@@ -2,43 +2,59 @@
 # stream-coin — Master Compose File
 #
 # Usage:
-#   Full stack:    docker compose up -d
-#   Infra only:    docker compose up -d redis kafka schema-registry kafka-connect flink-jobmanager flink-taskmanager kafka-ui
-#   Without proxy: docker compose up -d --scale nginx=0
+#   docker compose up -d      # brings up postgres + redis + kafka (the only active includes)
+#
+# schema-registry / kafka-connect / rest-proxy / flink / kafka-ui / nginx are all
+# disabled below (unused infra — see "DISABLED SERVICES" comments). Re-enable as needed.
 #
 # Kafka connection for app containers:  kafka:9094  (DOCKER plaintext)
 # Kafka connection from host (dev):     localhost:9092  (HOST plaintext)
 # Redis connection for app containers:  redis://redis:6379
 # Redis connection from host (dev):     redis://localhost:6379
+# Postgres connection for app containers: postgresql://stream_coin:<pw>@postgres:5432/stream_coin
+# Postgres connection from host (dev):     postgresql://stream_coin:<pw>@localhost:5432/stream_coin
 #
 # Setup (first time):
-#   cp .env.example .env          # fill in passwords and domain
-#   mkdir -p cert nginx/auth
-#   cp /path/to/fullchain.pem cert/
-#   cp /path/to/privkey.pem cert/
-#   htpasswd -c nginx/auth/.htpasswd <username>
-#   docker compose up -d
+#   cp .env.example .env          # fill in passwords
+#   docker compose up -d postgres   # then run engine — it applies migrations on startup
 # ==============================================================================
 
 name: stream-coin
 
 include:
+  - path: compose/postgres.yml
+    project_directory: .
   - path: compose/redis.yml
     project_directory: .
   - path: compose/kafka.yml
     project_directory: .
-  - path: compose/schema.yml
-    project_directory: .
-  - path: compose/connect.yml
-    project_directory: .
-  - path: compose/rest-proxy.yml
-    project_directory: .
-  - path: compose/flink.yml
-    project_directory: .
-  - path: compose/ui.yml
-    project_directory: .
-  - path: compose/proxy.yml
-    project_directory: .
+  # --- DISABLED SERVICES (uncomment the block below when needed) ---
+  #
+  # schema-registry + kafka-connect + rest-proxy: needed for Loop 4c (Protobuf schemas).
+  # To enable: uncomment the three blocks below AND the matching volumes at the bottom.
+  #
+  # - path: compose/schema.yml
+  #   project_directory: .
+  # - path: compose/connect.yml
+  #   project_directory: .
+  # - path: compose/rest-proxy.yml
+  #   project_directory: .
+  #
+  # flink: needed when candle aggregation moves out of engine (Loop 5+, ≥5 exchanges).
+  # To enable: uncomment the block below AND flink-checkpoints volume at the bottom.
+  #
+  # - path: compose/flink.yml
+  #   project_directory: .
+  #
+  # ui (kafka-ui dashboard) + proxy (nginx): both only exist to expose dashboards for
+  # schema-registry/kafka-connect/flink, which are disabled above. nginx's depends_on
+  # also names all three — re-enabling either file without re-enabling those services
+  # breaks `docker compose up`. Re-enable together with whichever services they front.
+  #
+  # - path: compose/ui.yml
+  #   project_directory: .
+  # - path: compose/proxy.yml
+  #   project_directory: .
 
 # ==============================================================================
 # Network — single bridge network for all services
@@ -52,6 +68,10 @@ networks:
 # Volumes
 # ==============================================================================
 volumes:
+  postgres-data:
+    driver: local
+    name: postgres-data
+
   redis-data:
     driver: local
     name: redis-data
@@ -60,14 +80,12 @@ volumes:
     driver: local
     name: kafka-data
 
-  kafka-connect-data:
-    driver: local
-    name: kafka-connect-data
-
-  kafka-connect-plugins:
-    driver: local
-    name: kafka-connect-plugins
-
-  flink-checkpoints:
-    driver: local
-    name: flink-checkpoints
+  # kafka-connect-data:   (uncomment with compose/connect.yml)
+  #   driver: local
+  #   name: kafka-connect-data
+  # kafka-connect-plugins: (uncomment with compose/connect.yml)
+  #   driver: local
+  #   name: kafka-connect-plugins
+  # flink-checkpoints:    (uncomment with compose/flink.yml)
+  #   driver: local
+  #   name: flink-checkpoints

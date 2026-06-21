@@ -2,7 +2,7 @@ services:
 
   # ============================================================================
   # Nginx Reverse Proxy
-  # Terminates TLS with real certificates from ./cert/ (Let's Encrypt or custom).
+  # Terminates TLS with real certificates from ./certs/nginx/ (Let's Encrypt or custom).
   # All internal services are unexposed; only Nginx is reachable on 80/443.
   #
   # Required DNS A records (all → this server's public IP):
@@ -13,8 +13,8 @@ services:
   #   rest-proxy.yourdomain.com      → rest-proxy:8082
   #
   # Certificates (place before running):
-  #   ./cert/fullchain.pem
-  #   ./cert/privkey.pem
+  #   ./certs/nginx/fullchain.pem
+  #   ./certs/nginx/privkey.pem
   # ============================================================================
   nginx:
     image: nginx:alpine
@@ -36,8 +36,8 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/auth/.htpasswd:/etc/nginx/auth/.htpasswd:ro
-      - ./cert/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
-      - ./cert/privkey.pem:/etc/nginx/ssl/privkey.pem:ro
+      - ./certs/nginx/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
+      - ./certs/nginx/privkey.pem:/etc/nginx/ssl/privkey.pem:ro
 
     healthcheck:
       test: ["CMD-SHELL", "nginx -t || exit 1"]
