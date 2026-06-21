@@ -25,6 +25,8 @@ use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
 use stream_coin::kafka::port::MessagePublisher;
 use stream_coin::kafka::KafkaProducer;
 use stream_coin::order::entity::SafetyConfig;
+use stream_coin::order::exir::ExirOrderAdapter;
+use stream_coin::order::hitobit::HitobitOrderAdapter;
 use stream_coin::order::manager::{spawn_order_manager_listener, OrderManager};
 use stream_coin::order::port::OrderAdapter;
 use stream_coin::order::tabdeal::TabdealOrderAdapter;
@@ -32,7 +34,7 @@ use stream_coin::presentation::handlers::exchange_handler::restore_tickers;
 use stream_coin::presentation::handlers::strategy_handler::restore_python_strategies;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
-use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
+use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState, OrderAdapterFactory};
 use stream_coin::presentation::swagger::ApiDoc;
 use stream_coin::price::entity::MarketType;
 
@@ -95,6 +97,29 @@ async fn main() -> std::io::Result<()> {
         }),
     );
     let adapter_factories = Arc::new(factories);
+
+    // Hard-coded factory map: order adapter constructors cannot be stored in a database,
+    // so this — like `adapter_factories` above — is the only place exchange names are
+    // coupled to order adapter types. Exir has an OrderAdapter but no ExchangeAdapter
+    // (WS feed) yet, so it is intentionally absent from the `exchanges` DB table/registry.
+    let mut order_factories: HashMap<String, OrderAdapterFactory> = HashMap::new();
+    order_factories.insert(
+        "tabdeal".to_string(),
+        Arc::new(|api_key: &str| {
+            Arc::new(TabdealOrderAdapter::new(api_key)) as Arc<dyn OrderAdapter>
+        }),
+    );
+    order_factories.insert(
+        "hitobit".to_string(),
+        Arc::new(|api_key: &str| {
+            Arc::new(HitobitOrderAdapter::new(api_key)) as Arc<dyn OrderAdapter>
+        }),
+    );
+    order_factories.insert(
+        "exir".to_string(),
+        Arc::new(|api_key: &str| Arc::new(ExirOrderAdapter::new(api_key)) as Arc<dyn OrderAdapter>),
+    );
+    let order_adapter_factories = Arc::new(order_factories);
 
     let db_pool: Option<sqlx::PgPool> = match env::var("DATABASE_URL") {
         Ok(url) => match sqlx::PgPool::connect(&url).await {
@@ -314,6 +339,7 @@ async fn main() -> std::io::Result<()> {
         strategy_repository: None,
         signal_repository: None,
         order_adapters,
+        order_adapter_factories,
         admin_credentials,
         order_manager: Some(order_manager),
         python_strategy_repository: None,

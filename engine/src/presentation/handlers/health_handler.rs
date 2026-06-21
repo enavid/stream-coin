@@ -95,6 +95,7 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
             admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,

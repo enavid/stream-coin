@@ -1,12 +1,6 @@
-use std::sync::Arc;
-
 use actix_web::{web, Responder};
 use serde::Deserialize;
 
-use crate::order::exir::ExirOrderAdapter;
-use crate::order::hitobit::HitobitOrderAdapter;
-use crate::order::port::OrderAdapter;
-use crate::order::tabdeal::TabdealOrderAdapter;
 use crate::presentation::dto::exchange::{
     ExchangeListResponse, ExchangeNameRequest, ExchangeResponse, PairListQuery, PairListResponse,
     PairResponse,
@@ -142,25 +136,22 @@ pub async fn disable_exchange(
 
 /// `POST /v1/admin/exchanges/{name}/credentials` — registers an API key for an exchange's
 /// order adapter. Inserts (or replaces) the live order adapter without a server restart.
-/// This is the only place in the codebase where exchange names are coupled to order adapter types.
+/// `order_adapter_factories` is the only place exchange names are coupled to order adapter
+/// types — constructors cannot be stored in a database, so this map lives in code.
 pub async fn set_exchange_credentials(
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<SetCredentialsRequest>,
 ) -> impl Responder {
     let name = path.into_inner();
-    let adapter: Arc<dyn OrderAdapter> = match name.as_str() {
-        "tabdeal" => Arc::new(TabdealOrderAdapter::new(&body.api_key)),
-        "hitobit" => Arc::new(HitobitOrderAdapter::new(&body.api_key)),
-        "exir" => Arc::new(ExirOrderAdapter::new(&body.api_key)),
-        other => {
-            return ApiError::new(
-                &format!("Unknown exchange '{other}' — cannot configure order adapter"),
-                vec![],
-            )
-            .to_response();
-        }
+    let Some(factory) = state.order_adapter_factories.get(name.as_str()) else {
+        return ApiError::new(
+            &format!("Unknown exchange '{name}' — cannot configure order adapter"),
+            vec![],
+        )
+        .to_response();
     };
+    let adapter = factory(&body.api_key);
 
     state
         .order_adapters
@@ -185,7 +176,9 @@ mod tests {
     use crate::infrastructure::db::exchange_repository::{
         ExchangeRepository, FakeExchangeRepository,
     };
-    use crate::presentation::shared::app_state::{AdapterFactory, AppState};
+    use crate::order::fake::FakeOrderAdapter;
+    use crate::order::port::OrderAdapter;
+    use crate::presentation::shared::app_state::{AdapterFactory, AppState, OrderAdapterFactory};
     use crate::price::entity::MarketType;
 
     fn registry_with_exchanges() -> ExchangeRegistry {
@@ -227,6 +220,12 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            order_adapter_factories: Arc::new(HashMap::<String, OrderAdapterFactory>::from([(
+                "tabdeal".to_string(),
+                Arc::new(|_api_key: &str| {
+                    Arc::new(FakeOrderAdapter::new("tabdeal")) as Arc<dyn OrderAdapter>
+                }) as OrderAdapterFactory,
+            )])),
             admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,

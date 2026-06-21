@@ -23,6 +23,9 @@ pub type ClientMap = Arc<Mutex<HashMap<ClientKey, AbortHandle>>>;
 /// Factory function that constructs an `ExchangeAdapter` given a WebSocket URL.
 pub type AdapterFactory = Arc<dyn Fn(&str) -> Arc<dyn ExchangeAdapter> + Send + Sync>;
 
+/// Factory function that constructs an `OrderAdapter` given an API key.
+pub type OrderAdapterFactory = Arc<dyn Fn(&str) -> Arc<dyn OrderAdapter> + Send + Sync>;
+
 /// Capacity of the price broadcast channel; lagging WS clients drop oldest
 /// messages rather than blocking publishers.
 pub const BROADCAST_CAPACITY: usize = 256;
@@ -70,6 +73,10 @@ pub struct AppState {
     /// Writable at runtime via `POST /v1/admin/exchanges/{name}/credentials` so
     /// operators can register API keys without restarting the server.
     pub order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
+    /// Hard-coded factory map: exchange name → `OrderAdapter` constructor. Mirrors
+    /// `adapter_factories` — order adapter types cannot be stored in a database, so
+    /// this is the only place exchange names are coupled to order adapter types.
+    pub order_adapter_factories: Arc<HashMap<String, OrderAdapterFactory>>,
     /// Admin credentials for `POST /v1/auth/token`.
     /// `None` = login endpoint disabled (server runs without a configured admin account).
     pub admin_credentials: Option<Arc<(String, String)>>,

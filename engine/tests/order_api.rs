@@ -51,6 +51,7 @@ fn build_state_with_order_manager(
         strategy_repository: None,
         signal_repository: None,
         order_adapters,
+        order_adapter_factories: Arc::new(HashMap::new()),
         admin_credentials: None,
         order_manager: Some(manager),
         python_strategy_repository: None,
