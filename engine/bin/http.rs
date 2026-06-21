@@ -187,7 +187,7 @@ async fn main() -> std::io::Result<()> {
         registry.add_exchange(ExchangeRecord {
             name: "hitobit".to_string(),
             display_name: "Hitobit".to_string(),
-            ws_url: "wss://stream.hitobit.com:443".to_string(),
+            ws_url: "wss://stream.hitobit.com/stream".to_string(),
             enabled: true,
         });
         registry.add_pair(TradingPairRecord {

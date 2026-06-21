@@ -859,7 +859,7 @@ async fn enable_exchange_then_start_ticker_returns_200() {
     registry.add_exchange(ExchangeRecord {
         name: "hitobit".to_string(),
         display_name: "Hitobit".to_string(),
-        ws_url: "wss://stream.hitobit.com:443".to_string(),
+        ws_url: "wss://stream.hitobit.com/stream".to_string(),
         enabled: false,
     });
 

@@ -12,7 +12,7 @@ use crate::exchange::entity::ExchangeId;
 use crate::exchange::port::{ExchangeAdapter, ExchangeAdapterError};
 use crate::price::entity::{MarketType, Price, TradingPair};
 
-const WS_URL: &str = "wss://stream.hitobit.com:443";
+const WS_URL: &str = "wss://stream.hitobit.com/stream";
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 pub struct HitobitWsAdapter {
@@ -204,6 +204,32 @@ mod tests {
                 "a": [[ask, "1.0"]]
             }
         })
+    }
+
+    // --- ws_url unit tests ---
+
+    // Two independent issues, both confirmed by hand against the live endpoint:
+    // (1) the bare root path 404s — the SUBSCRIBE/depth protocol only works under "/stream".
+    // (2) an explicit ":443" in the URL makes tungstenite send `Host: stream.hitobit.com:443`,
+    //     which Hitobit's WAF 503s on — the Host header must omit the (default) port.
+    #[test]
+    fn new_targets_the_stream_path_not_bare_root() {
+        let adapter = HitobitWsAdapter::new();
+        assert!(
+            adapter.ws_url.ends_with("/stream"),
+            "ws_url must target the /stream path, got: {}",
+            adapter.ws_url
+        );
+    }
+
+    #[test]
+    fn new_omits_explicit_default_port() {
+        let adapter = HitobitWsAdapter::new();
+        assert!(
+            !adapter.ws_url.contains(":443"),
+            "ws_url must not pin an explicit :443 — Hitobit's WAF 503s on that Host header, got: {}",
+            adapter.ws_url
+        );
     }
 
     // --- symbol_for_pair unit tests (ROADMAP 1a + 1b) ---
