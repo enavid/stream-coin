@@ -101,8 +101,7 @@ pub fn AddTickerForm(on_start: EventHandler<(String, String)>) -> Element {
                             class: "btn-start",
                             onclick: move |_| {
                                 if !selected_exchange.is_empty() && !selected_pair.is_empty() {
-                                    let symbol = selected_pair.replace('/', "");
-                                    on_start.call((selected_exchange.clone(), symbol));
+                                    on_start.call((selected_exchange.clone(), selected_pair.clone()));
                                     pair_choice.set(String::new());
                                     expanded.set(false);
                                 }

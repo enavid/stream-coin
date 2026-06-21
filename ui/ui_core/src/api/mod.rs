@@ -14,6 +14,13 @@ pub use dto::*;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+/// Body shared by the start/stop ticker endpoints. A free function so the
+/// `BASE/QUOTE` separator requirement can be pinned down by a unit test
+/// without going through the network.
+fn ticker_request_body(exchange: &str, pair: &str) -> serde_json::Value {
+    serde_json::json!({ "exchange": exchange, "symbol": pair })
+}
+
 #[derive(Clone)]
 pub struct ApiClient {
     base_url: String,
@@ -47,30 +54,31 @@ impl ApiClient {
         format!("{}?token={token}", self.ws_url())
     }
 
+    /// `pair` must keep its `BASE/QUOTE` separator (e.g. `USDT/IRT`) — the
+    /// engine's `TradingPair` deserializer (`engine/src/price/entity.rs`)
+    /// rejects anything without exactly one `/`, so the concatenated form
+    /// (`USDTIRT`) is a 400, not an accepted shorthand.
     pub async fn start_ticker(
         &self,
         token: &str,
         exchange: &str,
-        symbol: &str,
+        pair: &str,
     ) -> Result<(), String> {
         self.post_json(
             "/exchanges/futures/start_kline_symbol_ticker",
             Some(token),
-            &serde_json::json!({ "exchange": exchange, "symbol": symbol }),
+            &ticker_request_body(exchange, pair),
         )
         .await
     }
 
-    /// `pair` is the display form (e.g. `USDT/IRT`); the backend's stop
-    /// endpoint expects the raw symbol it was started with (`USDTIRT`),
-    /// which for every current adapter is just the pair without the
-    /// separating slash.
+    /// See [`ApiClient::start_ticker`] — same `BASE/QUOTE` requirement
+    /// applies to the stop endpoint's `symbol` field.
     pub async fn stop_ticker(&self, token: &str, exchange: &str, pair: &str) -> Result<(), String> {
-        let symbol = pair.replace('/', "");
         self.post_json(
             "/exchanges/futures/stop_kline_symbol_ticker",
             Some(token),
-            &serde_json::json!({ "exchange": exchange, "symbol": symbol }),
+            &ticker_request_body(exchange, pair),
         )
         .await
     }
@@ -417,7 +425,7 @@ mod tests {
         let req = reqwest::Client::new()
             .post(client.v1("/exchanges/futures/start_kline_symbol_ticker"))
             .bearer_auth("test-token")
-            .json(&serde_json::json!({ "exchange": "tabdeal", "symbol": "USDTIRT" }))
+            .json(&serde_json::json!({ "exchange": "tabdeal", "symbol": "USDT/IRT" }))
             .build()
             .unwrap();
 
@@ -429,6 +437,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(header, "Bearer test-token");
+    }
+
+    /// The engine's `TradingPair` deserializer (`engine/src/price/entity.rs`)
+    /// rejects any symbol without exactly one `/` separator — sending the
+    /// slash-stripped concatenated form (e.g. `USDTIRT`) is a 400, not a
+    /// shorthand the backend accepts.
+    #[test]
+    fn ticker_request_body_keeps_the_base_quote_slash_separator() {
+        let body = ticker_request_body("tabdeal", "USDT/IRT");
+        assert_eq!(body["symbol"], "USDT/IRT");
+    }
+
+    #[test]
+    fn ticker_request_body_does_not_strip_the_slash() {
+        let body = ticker_request_body("tabdeal", "USDT/IRT");
+        assert_ne!(body["symbol"], "USDTIRT");
     }
 
     #[test]
