@@ -91,6 +91,12 @@ pub async fn enable_exchange(
         tracing::info!(exchange = %name, "exchange enabled and adapter inserted");
     }
 
+    if let Some(repo) = &state.exchange_repository {
+        if let Err(e) = repo.set_enabled(name, true).await {
+            tracing::error!(error = %e, exchange = %name, "failed to persist exchange enable to DB");
+        }
+    }
+
     success_response("Exchange enabled", serde_json::json!({"exchange": name}))
 }
 
@@ -121,6 +127,12 @@ pub async fn disable_exchange(
     for key in to_abort {
         if let Some(handle) = clients.remove(&key) {
             handle.abort();
+        }
+    }
+
+    if let Some(repo) = &state.exchange_repository {
+        if let Err(e) = repo.set_enabled(name, false).await {
+            tracing::error!(error = %e, exchange = %name, "failed to persist exchange disable to DB");
         }
     }
 
@@ -170,6 +182,9 @@ mod tests {
 
     use super::*;
     use crate::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
+    use crate::infrastructure::db::exchange_repository::{
+        ExchangeRepository, FakeExchangeRepository,
+    };
     use crate::presentation::shared::app_state::{AdapterFactory, AppState};
     use crate::price::entity::MarketType;
 
@@ -191,6 +206,13 @@ mod tests {
     }
 
     fn state_with_registry(registry: ExchangeRegistry) -> web::Data<AppState> {
+        state_with_registry_and_repo(registry, None)
+    }
+
+    fn state_with_registry_and_repo(
+        registry: ExchangeRegistry,
+        exchange_repository: Option<Arc<dyn ExchangeRepository>>,
+    ) -> web::Data<AppState> {
         web::Data::new(AppState {
             redis: None,
             exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
@@ -209,6 +231,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            exchange_repository,
         })
     }
 
@@ -307,6 +330,80 @@ mod tests {
         assert!(
             state.order_adapters.read().await.contains_key("tabdeal"),
             "tabdeal adapter must be present after setting credentials"
+        );
+    }
+
+    #[actix_web::test]
+    async fn disable_exchange_persists_to_repository() {
+        let repo = Arc::new(FakeExchangeRepository::new_with(
+            vec![ExchangeRecord {
+                name: "tabdeal".to_string(),
+                display_name: "Tabdeal".to_string(),
+                ws_url: "wss://tabdeal.example.com".to_string(),
+                enabled: true,
+            }],
+            vec![],
+        ));
+        let state = state_with_registry_and_repo(
+            registry_with_exchanges(),
+            Some(repo.clone() as Arc<dyn ExchangeRepository>),
+        );
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/admin/exchanges/disable", web::post().to(disable_exchange)),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/disable")
+            .set_json(serde_json::json!({"exchange": "tabdeal"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let (exchanges, _) = repo.load_all().await.unwrap();
+        assert!(
+            !exchanges[0].enabled,
+            "disable must persist enabled=false to the repository"
+        );
+    }
+
+    #[actix_web::test]
+    async fn enable_exchange_persists_to_repository() {
+        let repo = Arc::new(FakeExchangeRepository::new_with(
+            vec![ExchangeRecord {
+                name: "hitobit".to_string(),
+                display_name: "Hitobit".to_string(),
+                ws_url: "wss://hitobit.example.com".to_string(),
+                enabled: false,
+            }],
+            vec![],
+        ));
+        let state = state_with_registry_and_repo(
+            registry_with_exchanges(),
+            Some(repo.clone() as Arc<dyn ExchangeRepository>),
+        );
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .route("/admin/exchanges/enable", web::post().to(enable_exchange)),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/enable")
+            .set_json(serde_json::json!({"exchange": "hitobit"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let (exchanges, _) = repo.load_all().await.unwrap();
+        assert!(
+            exchanges[0].enabled,
+            "enable must persist enabled=true to the repository"
         );
     }
 

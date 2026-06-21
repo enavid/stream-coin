@@ -16,8 +16,11 @@ use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::infrastructure::cache::redis;
+use stream_coin::infrastructure::db::exchange_repository::ExchangeRepository;
 use stream_coin::infrastructure::db::order_repository::FakeOrderRepository;
-use stream_coin::infrastructure::db::postgres::PostgresTickerRepository;
+use stream_coin::infrastructure::db::postgres::{
+    PostgresExchangeRepository, PostgresTickerRepository,
+};
 use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
 use stream_coin::kafka::port::MessagePublisher;
 use stream_coin::kafka::KafkaProducer;
@@ -75,7 +78,8 @@ async fn main() -> std::io::Result<()> {
     };
 
     // Hard-coded factory map: the only place exchange names appear in code.
-    // The registry (DB in 1d) controls which are active; this map provides constructors.
+    // The registry (DB-backed when DATABASE_URL is set) controls which are active;
+    // this map provides constructors.
     // NEVER add: nobitex, wallex, bitpin, ramzinex — OFAC sanctioned 2026-06-02
     let mut factories: HashMap<String, AdapterFactory> = HashMap::new();
     factories.insert(
@@ -92,34 +96,89 @@ async fn main() -> std::io::Result<()> {
     );
     let adapter_factories = Arc::new(factories);
 
-    // Bootstrap registry from environment. In Loop 1d this moves to PostgreSQL.
+    let db_pool: Option<sqlx::PgPool> = match env::var("DATABASE_URL") {
+        Ok(url) => match sqlx::PgPool::connect(&url).await {
+            Ok(pool) => match sqlx::migrate!("./migrations").run(&pool).await {
+                Ok(()) => {
+                    tracing::info!(url = %url, "postgres connected, migrations applied");
+                    Some(pool)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "database migration failed");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "postgres unavailable, starting without DB persistence");
+                None
+            }
+        },
+        Err(_) => {
+            tracing::warn!("DATABASE_URL not set, starting without DB persistence");
+            None
+        }
+    };
+
+    let exchange_repository: Option<Arc<dyn ExchangeRepository>> = db_pool
+        .clone()
+        .map(|pool| Arc::new(PostgresExchangeRepository::new(pool)) as Arc<dyn ExchangeRepository>);
+
+    let ticker_repository: Option<Arc<dyn TickerRepository>> = db_pool
+        .clone()
+        .map(|pool| Arc::new(PostgresTickerRepository::new(pool)) as Arc<dyn TickerRepository>);
+
+    // Bootstrap the registry from the database when available; fall back to hardcoded
+    // defaults otherwise (dev without Postgres, or migration 0007 hasn't been seeded yet).
     let mut registry = ExchangeRegistry::new();
-    registry.add_exchange(ExchangeRecord {
-        name: "tabdeal".to_string(),
-        display_name: "Tabdeal".to_string(),
-        ws_url: "wss://api1.tabdeal.org/stream/".to_string(),
-        enabled: true,
-    });
-    registry.add_exchange(ExchangeRecord {
-        name: "hitobit".to_string(),
-        display_name: "Hitobit".to_string(),
-        ws_url: "wss://stream.hitobit.com:443".to_string(),
-        enabled: true,
-    });
-    registry.add_pair(TradingPairRecord {
-        exchange_name: "tabdeal".to_string(),
-        base: "USDT".to_string(),
-        quote: "IRT".to_string(),
-        market_type: MarketType::Spot,
-        active: true,
-    });
-    registry.add_pair(TradingPairRecord {
-        exchange_name: "hitobit".to_string(),
-        base: "USDT".to_string(),
-        quote: "IRT".to_string(),
-        market_type: MarketType::Spot,
-        active: true,
-    });
+    let mut loaded_from_db = false;
+    if let Some(repo) = &exchange_repository {
+        match repo.load_all().await {
+            Ok((exchanges, pairs)) if !exchanges.is_empty() => {
+                for exchange in exchanges {
+                    registry.add_exchange(exchange);
+                }
+                for pair in pairs {
+                    registry.add_pair(pair);
+                }
+                tracing::info!("exchange registry loaded from database");
+                loaded_from_db = true;
+            }
+            Ok(_) => {
+                tracing::warn!("exchanges table is empty, falling back to hardcoded registry");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load exchange registry from database, falling back to hardcoded registry");
+            }
+        }
+    }
+    if !loaded_from_db {
+        registry.add_exchange(ExchangeRecord {
+            name: "tabdeal".to_string(),
+            display_name: "Tabdeal".to_string(),
+            ws_url: "wss://api1.tabdeal.org/stream/".to_string(),
+            enabled: true,
+        });
+        registry.add_exchange(ExchangeRecord {
+            name: "hitobit".to_string(),
+            display_name: "Hitobit".to_string(),
+            ws_url: "wss://stream.hitobit.com:443".to_string(),
+            enabled: true,
+        });
+        registry.add_pair(TradingPairRecord {
+            exchange_name: "tabdeal".to_string(),
+            base: "USDT".to_string(),
+            quote: "IRT".to_string(),
+            market_type: MarketType::Spot,
+            active: true,
+        });
+        registry.add_pair(TradingPairRecord {
+            exchange_name: "hitobit".to_string(),
+            base: "USDT".to_string(),
+            quote: "IRT".to_string(),
+            market_type: MarketType::Spot,
+            active: true,
+        });
+    }
 
     // Build the live adapter map from the registry — only enabled exchanges get adapters.
     let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
@@ -154,28 +213,6 @@ async fn main() -> std::io::Result<()> {
         }
         _ => {
             tracing::warn!("JWT_SECRET not set — running without authentication");
-            None
-        }
-    };
-
-    let ticker_repository: Option<Arc<dyn TickerRepository>> = match env::var("DATABASE_URL") {
-        Ok(url) => match sqlx::PgPool::connect(&url).await {
-            Ok(pool) => {
-                if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
-                    tracing::error!(error = %e, "database migration failed");
-                    None
-                } else {
-                    tracing::info!(url = %url, "postgres connected, migrations applied");
-                    Some(Arc::new(PostgresTickerRepository::new(pool)))
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "postgres unavailable, starting without DB persistence");
-                None
-            }
-        },
-        Err(_) => {
-            tracing::warn!("DATABASE_URL not set, starting without DB persistence");
             None
         }
     };
@@ -281,6 +318,7 @@ async fn main() -> std::io::Result<()> {
         order_manager: Some(order_manager),
         python_strategy_repository: None,
         candle_repository: None,
+        exchange_repository,
     });
 
     restore_tickers(&app_state).await;

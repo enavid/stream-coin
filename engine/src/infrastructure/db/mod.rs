@@ -1,4 +1,5 @@
 pub mod candle_repository;
+pub mod exchange_repository;
 pub mod order_repository;
 pub mod postgres;
 pub mod python_strategy_repository;

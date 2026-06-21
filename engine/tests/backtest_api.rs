@@ -90,6 +90,7 @@ fn build_state(
         order_manager: None,
         python_strategy_repository: Some(python_repo),
         candle_repository: Some(candle_repo),
+        exchange_repository: None,
     })
 }
 
@@ -234,6 +235,7 @@ async fn backtest_unknown_strategy_returns_4xx() {
         order_manager: None,
         python_strategy_repository: Some(python_repo),
         candle_repository: Some(candle_repo),
+        exchange_repository: None,
     });
 
     let srv = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
@@ -281,6 +283,7 @@ async fn backtest_invalid_date_range_returns_4xx() {
         order_manager: None,
         python_strategy_repository: Some(python_repo),
         candle_repository: Some(candle_repo),
+        exchange_repository: None,
     });
 
     let srv = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));

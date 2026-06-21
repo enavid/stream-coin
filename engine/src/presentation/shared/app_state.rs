@@ -8,6 +8,7 @@ use tokio::task::AbortHandle;
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
 use crate::infrastructure::db::candle_repository::CandleRepository;
+use crate::infrastructure::db::exchange_repository::ExchangeRepository;
 use crate::infrastructure::db::python_strategy_repository::PythonStrategyRepository;
 use crate::infrastructure::db::signal_repository::SignalRepository;
 use crate::infrastructure::db::strategy_repository::StrategyRepository;
@@ -81,6 +82,10 @@ pub struct AppState {
     /// Historical candle store used by the backtest engine. `None` = backtesting
     /// unavailable (no DB configured).
     pub candle_repository: Option<Arc<dyn CandleRepository>>,
+    /// Persistent store for the exchange/trading-pair registry. `None` = the in-memory
+    /// `exchange_registry` is bootstrapped from hardcoded defaults and enable/disable
+    /// changes do not survive a restart.
+    pub exchange_repository: Option<Arc<dyn ExchangeRepository>>,
 }
 
 impl AppState {

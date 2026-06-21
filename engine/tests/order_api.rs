@@ -55,6 +55,7 @@ fn build_state_with_order_manager(
         order_manager: Some(manager),
         python_strategy_repository: None,
         candle_repository: None,
+        exchange_repository: None,
     });
 
     (state, repo)

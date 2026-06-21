@@ -109,6 +109,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            exchange_repository: None,
         })
     }
 
@@ -131,6 +132,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            exchange_repository: None,
         })
     }
 
@@ -297,6 +299,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            exchange_repository: None,
         });
 
         let app = test::init_service(

@@ -83,6 +83,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            exchange_repository: None,
         })
     }
 
