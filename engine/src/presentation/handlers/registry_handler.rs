@@ -1,11 +1,23 @@
-use actix_web::{web, Responder};
+use std::sync::Arc;
 
+use actix_web::{web, Responder};
+use serde::Deserialize;
+
+use crate::order::exir::ExirOrderAdapter;
+use crate::order::hitobit::HitobitOrderAdapter;
+use crate::order::port::OrderAdapter;
+use crate::order::tabdeal::TabdealOrderAdapter;
 use crate::presentation::dto::exchange::{
     ExchangeListResponse, ExchangeNameRequest, ExchangeResponse, PairListQuery, PairListResponse,
     PairResponse,
 };
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::AppState;
+
+#[derive(Debug, Deserialize)]
+pub struct SetCredentialsRequest {
+    pub api_key: String,
+}
 
 /// `GET /v1/exchanges` — returns all currently enabled exchanges.
 pub async fn list_exchanges(state: web::Data<AppState>) -> impl Responder {
@@ -116,6 +128,38 @@ pub async fn disable_exchange(
     success_response("Exchange disabled", serde_json::json!({"exchange": name}))
 }
 
+/// `POST /v1/admin/exchanges/{name}/credentials` — registers an API key for an exchange's
+/// order adapter. Inserts (or replaces) the live order adapter without a server restart.
+/// This is the only place in the codebase where exchange names are coupled to order adapter types.
+pub async fn set_exchange_credentials(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<SetCredentialsRequest>,
+) -> impl Responder {
+    let name = path.into_inner();
+    let adapter: Arc<dyn OrderAdapter> = match name.as_str() {
+        "tabdeal" => Arc::new(TabdealOrderAdapter::new(&body.api_key)),
+        "hitobit" => Arc::new(HitobitOrderAdapter::new(&body.api_key)),
+        "exir" => Arc::new(ExirOrderAdapter::new(&body.api_key)),
+        other => {
+            return ApiError::new(
+                &format!("Unknown exchange '{other}' — cannot configure order adapter"),
+                vec![],
+            )
+            .to_response();
+        }
+    };
+
+    state
+        .order_adapters
+        .write()
+        .await
+        .insert(name.clone(), adapter);
+
+    tracing::info!(exchange = %name, "order adapter credentials set");
+    success_response("Credentials set", serde_json::json!({"exchange": name}))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -160,7 +204,8 @@ mod tests {
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
             signal_repository: None,
-            order_adapters: Arc::new(HashMap::new()),
+            order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
@@ -241,5 +286,44 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
+    }
+
+    #[actix_web::test]
+    async fn set_credentials_for_tabdeal_inserts_order_adapter() {
+        let state = state_with_registry(ExchangeRegistry::new());
+        let app = test::init_service(App::new().app_data(state.clone()).route(
+            "/admin/exchanges/{name}/credentials",
+            web::post().to(set_exchange_credentials),
+        ))
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/tabdeal/credentials")
+            .set_json(serde_json::json!({"api_key": "test-key-123"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        assert!(
+            state.order_adapters.read().await.contains_key("tabdeal"),
+            "tabdeal adapter must be present after setting credentials"
+        );
+    }
+
+    #[actix_web::test]
+    async fn set_credentials_for_unknown_exchange_returns_400() {
+        let state = state_with_registry(ExchangeRegistry::new());
+        let app = test::init_service(App::new().app_data(state).route(
+            "/admin/exchanges/{name}/credentials",
+            web::post().to(set_exchange_credentials),
+        ))
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/nobitex/credentials")
+            .set_json(serde_json::json!({"api_key": "irrelevant"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400, "unknown exchange must return 400");
     }
 }

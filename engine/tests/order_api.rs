@@ -27,7 +27,7 @@ fn build_state_with_order_manager(
 
     let mut order_adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
     order_adapters.insert("tabdeal".to_string(), Arc::new(adapter));
-    let order_adapters = Arc::new(order_adapters);
+    let order_adapters = Arc::new(RwLock::new(order_adapters));
 
     let manager = Arc::new(OrderManager::with_poll_interval(
         order_adapters.clone(),
@@ -51,6 +51,7 @@ fn build_state_with_order_manager(
         strategy_repository: None,
         signal_repository: None,
         order_adapters,
+        admin_credentials: None,
         order_manager: Some(manager),
         python_strategy_repository: None,
         candle_repository: None,
@@ -135,7 +136,7 @@ async fn signal_produces_order_in_db() {
     let repo = Arc::new(FakeOrderRepository::new());
     let mut order_adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
     order_adapters.insert("tabdeal".to_string(), Arc::new(adapter));
-    let order_adapters = Arc::new(order_adapters);
+    let order_adapters = Arc::new(RwLock::new(order_adapters));
 
     let cfg = SafetyConfig {
         dry_run: false,

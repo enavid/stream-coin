@@ -17,6 +17,10 @@ pub fn registry_router(cfg: &mut web::ServiceConfig) {
             .route(
                 "/disable",
                 web::post().to(registry_handler::disable_exchange),
+            )
+            .route(
+                "/{name}/credentials",
+                web::post().to(registry_handler::set_exchange_credentials),
             ),
     );
 }

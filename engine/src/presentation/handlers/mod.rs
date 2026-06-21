@@ -1,3 +1,4 @@
+pub mod auth_handler;
 pub mod backtest_handler;
 pub mod exchange_handler;
 pub mod health_handler;

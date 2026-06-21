@@ -37,7 +37,8 @@ fn build_state() -> actix_web::web::Data<AppState> {
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
         signal_repository: None,
-        order_adapters: Arc::new(HashMap::new()),
+        order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: None,
         candle_repository: None,
@@ -60,7 +61,8 @@ fn build_state_with_strategy_repo(
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: Some(repo),
         signal_repository: None,
-        order_adapters: Arc::new(HashMap::new()),
+        order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: None,
         candle_repository: None,
@@ -317,7 +319,8 @@ async fn start_strategy_without_token_returns_401() {
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
         signal_repository: None,
-        order_adapters: Arc::new(HashMap::new()),
+        order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: None,
         candle_repository: None,
@@ -375,7 +378,7 @@ fn build_state_with_deploy_support() -> (actix_web::web::Data<AppState>, Arc<Fak
         "tabdeal".to_string(),
         Arc::new(FakeOrderAdapter::new("tabdeal")),
     );
-    let order_adapters = Arc::new(order_adapters);
+    let order_adapters = Arc::new(RwLock::new(order_adapters));
 
     let manager = Arc::new(OrderManager::with_poll_interval(
         order_adapters.clone(),
@@ -404,6 +407,7 @@ fn build_state_with_deploy_support() -> (actix_web::web::Data<AppState>, Arc<Fak
         strategy_repository: None,
         signal_repository: None,
         order_adapters,
+        admin_credentials: None,
         order_manager: Some(manager),
         python_strategy_repository: Some(Arc::new(FakePythonStrategyRepository::new())),
         candle_repository: None,

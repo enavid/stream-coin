@@ -18,14 +18,39 @@ use crate::presentation::shared::app_state::AppState;
 /// Always returns 200; callers should inspect `status` and `checks` to determine
 /// actual health. `status` is the worst across all checks.
 pub async fn health(state: web::Data<AppState>) -> impl Responder {
-    let redis_check = if state.redis.is_some() {
-        ServiceStatus::Up
-    } else {
-        ServiceStatus::Down
-    };
-
     let mut checks = HashMap::new();
-    checks.insert("redis".to_string(), redis_check);
+    checks.insert(
+        "redis".to_string(),
+        if state.redis.is_some() {
+            ServiceStatus::Up
+        } else {
+            ServiceStatus::Down
+        },
+    );
+    checks.insert(
+        "kafka".to_string(),
+        if state.publisher.is_some() {
+            ServiceStatus::Up
+        } else {
+            ServiceStatus::Down
+        },
+    );
+    checks.insert(
+        "postgres".to_string(),
+        if state.ticker_repository.is_some() {
+            ServiceStatus::Up
+        } else {
+            ServiceStatus::Down
+        },
+    );
+    checks.insert(
+        "order_manager".to_string(),
+        if state.order_manager.is_some() {
+            ServiceStatus::Up
+        } else {
+            ServiceStatus::Down
+        },
+    );
     let status = worst_status(&checks);
 
     tracing::debug!(?status, "health check");
@@ -69,7 +94,8 @@ mod tests {
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
             signal_repository: None,
-            order_adapters: Arc::new(HashMap::new()),
+            order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
@@ -134,6 +160,42 @@ mod tests {
     async fn health_checks_redis_value_is_down_when_disconnected() {
         let body = call_health(disconnected_state()).await;
         assert_eq!(body["data"]["checks"]["redis"], "down");
+    }
+
+    #[actix_web::test]
+    async fn health_checks_map_contains_kafka_key() {
+        let body = call_health(disconnected_state()).await;
+        assert!(
+            body["data"]["checks"]["kafka"] != serde_json::Value::Null,
+            "checks must contain a 'kafka' key"
+        );
+    }
+
+    #[actix_web::test]
+    async fn health_checks_kafka_is_down_when_publisher_none() {
+        let body = call_health(disconnected_state()).await;
+        assert_eq!(
+            body["data"]["checks"]["kafka"], "down",
+            "kafka check must be 'down' when publisher is None"
+        );
+    }
+
+    #[actix_web::test]
+    async fn health_checks_postgres_is_down_when_repository_none() {
+        let body = call_health(disconnected_state()).await;
+        assert_eq!(
+            body["data"]["checks"]["postgres"], "down",
+            "postgres check must be 'down' when ticker_repository is None"
+        );
+    }
+
+    #[actix_web::test]
+    async fn health_checks_order_manager_is_down_when_none() {
+        let body = call_health(disconnected_state()).await;
+        assert_eq!(
+            body["data"]["checks"]["order_manager"], "down",
+            "order_manager check must be 'down' when None"
+        );
     }
 
     /// Requires a running Redis instance; skipped in CI without one.

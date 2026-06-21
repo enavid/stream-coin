@@ -66,9 +66,12 @@ pub struct AppState {
     /// Persistent store for emitted signals. `None` = signals not persisted to DB.
     pub signal_repository: Option<Arc<dyn SignalRepository>>,
     /// Live order adapters keyed by exchange name (e.g. `"tabdeal"`).
-    /// Populated from the exchange registry at startup. Empty until API keys
-    /// are configured.
-    pub order_adapters: Arc<HashMap<String, Arc<dyn OrderAdapter>>>,
+    /// Writable at runtime via `POST /v1/admin/exchanges/{name}/credentials` so
+    /// operators can register API keys without restarting the server.
+    pub order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
+    /// Admin credentials for `POST /v1/auth/token`.
+    /// `None` = login endpoint disabled (server runs without a configured admin account).
+    pub admin_credentials: Option<Arc<(String, String)>>,
     /// Order Manager — processes signals into orders, enforces safety controls.
     /// `None` when no `OrderRepository` is available or in test stubs that do not
     /// exercise order placement.

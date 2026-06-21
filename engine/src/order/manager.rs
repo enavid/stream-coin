@@ -5,7 +5,7 @@ use std::time::Duration;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use thiserror::Error;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::AbortHandle;
 use uuid::Uuid;
 
@@ -41,7 +41,7 @@ pub enum OrderManagerError {
 }
 
 pub struct OrderManager {
-    order_adapters: Arc<HashMap<String, Arc<dyn OrderAdapter>>>,
+    order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
     order_repository: Arc<dyn OrderRepository>,
     broadcaster: broadcast::Sender<String>,
     pub safety_config: SafetyConfig,
@@ -54,7 +54,7 @@ pub struct OrderManager {
 
 impl OrderManager {
     pub fn new(
-        order_adapters: Arc<HashMap<String, Arc<dyn OrderAdapter>>>,
+        order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
         order_repository: Arc<dyn OrderRepository>,
         broadcaster: broadcast::Sender<String>,
         safety_config: SafetyConfig,
@@ -69,7 +69,7 @@ impl OrderManager {
     }
 
     pub fn with_poll_interval(
-        order_adapters: Arc<HashMap<String, Arc<dyn OrderAdapter>>>,
+        order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
         order_repository: Arc<dyn OrderRepository>,
         broadcaster: broadcast::Sender<String>,
         safety_config: SafetyConfig,
@@ -180,11 +180,13 @@ impl OrderManager {
             )
         })?;
 
-        let adapter = self
-            .order_adapters
-            .get(&record.exchange)
-            .ok_or_else(|| OrderManagerError::NoAdapterForExchange(record.exchange.clone()))?
-            .clone();
+        let adapter = {
+            let adapters = self.order_adapters.read().await;
+            adapters
+                .get(&record.exchange)
+                .ok_or_else(|| OrderManagerError::NoAdapterForExchange(record.exchange.clone()))?
+                .clone()
+        };
 
         tracing::info!(
             client_order_id = %client_order_id,
@@ -276,11 +278,13 @@ impl OrderManager {
             return Ok(());
         }
 
-        let adapter = self
-            .order_adapters
-            .get(&req.exchange)
-            .ok_or_else(|| OrderManagerError::NoAdapterForExchange(req.exchange.clone()))?
-            .clone();
+        let adapter = {
+            let adapters = self.order_adapters.read().await;
+            adapters
+                .get(&req.exchange)
+                .ok_or_else(|| OrderManagerError::NoAdapterForExchange(req.exchange.clone()))?
+                .clone()
+        };
 
         // Persist with "open" BEFORE the exchange call for idempotency.
         // On network timeout, the Order Manager queries get_order_status before retrying.
@@ -593,7 +597,7 @@ mod tests {
 
     use chrono::Utc;
     use rust_decimal::Decimal;
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, RwLock};
 
     use super::*;
     use crate::infrastructure::db::order_repository::FakeOrderRepository;
@@ -611,7 +615,7 @@ mod tests {
         adapters.insert("tabdeal".to_string(), Arc::new(adapter));
         let repo = Arc::new(FakeOrderRepository::new());
         let manager = OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo,
             broadcaster,
             safety_config,
@@ -702,7 +706,7 @@ mod tests {
             Arc::clone(&adapter) as Arc<dyn OrderAdapter>,
         );
         let manager = OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo,
             broadcaster,
             cfg,
@@ -731,7 +735,7 @@ mod tests {
         let repo = Arc::new(FakeOrderRepository::new());
         let adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
         let manager = OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo.clone(),
             broadcaster,
             cfg,
@@ -758,7 +762,7 @@ mod tests {
         let repo = Arc::new(FakeOrderRepository::new());
         let adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
         let manager = OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo.clone(),
             broadcaster,
             cfg,
@@ -859,7 +863,7 @@ mod tests {
         adapters.insert("tabdeal".to_string(), Arc::new(adapter));
 
         let manager = OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo,
             broadcaster,
             cfg,
@@ -885,7 +889,7 @@ mod tests {
         adapters.insert("tabdeal".to_string(), Arc::new(adapter));
 
         let manager = OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo.clone(),
             broadcaster,
             cfg,
@@ -917,7 +921,7 @@ mod tests {
         adapters.insert("tabdeal".to_string(), Arc::new(adapter));
 
         let manager = OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo.clone(),
             broadcaster,
             cfg,
@@ -943,7 +947,7 @@ mod tests {
         adapters.insert("tabdeal".to_string(), Arc::new(adapter));
 
         let manager = OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo,
             broadcaster,
             cfg,
@@ -989,7 +993,7 @@ mod tests {
         adapters.insert("tabdeal".to_string(), Arc::new(adapter));
 
         let manager = Arc::new(OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo,
             broadcaster,
             cfg,
@@ -1041,7 +1045,7 @@ mod tests {
         adapters.insert("tabdeal".to_string(), Arc::new(adapter));
 
         let manager = OrderManager::with_poll_interval(
-            Arc::new(adapters),
+            Arc::new(RwLock::new(adapters)),
             repo,
             broadcaster,
             cfg,

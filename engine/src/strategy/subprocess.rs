@@ -459,7 +459,7 @@ for line in sys.stdin:
         let repo = Arc::new(FakeOrderRepository::new());
         let adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
         let manager = Arc::new(OrderManager::new(
-            Arc::new(adapters),
+            Arc::new(tokio::sync::RwLock::new(adapters)),
             repo.clone(),
             tx.clone(),
             cfg,

@@ -19,8 +19,13 @@ pub struct Claims {
 /// Exempt:
 /// - `GET /v1/check/health`
 /// - `GET /v1/exchanges`  (public exchange list)
+/// - `POST /v1/auth/token`   (login — cannot require a token to get a token)
+/// - `POST /v1/auth/refresh` (refresh — validated inside the handler to allow expired tokens)
 fn is_exempt(path: &str, method: &Method) -> bool {
-    path == "/v1/check/health" || (path == "/v1/exchanges" && method == Method::GET)
+    path == "/v1/check/health"
+        || (path == "/v1/exchanges" && method == Method::GET)
+        || path == "/v1/auth/token"
+        || path == "/v1/auth/refresh"
 }
 
 /// Extracts the Bearer token from the Authorization header.
@@ -34,6 +39,17 @@ pub fn validate_jwt(token: &str, secret: &str) -> Result<Claims, String> {
     let key = DecodingKey::from_secret(secret.as_bytes());
     let mut validation = Validation::default();
     validation.leeway = 0;
+    decode::<Claims>(token, &key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| e.to_string())
+}
+
+/// Validates an HS256 JWT, ignoring token expiry.
+/// Used by the refresh endpoint so a recently-expired token can still be renewed.
+pub fn validate_jwt_allow_expired(token: &str, secret: &str) -> Result<Claims, String> {
+    let key = DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = Validation::default();
+    validation.validate_exp = false;
     decode::<Claims>(token, &key, &validation)
         .map(|data| data.claims)
         .map_err(|e| e.to_string())
@@ -183,5 +199,34 @@ mod tests {
             "/v1/exchanges/futures/start_kline_symbol_ticker",
             &Method::POST
         ));
+    }
+
+    #[test]
+    fn auth_token_path_is_exempt() {
+        assert!(is_exempt("/v1/auth/token", &Method::POST));
+    }
+
+    #[test]
+    fn auth_refresh_path_is_exempt() {
+        assert!(is_exempt("/v1/auth/refresh", &Method::POST));
+    }
+
+    #[test]
+    fn validate_jwt_allow_expired_accepts_past_expiry() {
+        let secret = "test_secret";
+        let token = mint_token("user", secret, -1);
+        assert!(
+            validate_jwt_allow_expired(&token, secret).is_ok(),
+            "expired token must pass when expiry check is disabled"
+        );
+    }
+
+    #[test]
+    fn validate_jwt_allow_expired_still_rejects_wrong_secret() {
+        let token = mint_token("user", "correct", 3600);
+        assert!(
+            validate_jwt_allow_expired(&token, "wrong").is_err(),
+            "wrong secret must still fail even with expiry check disabled"
+        );
     }
 }

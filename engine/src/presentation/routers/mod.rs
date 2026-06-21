@@ -1,3 +1,4 @@
+mod auth_router;
 mod backtest_router;
 mod exchange_routers;
 mod health_router;
@@ -15,6 +16,7 @@ pub fn init_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/v1")
             .wrap(from_fn(jwt_middleware))
+            .configure(auth_router::auth_router)
             .configure(health_router::health_router)
             .configure(exchange_routers::exchange_router)
             .configure(registry_router::registry_router)

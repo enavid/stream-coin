@@ -182,20 +182,22 @@ async fn main() -> std::io::Result<()> {
 
     let broadcaster = AppState::new_broadcaster();
 
-    // Order adapters — keyed by exchange name, driven by TABDEAL_API_KEY env var.
-    // Each exchange that needs REST order execution must have a key configured here.
-    // FakeOrderRepository is used until Loop 1d database is wired to orders.
+    // Order adapters are configured at runtime via POST /v1/admin/exchanges/{name}/credentials.
+    // API keys are never read from environment variables — they are set by operators through
+    // the API after startup. Set TABDEAL_API_KEY for convenience in development only.
     let mut order_adapter_map: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
     if let Ok(api_key) = env::var("TABDEAL_API_KEY") {
         order_adapter_map.insert(
             "tabdeal".to_string(),
             Arc::new(TabdealOrderAdapter::new(&api_key)),
         );
-        tracing::info!("tabdeal order adapter loaded");
+        tracing::info!("tabdeal order adapter loaded from env (use API in production)");
     } else {
-        tracing::warn!("TABDEAL_API_KEY not set — tabdeal order placement disabled");
+        tracing::info!(
+            "TABDEAL_API_KEY not set — configure via POST /v1/admin/exchanges/tabdeal/credentials"
+        );
     }
-    let order_adapters = Arc::new(order_adapter_map);
+    let order_adapters = Arc::new(tokio::sync::RwLock::new(order_adapter_map));
 
     let order_repository = Arc::new(FakeOrderRepository::new());
 
@@ -241,6 +243,17 @@ async fn main() -> std::io::Result<()> {
         "order manager starting"
     );
 
+    let admin_credentials = match (env::var("ADMIN_USERNAME"), env::var("ADMIN_PASSWORD")) {
+        (Ok(u), Ok(p)) if !u.is_empty() && !p.is_empty() => {
+            tracing::info!("admin account configured");
+            Some(Arc::new((u, p)))
+        }
+        _ => {
+            tracing::warn!("ADMIN_USERNAME/ADMIN_PASSWORD not set — POST /v1/auth/token disabled");
+            None
+        }
+    };
+
     let order_manager = Arc::new(OrderManager::new(
         order_adapters.clone(),
         order_repository,
@@ -264,6 +277,7 @@ async fn main() -> std::io::Result<()> {
         strategy_repository: None,
         signal_repository: None,
         order_adapters,
+        admin_credentials,
         order_manager: Some(order_manager),
         python_strategy_repository: None,
         candle_repository: None,
