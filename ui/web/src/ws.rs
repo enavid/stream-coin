@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use gloo_net::websocket::futures::WebSocket;
 use gloo_net::websocket::Message;
 
-use ui_core::protocol::PriceMessage;
+use ui_core::protocol::WsEvent;
 use ui_core::state::AppState;
 
 const RECONNECT_DELAY_MS: u32 = 2_000;
@@ -21,11 +21,12 @@ pub async fn connect_and_listen(ws_url: String, mut state: AppState) {
 
             while let Some(msg) = socket.next().await {
                 match msg {
-                    Ok(Message::Text(text)) => {
-                        if let Ok(price) = PriceMessage::parse(&text) {
-                            state.apply_price(&price);
-                        }
-                    }
+                    Ok(Message::Text(text)) => match WsEvent::parse(&text) {
+                        Ok(WsEvent::PriceUpdate(price)) => state.apply_price(&price),
+                        Ok(WsEvent::Signal(signal)) => state.apply_signal(&signal),
+                        Ok(WsEvent::OrderUpdate(order)) => state.apply_order_update(&order),
+                        Ok(WsEvent::Candle(_)) | Err(_) => {}
+                    },
                     Ok(Message::Bytes(_)) => {}
                     Err(_) => break,
                 }

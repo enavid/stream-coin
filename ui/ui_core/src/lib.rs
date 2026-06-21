@@ -8,10 +8,17 @@
 //! business logic should live in the platform crates — only transport.
 
 pub mod api;
+pub mod app_shell;
+pub mod auth;
 pub mod components;
 pub mod dashboard;
 pub mod domain;
+pub mod icons;
+pub mod pages;
 pub mod protocol;
+pub mod router;
 pub mod state;
 
+pub use app_shell::AppShell;
 pub use dashboard::Dashboard;
+pub use router::Route;

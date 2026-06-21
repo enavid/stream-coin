@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>stream-coin</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #080a0f;
+    --surface:   #0f1117;
+    --surface2:  #161b25;
+    --surface3:  #1b2230;
+    --border:    #1e2535;
+    --border2:   #262f42;
+    --accent:    #3b82f6;
+    --accent-glow: rgba(59,130,246,.18);
+    --green:     #22c55e;
+    --green-dim: rgba(34,197,94,.12);
+    --red:       #f43f5e;
+    --red-dim:   rgba(244,63,94,.12);
+    --yellow:    #f59e0b;
+    --yellow-dim:rgba(245,158,11,.12);
+    --purple:    #a855f7;
+    --purple-dim:rgba(168,85,247,.12);
+    --muted:     #3d4d63;
+    --muted2:    #5a6a80;
+    --text:      #cdd8e8;
+    --text-dim:  #7a8fa8;
+    --mono:      'JetBrains Mono','Fira Code','Cascadia Code',monospace;
+    --radius:    12px;
+    --radius-sm: 8px;
+  }
+
+  html, body {
+    min-height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ═══════ APP SHELL ═══════ */
+  #app { display: none; min-height: 100vh; grid-template-columns: 220px 1fr; grid-template-rows: 52px 1fr; }
+  #app.active { display: grid; }
+
+  header.topbar {
+    grid-column: 1 / 3;
+    height: 52px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 700; letter-spacing: -.4px; color: #fff; }
+  .logo-mark {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, #3b82f6 0%, #6d28d9 100%);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; box-shadow: 0 0 20px rgba(59,130,246,.3); flex-shrink: 0;
+  }
+  .header-end { display: flex; align-items: center; gap: 10px; }
+  .ws-pill {
+    display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim);
+    background: var(--surface2); border: 1px solid var(--border); padding: 5px 10px; border-radius: 20px;
+  }
+  .ws-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: blink 2s ease-in-out infinite; }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+  .user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 8px; border-radius: 20px; transition: background .15s; }
+  .user-chip:hover { background: var(--surface2); }
+  .avatar { width: 26px; height: 26px; border-radius: 50%; background: linear-gradient(135deg,#3b82f6,#a855f7); display:flex; align-items:center; justify-content:center; font-size: 11px; font-weight: 700; color:#fff; }
+  .user-meta { display: flex; flex-direction: column; line-height: 1.2; }
+  .user-name { font-size: 12px; font-weight: 600; color: var(--text); }
+  .user-role { font-size: 10px; color: var(--text-dim); }
+  .logout-btn { font-size: 11px; color: var(--muted2); background: transparent; border: 1px solid var(--border2); border-radius: 6px; padding: 5px 9px; cursor: pointer; }
+  .logout-btn:hover { color: var(--red); border-color: var(--red); }
+
+  /* ═══════ SIDEBAR ═══════ */
+  nav.sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 14px 10px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .nav-link {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: var(--radius-sm);
+    color: var(--text-dim); font-size: 13px; font-weight: 500;
+    cursor: pointer; text-decoration: none; transition: background .15s, color .15s;
+    position: relative;
+  }
+  .nav-link .ic { width: 16px; text-align: center; font-size: 14px; }
+  .nav-link:hover { background: var(--surface2); color: var(--text); }
+  .nav-link.active { background: var(--accent-glow); color: var(--accent); }
+  .nav-link.active::before { content:''; position:absolute; left:-10px; top:6px; bottom:6px; width:3px; background:var(--accent); border-radius:2px; }
+  .nav-sep { height: 1px; background: var(--border); margin: 10px 4px; }
+  .nav-label { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted2); padding: 10px 12px 4px; }
+  .nav-badge { margin-left: auto; font-size: 9px; font-weight: 700; background: var(--surface3); color: var(--muted2); padding: 1px 6px; border-radius: 8px; }
+
+  /* ═══════ MAIN CONTENT ═══════ */
+  main.content { padding: 24px 28px 60px; overflow-y: auto; max-width: 1180px; width: 100%; }
+  .view { display: none; }
+  .view.active { display: block; animation: fadein .2s ease; }
+  @keyframes fadein { from { opacity:0; transform: translateY(4px);} to { opacity:1; transform:none; } }
+
+  .page-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+  .page-title { font-size: 20px; font-weight: 800; color: #fff; letter-spacing: -.3px; }
+  .page-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+  .label {
+    font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+    color: var(--muted2); display: block; margin-bottom: 12px;
+  }
+  section.block { margin-bottom: 28px; }
+
+  .btn {
+    border: none; border-radius: var(--radius-sm); padding: 9px 16px;
+    font-size: 12.5px; font-weight: 700; cursor: pointer; transition: opacity .15s, background .15s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { opacity: .9; }
+  .btn-ghost { background: transparent; border: 1px solid var(--border2); color: var(--text-dim); }
+  .btn-ghost:hover { color: var(--text); border-color: var(--muted2); }
+  .btn-danger { background: var(--red-dim); color: var(--red); border: 1px solid rgba(244,63,94,.25); }
+  .btn-danger:hover { background: rgba(244,63,94,.2); }
+  .btn-sm { padding: 5px 10px; font-size: 11px; }
+
+  .card { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+
+  .finput, select.finput, textarea.finput {
+    width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 9px 11px; color: var(--text); font-size: 12.5px; outline: none; transition: border-color .15s; font-family: inherit;
+  }
+  .finput:focus, textarea.finput:focus { border-color: var(--accent); }
+  .finput::placeholder { color: var(--muted); }
+  select.finput {
+    cursor: pointer; -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235a6a80'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center; padding-right: 26px;
+  }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field label { font-size: 11px; color: var(--text-dim); font-weight: 600; }
+  .field-row { display: grid; gap: 10px; }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .grid-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+
+  .pill { font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 20px; white-space: nowrap; display: inline-flex; align-items:center; gap:4px; }
+  .pill-green { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,.25); }
+  .pill-red { background: var(--red-dim); color: var(--red); border: 1px solid rgba(244,63,94,.25); }
+  .pill-yellow { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(245,158,11,.25); }
+  .pill-purple { background: var(--purple-dim); color: var(--purple); border: 1px solid rgba(168,85,247,.25); }
+  .pill-blue { background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(59,130,246,.25); }
+  .pill-muted { background: var(--surface3); color: var(--muted2); border: 1px solid var(--border2); }
+
+  table { width: 100%; border-collapse: collapse; }
+  thead tr { background: var(--surface3); }
+  th { font-size: 10px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--muted2); padding: 10px 14px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--border); }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
+  tbody tr:hover { background: var(--surface3); }
+  tbody tr:last-child { border-bottom: none; }
+  td { padding: 10px 14px; font-size: 12.5px; white-space: nowrap; }
+  .mono { font-family: var(--mono); }
+  .table-wrap { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; overflow-x: auto; }
+
+  .stat-row { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }
+  .stat-card { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+  .stat-card .stat-label { font-size: 10px; color: var(--muted2); text-transform: uppercase; letter-spacing: .6px; font-weight: 700; margin-bottom: 6px; }
+  .stat-card .stat-value { font-size: 19px; font-weight: 800; font-family: var(--mono); }
+  .stat-pos { color: var(--green); }
+  .stat-neg { color: var(--red); }
+
+  /* ── ticker cards (dashboard) ── */
+  .cards-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+  .tcard { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; position: relative; }
+  .tcard-top { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; gap: 6px; }
+  .tcard-pair { font-size: 15px; font-weight: 800; font-family: var(--mono); letter-spacing: -.4px; color: #fff; }
+  .tcard-exch { font-size: 10px; font-weight: 600; color: var(--accent); background: var(--accent-glow); padding: 3px 7px; border-radius: 5px; border: 1px solid rgba(59,130,246,.2); white-space: nowrap; flex-shrink: 0; }
+  .tcard-prices { display: flex; flex-direction: column; gap: 7px; margin-bottom: 12px; }
+  .price-line { display: flex; justify-content: space-between; align-items: center; }
+  .price-line .lbl { font-size: 11px; color: var(--text-dim); font-weight: 500; }
+  .price-line .val { font-family: var(--mono); font-size: 13px; font-weight: 700; }
+  .val.bid { color: var(--green); } .val.ask { color: var(--red); }
+  .tcard-divider { height: 1px; background: var(--border); margin-bottom: 10px; }
+  .spread-line { display: flex; justify-content: space-between; align-items: center; }
+  .spread-line .lbl { font-size: 10px; color: var(--muted2); }
+  .spread-badge { font-family: var(--mono); font-size: 11px; font-weight: 600; background: var(--yellow-dim); color: var(--yellow); padding: 2px 7px; border-radius: 4px; }
+  .stop-x { position: absolute; top: 10px; right: 10px; width: 20px; height: 20px; border-radius: 50%; background: transparent; border: 1px solid var(--border2); color: var(--muted2); font-size: 9px; cursor: pointer; display:flex; align-items:center; justify-content:center; }
+  .stop-x:hover { background: rgba(244,63,94,.12); color: var(--red); border-color: var(--red); }
+  .add-card { background: transparent; border: 1.5px dashed var(--border2); border-radius: var(--radius); cursor: pointer; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; color: var(--muted2); font-size: 12px; min-height: 132px; }
+  .add-card:hover { border-color: var(--accent); color: var(--accent); }
+  .add-icon { font-size: 20px; }
+
+  /* ── strategy cards ── */
+  .strat-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); gap: 12px; }
+  .strat-row:last-child { border-bottom: none; }
+  .strat-main { display: flex; align-items: center; gap: 12px; }
+  .strat-icon { width: 34px; height: 34px; border-radius: 9px; display:flex; align-items:center; justify-content:center; font-size: 15px; flex-shrink:0; }
+  .strat-icon.builtin { background: var(--accent-glow); }
+  .strat-icon.python { background: var(--yellow-dim); }
+  .strat-name { font-weight: 700; font-size: 13px; color: #fff; }
+  .strat-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .strat-actions { display: flex; gap: 8px; align-items: center; }
+
+  /* ── code editor ── */
+  .code-editor {
+    width: 100%; min-height: 260px; background: #0a0c12; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); color: #d4e3f5; font-family: var(--mono); font-size: 12.5px;
+    line-height: 1.6; padding: 14px; resize: vertical; outline: none;
+  }
+  .code-editor:focus { border-color: var(--accent); }
+  .editor-toolbar { display: flex; align-items: center; justify-content: space-between; background: var(--surface3); border: 1px solid var(--border); border-bottom: none; border-radius: var(--radius-sm) var(--radius-sm) 0 0; padding: 7px 12px; }
+  .editor-toolbar .filename { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+  .code-editor { border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+  .dot-row { display: flex; gap: 5px; }
+  .dot-row span { width: 9px; height: 9px; border-radius: 50%; }
+
+  /* ── login screen ── */
+  #login-screen { display: flex; min-height: 100vh; align-items: center; justify-content: center; padding: 20px; }
+  .login-card { width: 360px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px 28px; }
+  .login-logo { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 24px; }
+  .login-logo .logo-mark { width: 44px; height: 44px; border-radius: 12px; font-size: 20px; }
+  .login-logo .title { font-size: 16px; font-weight: 800; color: #fff; }
+  .login-logo .sub { font-size: 11px; color: var(--text-dim); }
+  .login-card form { display: flex; flex-direction: column; gap: 12px; }
+  .login-card .btn-primary { width: 100%; justify-content: center; padding: 10px; margin-top: 4px; }
+  .switch-link { text-align: center; margin-top: 16px; font-size: 11px; color: var(--muted2); }
+  .switch-link a { color: var(--accent); cursor: pointer; text-decoration: none; }
+
+  /* ── live feed ── */
+  .feed-scroll { max-height: 340px; overflow-y: auto; }
+
+  @media (max-width: 860px) {
+    #app.active { grid-template-columns: 1fr; }
+    nav.sidebar { display: none; }
+    .stat-row { grid-template-columns: repeat(2,1fr); }
+    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ════════════════════════ LOGIN SCREEN ════════════════════════ -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="logo-mark">⚡</div>
+      <div class="title">stream-coin</div>
+      <div class="sub">sign in to continue</div>
+    </div>
+    <form onsubmit="event.preventDefault(); showApp();">
+      <div class="field">
+        <label>Username</label>
+        <input class="finput" placeholder="admin" value="admin" />
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input class="finput" type="password" placeholder="••••••••" value="••••••••" />
+      </div>
+      <button class="btn btn-primary" type="submit">Sign in</button>
+    </form>
+    <div class="switch-link">POST /v1/auth/token · JWT stored in session</div>
+  </div>
+</div>
+
+<!-- ════════════════════════ APP SHELL ════════════════════════ -->
+<div id="app">
+  <header class="topbar">
+    <div class="logo"><div class="logo-mark">⚡</div>stream-coin</div>
+    <div class="header-end">
+      <div class="ws-pill"><div class="ws-dot"></div><span>Connected</span></div>
+      <div class="user-chip" onclick="showLogin()">
+        <div class="avatar">AD</div>
+        <div class="user-meta">
+          <span class="user-name">admin</span>
+          <span class="user-role">admin</span>
+        </div>
+      </div>
+      <button class="logout-btn" onclick="showLogin()">Logout</button>
+    </div>
+  </header>
+
+  <nav class="sidebar">
+    <a class="nav-link active" data-view="dashboard" onclick="go('dashboard', this)"><span class="ic">▦</span>Dashboard</a>
+    <a class="nav-link" data-view="strategies" onclick="go('strategies', this)"><span class="ic">⚙</span>Strategies<span class="nav-badge">2</span></a>
+    <a class="nav-link" data-view="backtest" onclick="go('backtest', this)"><span class="ic">⏪</span>Backtest</a>
+    <a class="nav-link" data-view="orders" onclick="go('orders', this)"><span class="ic">▤</span>Orders</a>
+    <div class="nav-sep"></div>
+    <div class="nav-label">Admin</div>
+    <a class="nav-link" data-view="admin" onclick="go('admin', this)"><span class="ic">◎</span>Users &amp; Roles</a>
+    <a class="nav-link" data-view="settings" onclick="go('settings', this)"><span class="ic">⛁</span>Settings</a>
+  </nav>
+
+  <main class="content">
+
+    <!-- ═══════ DASHBOARD ═══════ -->
+    <div class="view active" id="view-dashboard">
+      <div class="page-head">
+        <div>
+          <div class="page-title">Dashboard</div>
+          <div class="page-sub">Live price feed across exchanges</div>
+        </div>
+      </div>
+
+      <section class="block">
+        <span class="label">Active Tickers</span>
+        <div class="cards-row">
+          <div class="tcard">
+            <button class="stop-x">✕</button>
+            <div class="tcard-top"><div class="tcard-pair">USDT/IRT</div><div class="tcard-exch">tabdeal</div></div>
+            <div class="tcard-prices">
+              <div class="price-line"><span class="lbl">Bid</span><span class="val bid">92,815</span></div>
+              <div class="price-line"><span class="lbl">Ask</span><span class="val ask">92,936</span></div>
+            </div>
+            <div class="tcard-divider"></div>
+            <div class="spread-line"><span class="lbl">Spread</span><span class="spread-badge">121</span></div>
+          </div>
+          <div class="tcard">
+            <button class="stop-x">✕</button>
+            <div class="tcard-top"><div class="tcard-pair">USDT/IRT</div><div class="tcard-exch">hitobit</div></div>
+            <div class="tcard-prices">
+              <div class="price-line"><span class="lbl">Bid</span><span class="val bid">92,740</span></div>
+              <div class="price-line"><span class="lbl">Ask</span><span class="val ask">92,860</span></div>
+            </div>
+            <div class="tcard-divider"></div>
+            <div class="spread-line"><span class="lbl">Spread</span><span class="spread-badge">120</span></div>
+          </div>
+          <div class="tcard">
+            <button class="stop-x">✕</button>
+            <div class="tcard-top"><div class="tcard-pair">BTC/IRT</div><div class="tcard-exch">tabdeal</div></div>
+            <div class="tcard-prices">
+              <div class="price-line"><span class="lbl">Bid</span><span class="val bid">4.218B</span></div>
+              <div class="price-line"><span class="lbl">Ask</span><span class="val ask">4.221B</span></div>
+            </div>
+            <div class="tcard-divider"></div>
+            <div class="spread-line"><span class="lbl">Spread</span><span class="spread-badge">2.5M</span></div>
+          </div>
+          <div class="add-card"><div class="add-icon">+</div><div>Add Ticker</div></div>
+        </div>
+      </section>
+
+      <section class="block">
+        <span class="label">Live Feed</span>
+        <div class="table-wrap feed-scroll">
+          <table>
+            <thead><tr><th>Time</th><th>Exchange</th><th>Pair</th><th>Bid</th><th>Ask</th><th>Spread</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">10:26:33</td><td class="mono pill-blue" style="display:inline-block;border-radius:4px;padding:2px 6px;">tabdeal</td><td class="mono">BTC/IRT</td><td class="mono" style="color:var(--green)">4.218B</td><td class="mono" style="color:var(--red)">4.221B</td><td class="mono" style="color:var(--yellow)">2.1M</td></tr>
+              <tr><td class="mono">10:26:32</td><td class="mono">hitobit</td><td class="mono">USDT/IRT</td><td class="mono" style="color:var(--green)">92,740</td><td class="mono" style="color:var(--red)">92,860</td><td class="mono" style="color:var(--yellow)">120</td></tr>
+              <tr><td class="mono">10:26:31</td><td class="mono">tabdeal</td><td class="mono">USDT/IRT</td><td class="mono" style="color:var(--green)">92,815</td><td class="mono" style="color:var(--red)">92,936</td><td class="mono" style="color:var(--yellow)">121</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══════ STRATEGIES ═══════ -->
+    <div class="view" id="view-strategies">
+      <div class="page-head">
+        <div>
+          <div class="page-title">Strategies</div>
+          <div class="page-sub">Built-in Rust strategies + your own Python code</div>
+        </div>
+        <button class="btn btn-primary">+ New Python Strategy</button>
+      </div>
+
+      <section class="block card" style="padding:0;">
+        <div class="strat-row">
+          <div class="strat-main">
+            <div class="strat-icon builtin">⚡</div>
+            <div>
+              <div class="strat-name">SpreadThreshold <span class="pill pill-blue">built-in</span></div>
+              <div class="strat-meta">tabdeal · USDT/IRT · threshold = 150 IRT</div>
+            </div>
+          </div>
+          <div class="strat-actions">
+            <span class="pill pill-green">● running</span>
+            <button class="btn btn-ghost btn-sm">Stop</button>
+          </div>
+        </div>
+        <div class="strat-row">
+          <div class="strat-main">
+            <div class="strat-icon python">🐍</div>
+            <div>
+              <div class="strat-name">btc_momentum_v2 <span class="pill pill-yellow">python</span></div>
+              <div class="strat-meta">tabdeal · BTC/IRT · seccomp subprocess · pid 28471</div>
+            </div>
+          </div>
+          <div class="strat-actions">
+            <span class="pill pill-green">● running</span>
+            <button class="btn btn-ghost btn-sm">Stop</button>
+          </div>
+        </div>
+        <div class="strat-row">
+          <div class="strat-main">
+            <div class="strat-icon builtin">⚡</div>
+            <div>
+              <div class="strat-name">PriceDelta <span class="pill pill-blue">built-in</span></div>
+              <div class="strat-meta">hitobit · USDT/IRT · n=20 candles</div>
+            </div>
+          </div>
+          <div class="strat-actions">
+            <span class="pill pill-muted">○ stopped</span>
+            <button class="btn btn-primary btn-sm">Start</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="block">
+        <span class="label">New Python Strategy</span>
+        <div class="card">
+          <div class="field-row grid-2" style="margin-bottom:14px;">
+            <div class="field"><label>Strategy name</label><input class="finput" placeholder="my_arb_strategy" value="eth_breakout_v1" /></div>
+            <div class="field"><label>Pair</label>
+              <select class="finput"><option>tabdeal · USDT/IRT</option><option>hitobit · USDT/IRT</option><option>tabdeal · BTC/IRT</option></select>
+            </div>
+          </div>
+          <div class="field" style="margin-bottom:14px;">
+            <div class="editor-toolbar">
+              <div class="dot-row"><span style="background:#f43f5e"></span><span style="background:#f59e0b"></span><span style="background:#22c55e"></span></div>
+              <span class="filename">strategy.py</span>
+            </div>
+            <textarea class="code-editor" spellcheck="false">from stream_coin import Strategy, Action
+
+class EthBreakout(Strategy):
+    def on_candle(self, candle):
+        if candle.close > candle.open * 1.02:
+            self.signal(Action.BUY, confidence=0.9)
+        elif candle.close < candle.open * 0.98:
+            self.signal(Action.SELL, confidence=0.85)
+
+EthBreakout().run()</textarea>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-primary">Deploy strategy</button>
+            <button class="btn btn-ghost">Run backtest first</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="block">
+        <span class="label">Live Signals</span>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Strategy</th><th>Pair</th><th>Action</th><th>Confidence</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">10:31:02</td><td>btc_momentum_v2</td><td class="mono">BTC/IRT</td><td><span class="pill pill-green">BUY</span></td><td class="mono">0.91</td></tr>
+              <tr><td class="mono">10:30:47</td><td>SpreadThreshold</td><td class="mono">USDT/IRT</td><td><span class="pill pill-red">SELL</span></td><td class="mono">0.76</td></tr>
+              <tr><td class="mono">10:30:12</td><td>btc_momentum_v2</td><td class="mono">BTC/IRT</td><td><span class="pill pill-muted">HOLD</span></td><td class="mono">0.42</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══════ BACKTEST ═══════ -->
+    <div class="view" id="view-backtest">
+      <div class="page-head">
+        <div>
+          <div class="page-title">Backtest</div>
+          <div class="page-sub">Replay historical candles through the same strategy code</div>
+        </div>
+      </div>
+
+      <section class="block card">
+        <div class="field-row grid-4" style="margin-bottom:12px;">
+          <div class="field"><label>Strategy</label><select class="finput"><option>eth_breakout_v1</option><option>btc_momentum_v2</option><option>SpreadThreshold</option></select></div>
+          <div class="field"><label>Exchange</label><select class="finput"><option>tabdeal</option><option>hitobit</option></select></div>
+          <div class="field"><label>Pair</label><select class="finput"><option>USDT/IRT</option><option>BTC/IRT</option></select></div>
+          <div class="field"><label>Interval</label><select class="finput"><option>1m</option><option>5m</option><option>15m</option><option>1h</option></select></div>
+        </div>
+        <div class="field-row grid-2" style="margin-bottom:14px;">
+          <div class="field"><label>From</label><input class="finput" type="date" value="2026-05-01" /></div>
+          <div class="field"><label>To</label><input class="finput" type="date" value="2026-06-21" /></div>
+        </div>
+        <button class="btn btn-primary">Run backtest</button>
+      </section>
+
+      <section class="block">
+        <span class="label">Results</span>
+        <div class="stat-row" style="margin-bottom:14px;">
+          <div class="stat-card"><div class="stat-label">Total Return</div><div class="stat-value stat-pos">+14.6%</div></div>
+          <div class="stat-card"><div class="stat-label">Max Drawdown</div><div class="stat-value stat-neg">-6.2%</div></div>
+          <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value">38</div></div>
+          <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value">63%</div></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Side</th><th>Qty</th><th>Fill Price</th><th>PnL</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">2026-06-18 14:02</td><td><span class="pill pill-green">BUY</span></td><td class="mono">0.004</td><td class="mono">4.218B</td><td class="mono stat-pos">+182,400</td></tr>
+              <tr><td class="mono">2026-06-17 09:41</td><td><span class="pill pill-red">SELL</span></td><td class="mono">0.004</td><td class="mono">4.195B</td><td class="mono stat-neg">-61,200</td></tr>
+              <tr><td class="mono">2026-06-15 22:18</td><td><span class="pill pill-green">BUY</span></td><td class="mono">0.006</td><td class="mono">4.140B</td><td class="mono stat-pos">+340,800</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══════ ORDERS ═══════ -->
+    <div class="view" id="view-orders">
+      <div class="page-head">
+        <div>
+          <div class="page-title">Orders</div>
+          <div class="page-sub">Manual orders + live fills from strategies</div>
+        </div>
+        <button class="btn btn-danger">Reset circuit breaker</button>
+      </div>
+
+      <section class="block card">
+        <span class="label" style="margin-bottom:14px;">Place Order</span>
+        <div class="field-row grid-4">
+          <div class="field"><label>Exchange</label><select class="finput"><option>tabdeal</option><option>hitobit</option></select></div>
+          <div class="field"><label>Pair</label><select class="finput"><option>USDT/IRT</option><option>BTC/IRT</option></select></div>
+          <div class="field"><label>Side</label><select class="finput"><option>buy</option><option>sell</option></select></div>
+          <div class="field"><label>Type</label><select class="finput"><option>market</option><option>limit</option></select></div>
+        </div>
+        <div class="field-row grid-2" style="margin-top:10px; margin-bottom:14px;">
+          <div class="field"><label>Quantity</label><input class="finput" placeholder="0.01" /></div>
+          <div class="field"><label>Price (limit only)</label><input class="finput" placeholder="optional" /></div>
+        </div>
+        <button class="btn btn-primary">Place order</button>
+      </section>
+
+      <section class="block">
+        <span class="label">Order History</span>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Exchange</th><th>Pair</th><th>Side</th><th>Qty</th><th>Status</th><th>Fill Price</th><th>Strategy</th><th></th></tr></thead>
+            <tbody>
+              <tr><td class="mono">10:31:05</td><td>tabdeal</td><td class="mono">BTC/IRT</td><td><span class="pill pill-green">buy</span></td><td class="mono">0.004</td><td><span class="pill pill-green">● filled</span></td><td class="mono">4.219B</td><td>btc_momentum_v2</td><td><button class="btn btn-ghost btn-sm" disabled>Cancel</button></td></tr>
+              <tr><td class="mono">10:28:40</td><td>hitobit</td><td class="mono">USDT/IRT</td><td><span class="pill pill-red">sell</span></td><td class="mono">120</td><td><span class="pill pill-yellow">● open</span></td><td class="mono">—</td><td>manual</td><td><button class="btn btn-danger btn-sm">Cancel</button></td></tr>
+              <tr><td class="mono">09:55:11</td><td>tabdeal</td><td class="mono">USDT/IRT</td><td><span class="pill pill-green">buy</span></td><td class="mono">50</td><td><span class="pill pill-muted">○ cancelled</span></td><td class="mono">—</td><td>manual</td><td><button class="btn btn-ghost btn-sm" disabled>Cancel</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══════ ADMIN ═══════ -->
+    <div class="view" id="view-admin">
+      <div class="page-head">
+        <div>
+          <div class="page-title">Users &amp; Roles</div>
+          <div class="page-sub">Manage accounts, role assignment, and the permission catalog</div>
+        </div>
+        <button class="btn btn-primary">+ New User</button>
+      </div>
+
+      <section class="block">
+        <span class="label">Users</span>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Username</th><th>Roles</th><th>Created</th><th></th></tr></thead>
+            <tbody>
+              <tr><td><b>admin</b></td><td><span class="pill pill-blue">admin</span></td><td class="mono">2026-06-01</td><td><button class="btn btn-ghost btn-sm">Edit roles</button></td></tr>
+              <tr><td>navid_trader</td><td><span class="pill pill-purple">trader</span></td><td class="mono">2026-06-15</td><td><button class="btn btn-ghost btn-sm">Edit roles</button></td></tr>
+              <tr><td>readonly_guest</td><td><span class="pill pill-muted">viewer</span></td><td class="mono">2026-06-20</td><td><button class="btn btn-ghost btn-sm">Edit roles</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="block">
+        <span class="label">Roles &amp; Permissions</span>
+        <div class="field-row grid-3">
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <span class="pill pill-blue">admin</span><span class="mono" style="font-size:11px; color:var(--muted2)">1 user</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+              <span class="pill pill-muted">users.manage</span><span class="pill pill-muted">roles.manage</span>
+              <span class="pill pill-muted">exchanges.manage</span><span class="pill pill-muted">orders.manage</span>
+              <span class="pill pill-muted">exchange_credentials.write</span>
+            </div>
+          </div>
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <span class="pill pill-purple">trader</span><span class="mono" style="font-size:11px; color:var(--muted2)">1 user</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+              <span class="pill pill-muted">orders.manage</span><span class="pill pill-muted">exchange_credentials.write</span>
+            </div>
+          </div>
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <span class="pill pill-muted">viewer</span><span class="mono" style="font-size:11px; color:var(--muted2)">1 user</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+              <span class="mono" style="font-size:11px; color:var(--muted2)">read-only — no grants</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══════ SETTINGS ═══════ -->
+    <div class="view" id="view-settings">
+      <div class="page-head">
+        <div>
+          <div class="page-title">Settings</div>
+          <div class="page-sub">Your own exchange API keys — encrypted at rest, never shown again</div>
+        </div>
+      </div>
+
+      <section class="block">
+        <span class="label">Configured Exchanges</span>
+        <div class="field-row grid-2" style="margin-bottom:18px;">
+          <div class="card" style="display:flex; align-items:center; justify-content:space-between;">
+            <div><div style="font-weight:700; color:#fff;">tabdeal</div><div class="mono" style="font-size:11px; color:var(--muted2); margin-top:4px;">configured · 2026-06-10</div></div>
+            <button class="btn btn-danger btn-sm">Remove</button>
+          </div>
+          <div class="card" style="display:flex; align-items:center; justify-content:space-between; opacity:.6;">
+            <div><div style="font-weight:700; color:#fff;">hitobit</div><div class="mono" style="font-size:11px; color:var(--muted2); margin-top:4px;">not configured</div></div>
+            <button class="btn btn-ghost btn-sm">Add keys</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="block card">
+        <span class="label" style="margin-bottom:14px;">Add / Update Credentials</span>
+        <div class="field-row grid-2" style="margin-bottom:10px;">
+          <div class="field"><label>Exchange</label><select class="finput"><option>hitobit</option><option>tabdeal</option></select></div>
+          <div class="field"><label>API Key</label><input class="finput" placeholder="api key" /></div>
+        </div>
+        <div class="field" style="margin-bottom:14px;"><label>Secret</label><input class="finput" type="password" placeholder="secret" /></div>
+        <button class="btn btn-primary">Save credentials</button>
+      </section>
+    </div>
+
+  </main>
+</div>
+
+<script>
+function showApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').classList.add('active');
+}
+function showLogin() {
+  document.getElementById('app').classList.remove('active');
+  document.getElementById('login-screen').style.display = 'flex';
+}
+function go(name, el) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-' + name).classList.add('active');
+  document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
+  el.classList.add('active');
+}
+</script>
+</body>
+</html>
+</content>

@@ -2877,6 +2877,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 name = "ui_core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "dioxus",
  "reqwest",
  "serde",
@@ -3086,6 +3087,8 @@ dependencies = [
  "gloo-net",
  "gloo-timers",
  "ui_core",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

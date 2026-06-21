@@ -39,6 +39,57 @@ impl From<&PriceMessage> for Ticker {
     }
 }
 
+/// Mirrors the backend's `SignalPayload`
+/// (`engine/src/presentation/shared/wire_message.rs`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignalMessage {
+    pub signal_id: String,
+    pub strategy_id: String,
+    pub exchange: String,
+    pub pair: String,
+    pub action: String,
+    pub confidence: f64,
+    pub timestamp: String,
+}
+
+/// Mirrors the backend's `OrderUpdatePayload`. `quantity`/`fill_price` stay
+/// `String` — the backend serializes `Decimal` as a string to avoid float
+/// precision loss, and this UI never reparses them as `f64`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderUpdateMessage {
+    pub order_id: String,
+    pub client_order_id: String,
+    pub exchange: String,
+    pub pair: String,
+    pub market_type: String,
+    pub side: String,
+    pub status: String,
+    pub quantity: String,
+    pub fill_price: Option<String>,
+    pub strategy_id: Option<String>,
+    pub timestamp: String,
+}
+
+/// Every variant of the backend's `WsMessage` that this UI cares about.
+/// `Candle` is received but not yet consumed by anything — kept as an
+/// opaque JSON value so an unrecognized-but-valid candle frame doesn't
+/// fail parsing, matching the backend's own precedent of tolerating
+/// message types a given consumer doesn't act on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WsEvent {
+    PriceUpdate(PriceMessage),
+    Signal(SignalMessage),
+    OrderUpdate(OrderUpdateMessage),
+    Candle(serde_json::Value),
+}
+
+impl WsEvent {
+    pub fn parse(raw: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(raw)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +198,82 @@ mod tests {
             PriceMessage::parse(json).is_err(),
             "unknown type 'order_book' must be rejected"
         );
+    }
+
+    // --- WsEvent tests ---
+
+    #[test]
+    fn ws_event_parse_decodes_price_update() {
+        let event = WsEvent::parse(sample_json()).unwrap();
+        assert_eq!(
+            event,
+            WsEvent::PriceUpdate(PriceMessage::parse(sample_json()).unwrap())
+        );
+    }
+
+    #[test]
+    fn ws_event_parse_decodes_signal() {
+        let json = r#"{"type":"signal","signal_id":"sig-1","strategy_id":"spread_threshold","exchange":"tabdeal","pair":"USDT/IRT","action":"buy","confidence":0.85,"timestamp":"2026-06-21T00:00:00Z"}"#;
+        let event = WsEvent::parse(json).unwrap();
+        assert_eq!(
+            event,
+            WsEvent::Signal(SignalMessage {
+                signal_id: "sig-1".to_string(),
+                strategy_id: "spread_threshold".to_string(),
+                exchange: "tabdeal".to_string(),
+                pair: "USDT/IRT".to_string(),
+                action: "buy".to_string(),
+                confidence: 0.85,
+                timestamp: "2026-06-21T00:00:00Z".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn ws_event_parse_decodes_order_update() {
+        let json = r#"{"type":"order_update","order_id":"ord-1","client_order_id":"cli-1","exchange":"tabdeal","pair":"USDT/IRT","market_type":"spot","side":"buy","status":"open","quantity":"100","fill_price":null,"strategy_id":null,"timestamp":"2026-06-21T00:00:00Z"}"#;
+        let event = WsEvent::parse(json).unwrap();
+        assert_eq!(
+            event,
+            WsEvent::OrderUpdate(OrderUpdateMessage {
+                order_id: "ord-1".to_string(),
+                client_order_id: "cli-1".to_string(),
+                exchange: "tabdeal".to_string(),
+                pair: "USDT/IRT".to_string(),
+                market_type: "spot".to_string(),
+                side: "buy".to_string(),
+                status: "open".to_string(),
+                quantity: "100".to_string(),
+                fill_price: None,
+                strategy_id: None,
+                timestamp: "2026-06-21T00:00:00Z".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn ws_event_parse_keeps_quantity_as_string_not_number() {
+        let json = r#"{"type":"order_update","order_id":"ord-1","client_order_id":"cli-1","exchange":"tabdeal","pair":"USDT/IRT","market_type":"spot","side":"buy","status":"filled","quantity":"0.004","fill_price":"4218500000","strategy_id":null,"timestamp":"2026-06-21T00:00:00Z"}"#;
+        match WsEvent::parse(json).unwrap() {
+            WsEvent::OrderUpdate(msg) => {
+                assert_eq!(msg.quantity, "0.004");
+                assert_eq!(msg.fill_price, Some("4218500000".to_string()));
+            }
+            other => panic!("expected OrderUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ws_event_parse_accepts_candle_without_erroring() {
+        let json = r#"{"type":"candle","exchange":"tabdeal","pair":"USDT/IRT","interval":"1m","time":"2026-06-21T00:00:00Z","open":58000,"high":58500,"low":57800,"close":58200,"volume":0}"#;
+        let event = WsEvent::parse(json).unwrap();
+        assert!(matches!(event, WsEvent::Candle(_)));
+    }
+
+    #[test]
+    fn ws_event_parse_rejects_unknown_type() {
+        let json = r#"{"type":"order_book","exchange":"tabdeal"}"#;
+        assert!(WsEvent::parse(json).is_err());
     }
 
     #[test]

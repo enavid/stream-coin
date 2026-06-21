@@ -22,9 +22,9 @@ pub fn LiveFeed(rows: Vec<FeedRow>) -> Element {
                             }
                         }
                         tbody {
-                            for (i, row) in rows.iter().enumerate() {
+                            for row in rows.iter() {
                                 tr {
-                                    key: "{i}-{row.exchange}-{row.pair}",
+                                    key: "{row.key}",
                                     td { class: "td-time", "{row.time}" }
                                     td { class: "td-exch", "{row.exchange}" }
                                     td { class: "td-pair", "{row.pair}" }
