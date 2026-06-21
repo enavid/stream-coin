@@ -2,10 +2,10 @@
 # stream-coin — Master Compose File
 #
 # Usage:
-#   docker compose up -d      # brings up postgres + redis + kafka (the only active includes)
+#   docker compose up -d      # brings up postgres + redis + kafka + kafka-ui
 #
-# schema-registry / kafka-connect / rest-proxy / flink / kafka-ui / nginx are all
-# disabled below (unused infra — see "DISABLED SERVICES" comments). Re-enable as needed.
+# schema-registry / kafka-connect / rest-proxy / flink / nginx are all disabled below
+# (unused infra — see "DISABLED SERVICES" comments). Re-enable as needed.
 #
 # Kafka connection for app containers:  kafka:9094  (DOCKER plaintext)
 # Kafka connection from host (dev):     localhost:9092  (HOST plaintext)
@@ -28,6 +28,8 @@ include:
     project_directory: .
   - path: compose/kafka.yml
     project_directory: .
+  - path: compose/ui.yml
+    project_directory: .
   # --- DISABLED SERVICES (uncomment the block below when needed) ---
   #
   # schema-registry + kafka-connect + rest-proxy: needed for Loop 4c (Protobuf schemas).
@@ -46,13 +48,10 @@ include:
   # - path: compose/flink.yml
   #   project_directory: .
   #
-  # ui (kafka-ui dashboard) + proxy (nginx): both only exist to expose dashboards for
-  # schema-registry/kafka-connect/flink, which are disabled above. nginx's depends_on
-  # also names all three — re-enabling either file without re-enabling those services
-  # breaks `docker compose up`. Re-enable together with whichever services they front.
+  # proxy (nginx): fronts kafka-ui (and schema-registry/kafka-connect/flink dashboards
+  # when those are enabled too). nginx's depends_on names all of them — re-enable only
+  # once every service it fronts is also enabled.
   #
-  # - path: compose/ui.yml
-  #   project_directory: .
   # - path: compose/proxy.yml
   #   project_directory: .
 

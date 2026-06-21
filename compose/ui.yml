@@ -14,10 +14,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      kafka-connect:
-        condition: service_healthy
-      schema-registry:
-        condition: service_healthy
+      # kafka-connect and schema-registry are disabled (see docker-compose.yml) —
+      # kafka-ui still works without them, those panels just stay empty.
 
     expose:
       - "8080"
@@ -34,10 +32,10 @@ services:
       KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_LOCATION: "/etc/kafka/secrets/kafka.client.truststore.jks"
       KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_PASSWORD: "${KAFKA_SSL_TRUSTSTORE_PASSWORD:-changeit}"
 
-      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: "http://schema-registry:8081"
-
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: "kafka-connect"
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: "http://kafka-connect:8083"
+      # Re-enable these two lines together with compose/schema.yml + compose/connect.yml:
+      # KAFKA_CLUSTERS_0_SCHEMAREGISTRY: "http://schema-registry:8081"
+      # KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: "kafka-connect"
+      # KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: "http://kafka-connect:8083"
 
       KAFKA_CLUSTERS_0_READONLY: "${KAFKA_UI_READONLY:-false}"
       KAFKA_CLUSTERS_0_AUDIT_TOPICAUDITENABLED: "true"
