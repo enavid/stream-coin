@@ -1,11 +1,14 @@
+mod catalog;
 mod store;
 
+pub use catalog::ExchangeCatalog;
 pub use store::{
     FeedRow, OrderRow, OrderStore, SignalRow, SignalStore, TickerStore, MAX_SIGNAL_ROWS,
 };
 
 use dioxus::prelude::*;
 
+use crate::api::{ExchangeResponse, PairResponse};
 use crate::auth::Session;
 use crate::protocol::{OrderUpdateMessage, PriceMessage, SignalMessage};
 use crate::router::Route;
@@ -24,6 +27,7 @@ pub struct AppState {
     pub session: Signal<Option<Session>>,
     pub signals: Signal<SignalStore>,
     pub orders: Signal<OrderStore>,
+    pub catalog: Signal<ExchangeCatalog>,
 }
 
 impl Default for AppState {
@@ -41,6 +45,7 @@ impl AppState {
             session: Signal::new(None),
             signals: Signal::new(SignalStore::new()),
             orders: Signal::new(OrderStore::new()),
+            catalog: Signal::new(ExchangeCatalog::new()),
         }
     }
 
@@ -62,6 +67,14 @@ impl AppState {
 
     pub fn apply_order_update(&mut self, msg: &OrderUpdateMessage) {
         self.orders.write().apply(msg);
+    }
+
+    pub fn set_exchanges(&mut self, exchanges: Vec<ExchangeResponse>) {
+        self.catalog.write().set_exchanges(exchanges);
+    }
+
+    pub fn set_pairs_for(&mut self, exchange: &str, pairs: Vec<PairResponse>) {
+        self.catalog.write().set_pairs(exchange, pairs);
     }
 
     pub fn navigate(&mut self, route: Route) {

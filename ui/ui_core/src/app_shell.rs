@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::api::ApiClient;
 use crate::icons::{
     IconAdmin, IconBacktest, IconDashboard, IconLogout, IconMenu, IconOrders, IconSettings,
     IconStrategy,
@@ -62,6 +63,35 @@ const NAV_ITEMS: &[NavItem] = &[
 pub fn AppShell(server_url: String) -> Element {
     let mut state = use_context::<AppState>();
     let mut mobile_nav_open = use_signal(|| false);
+    let api = use_signal(|| ApiClient::new(server_url.clone()));
+
+    // Registered unconditionally (must run on every render, login or not —
+    // Dioxus requires a stable hook call sequence per component instance)
+    // but only does anything once a session exists. Reads `state.session`
+    // reactively, so it re-fetches whenever the session changes: after
+    // login, after a different user logs in, etc. The exchange list and
+    // every exchange's active pairs are loaded once here rather than by
+    // each page separately, so "Strategies"/"Backtest"/"Orders"/the
+    // dashboard's "Add Ticker" form all suggest the same live set.
+    use_effect(move || {
+        let session = (state.session)();
+        let api = api();
+        spawn(async move {
+            let Some(session) = session else { return };
+            let Ok(resp) = api.list_exchanges(&session.token).await else {
+                return;
+            };
+            state.set_exchanges(resp.exchanges.clone());
+            for exchange in resp.exchanges {
+                if let Ok(pairs) = api
+                    .list_exchange_pairs(&session.token, &exchange.name)
+                    .await
+                {
+                    state.set_pairs_for(&exchange.name, pairs.pairs);
+                }
+            }
+        });
+    });
 
     let Some(session) = (state.session)() else {
         return rsx! { Login { server_url: server_url.clone() } };

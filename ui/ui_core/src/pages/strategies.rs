@@ -2,7 +2,6 @@ use dioxus::prelude::*;
 
 use super::current_token;
 use crate::api::{ActiveStrategy, ApiClient, DeployStrategyRequest, StartStrategyRequest};
-use crate::domain::SUPPORTED_EXCHANGES;
 use crate::state::AppState;
 
 const STRATEGY_TYPES: &[&str] = &["spread_threshold", "price_delta"];
@@ -38,12 +37,42 @@ pub fn Strategies(server_url: String) -> Element {
     // --- start built-in form ---
     let mut strategy_id = use_signal(String::new);
     let mut strategy_type = use_signal(|| STRATEGY_TYPES[0].to_string());
-    let mut exchange = use_signal(|| SUPPORTED_EXCHANGES[0].to_string());
-    let mut pair = use_signal(String::new);
+    let mut exchange_choice = use_signal(String::new);
+    let mut pair_choice = use_signal(String::new);
     let mut params = use_signal(|| "{}".to_string());
     let mut start_error = use_signal(|| None::<String>);
     let mut stop_error = use_signal(|| None::<String>);
 
+    let catalog = state.catalog.read();
+    let exchanges = catalog.exchanges().to_vec();
+    let selected_exchange = if exchanges.iter().any(|e| e.name == exchange_choice()) {
+        exchange_choice()
+    } else {
+        exchanges
+            .first()
+            .map(|e| e.name.clone())
+            .unwrap_or_default()
+    };
+    let pairs = catalog.pairs_for(&selected_exchange).to_vec();
+    drop(catalog);
+    let selected_pair = if pairs
+        .iter()
+        .any(|p| format!("{}/{}", p.base, p.quote) == pair_choice())
+    {
+        pair_choice()
+    } else {
+        pairs
+            .first()
+            .map(|p| format!("{}/{}", p.base, p.quote))
+            .unwrap_or_default()
+    };
+
+    // Closures below are `move` and need their own clones — capturing
+    // `selected_exchange`/`selected_pair` directly would move them out of
+    // this scope, breaking the `{selected_exchange}`/`{selected_pair}`
+    // bindings the rsx markup further down still needs to read.
+    let exchange_for_start = selected_exchange.clone();
+    let pair_for_start = selected_pair.clone();
     let on_start = move |evt: Event<FormData>| {
         evt.prevent_default();
         let api = api();
@@ -60,8 +89,8 @@ pub fn Strategies(server_url: String) -> Element {
         let req = StartStrategyRequest {
             strategy_id: strategy_id(),
             strategy_type: strategy_type(),
-            exchange: exchange(),
-            pair: pair(),
+            exchange: exchange_for_start.clone(),
+            pair: pair_for_start.clone(),
             params: parsed_params,
         };
         spawn(async move {
@@ -191,14 +220,22 @@ pub fn Strategies(server_url: String) -> Element {
                         label { "Exchange" }
                         select {
                             class: "finput",
-                            value: "{exchange}",
-                            onchange: move |e| exchange.set(e.value()),
-                            for ex in SUPPORTED_EXCHANGES { option { value: *ex, "{ex}" } }
+                            value: "{selected_exchange}",
+                            onchange: move |e| {
+                                exchange_choice.set(e.value());
+                                pair_choice.set(String::new());
+                            },
+                            for ex in exchanges.iter() { option { value: "{ex.name}", "{ex.name}" } }
                         }
                     }
                     div { class: "field",
                         label { "Pair" }
-                        input { class: "finput", placeholder: "USDT/IRT", value: "{pair}", oninput: move |e| pair.set(e.value()) }
+                        select {
+                            class: "finput",
+                            value: "{selected_pair}",
+                            onchange: move |e| pair_choice.set(e.value()),
+                            for p in pairs.iter() { option { value: "{p.base}/{p.quote}", "{p.base}/{p.quote}" } }
+                        }
                     }
                 }
                 div { class: "field", style: "margin-bottom:14px;",

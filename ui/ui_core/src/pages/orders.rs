@@ -2,7 +2,6 @@ use dioxus::prelude::*;
 
 use super::current_token;
 use crate::api::{ApiClient, PlaceOrderRequest};
-use crate::domain::SUPPORTED_EXCHANGES;
 use crate::state::AppState;
 
 const SIDES: &[&str] = &["buy", "sell"];
@@ -30,8 +29,8 @@ pub fn Orders(server_url: String) -> Element {
         async move {}
     });
 
-    let mut exchange = use_signal(|| SUPPORTED_EXCHANGES[0].to_string());
-    let mut pair = use_signal(String::new);
+    let mut exchange_choice = use_signal(String::new);
+    let mut pair_choice = use_signal(String::new);
     let mut side = use_signal(|| SIDES[0].to_string());
     let mut order_type = use_signal(|| ORDER_TYPES[0].to_string());
     let mut quantity = use_signal(String::new);
@@ -40,6 +39,32 @@ pub fn Orders(server_url: String) -> Element {
     let mut cancel_error = use_signal(|| None::<String>);
     let mut breaker_message = use_signal(|| None::<String>);
 
+    let catalog = state.catalog.read();
+    let exchanges = catalog.exchanges().to_vec();
+    let selected_exchange = if exchanges.iter().any(|e| e.name == exchange_choice()) {
+        exchange_choice()
+    } else {
+        exchanges
+            .first()
+            .map(|e| e.name.clone())
+            .unwrap_or_default()
+    };
+    let pairs = catalog.pairs_for(&selected_exchange).to_vec();
+    drop(catalog);
+    let selected_pair = if pairs
+        .iter()
+        .any(|p| format!("{}/{}", p.base, p.quote) == pair_choice())
+    {
+        pair_choice()
+    } else {
+        pairs
+            .first()
+            .map(|p| format!("{}/{}", p.base, p.quote))
+            .unwrap_or_default()
+    };
+
+    let exchange_for_place = selected_exchange.clone();
+    let pair_for_place = selected_pair.clone();
     let on_place = move |evt: Event<FormData>| {
         evt.prevent_default();
         let api = api();
@@ -47,8 +72,8 @@ pub fn Orders(server_url: String) -> Element {
             return;
         };
         let req = PlaceOrderRequest {
-            exchange: exchange(),
-            pair: pair(),
+            exchange: exchange_for_place.clone(),
+            pair: pair_for_place.clone(),
             side: side(),
             order_type: order_type(),
             quantity: quantity(),
@@ -122,14 +147,22 @@ pub fn Orders(server_url: String) -> Element {
                         label { "Exchange" }
                         select {
                             class: "finput",
-                            value: "{exchange}",
-                            onchange: move |e| exchange.set(e.value()),
-                            for ex in SUPPORTED_EXCHANGES { option { value: *ex, "{ex}" } }
+                            value: "{selected_exchange}",
+                            onchange: move |e| {
+                                exchange_choice.set(e.value());
+                                pair_choice.set(String::new());
+                            },
+                            for ex in exchanges.iter() { option { value: "{ex.name}", "{ex.name}" } }
                         }
                     }
                     div { class: "field",
                         label { "Pair" }
-                        input { class: "finput", placeholder: "USDT/IRT", value: "{pair}", oninput: move |e| pair.set(e.value()) }
+                        select {
+                            class: "finput",
+                            value: "{selected_pair}",
+                            onchange: move |e| pair_choice.set(e.value()),
+                            for p in pairs.iter() { option { value: "{p.base}/{p.quote}", "{p.base}/{p.quote}" } }
+                        }
                     }
                     div { class: "field",
                         label { "Side" }

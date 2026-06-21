@@ -36,11 +36,22 @@ pub fn Settings(server_url: String) -> Element {
         async move {}
     });
 
-    let mut exchange_name = use_signal(String::new);
+    let mut exchange_choice = use_signal(String::new);
     let mut api_key = use_signal(String::new);
     let mut secret = use_signal(String::new);
     let mut save_error = use_signal(|| None::<String>);
 
+    let exchanges = state.catalog.read().exchanges().to_vec();
+    let selected_exchange = if exchanges.iter().any(|e| e.name == exchange_choice()) {
+        exchange_choice()
+    } else {
+        exchanges
+            .first()
+            .map(|e| e.name.clone())
+            .unwrap_or_default()
+    };
+
+    let exchange_for_save = selected_exchange.clone();
     let on_save = move |evt: Event<FormData>| {
         evt.prevent_default();
         let api = api();
@@ -48,7 +59,7 @@ pub fn Settings(server_url: String) -> Element {
             return;
         };
         let body = serde_json::json!({ "api_key": api_key(), "secret": secret() });
-        let exchange = exchange_name();
+        let exchange = exchange_for_save.clone();
         spawn(async move {
             match api.set_own_credentials(&token, &exchange, body).await {
                 Ok(()) => {
@@ -117,7 +128,12 @@ pub fn Settings(server_url: String) -> Element {
                     div { class: "field-row grid-2", style: "margin-bottom:10px;",
                         div { class: "field",
                             label { "Exchange" }
-                            input { class: "finput", placeholder: "tabdeal", value: "{exchange_name}", oninput: move |e| exchange_name.set(e.value()) }
+                            select {
+                                class: "finput",
+                                value: "{selected_exchange}",
+                                onchange: move |e| exchange_choice.set(e.value()),
+                                for ex in exchanges.iter() { option { value: "{ex.name}", "{ex.name}" } }
+                            }
                         }
                         div { class: "field",
                             label { "API Key" }
