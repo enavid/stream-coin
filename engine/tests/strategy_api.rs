@@ -38,12 +38,13 @@ fn build_state() -> actix_web::web::Data<AppState> {
         strategy_repository: None,
         signal_repository: None,
         order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: None,
         candle_repository: None,
         exchange_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
     })
 }
 
@@ -64,12 +65,13 @@ fn build_state_with_strategy_repo(
         strategy_repository: Some(repo),
         signal_repository: None,
         order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: None,
         candle_repository: None,
         exchange_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
     })
 }
 
@@ -324,12 +326,13 @@ async fn start_strategy_without_token_returns_401() {
         strategy_repository: None,
         signal_repository: None,
         order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: None,
         candle_repository: None,
         exchange_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
     });
 
     let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
@@ -413,12 +416,13 @@ fn build_state_with_deploy_support() -> (actix_web::web::Data<AppState>, Arc<Fak
         strategy_repository: None,
         signal_repository: None,
         order_adapters,
-        order_adapter_factories: Arc::new(HashMap::new()),
-        admin_credentials: None,
         order_manager: Some(manager),
         python_strategy_repository: Some(Arc::new(FakePythonStrategyRepository::new())),
         candle_repository: None,
         exchange_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
     });
     (state, repo)
 }

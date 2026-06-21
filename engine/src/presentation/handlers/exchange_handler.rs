@@ -461,12 +461,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         })
     }
 
@@ -488,12 +489,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         })
     }
 
@@ -621,12 +623,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         });
         let app = test::init_service(
             App::new()
@@ -731,12 +734,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         });
         let app = test::init_service(
             App::new()
@@ -788,12 +792,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -859,12 +864,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -921,12 +927,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -1002,12 +1009,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -1078,12 +1086,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         });
 
         let dummy_req = test::TestRequest::default().to_http_request();
@@ -1133,12 +1142,13 @@ mod tests {
             strategy_repository: None,
             signal_repository: None,
             order_adapters: Arc::new(RwLock::new(HashMap::new())),
-            order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-            admin_credentials: None,
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
         });
 
         restore_tickers(&state).await;

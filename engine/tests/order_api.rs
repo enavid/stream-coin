@@ -51,12 +51,13 @@ fn build_state_with_order_manager(
         strategy_repository: None,
         signal_repository: None,
         order_adapters,
-        order_adapter_factories: Arc::new(HashMap::new()),
-        admin_credentials: None,
         order_manager: Some(manager),
         python_strategy_repository: None,
         candle_repository: None,
         exchange_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
     });
 
     (state, repo)

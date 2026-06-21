@@ -1,9 +1,11 @@
+use std::collections::HashSet;
+
 use actix_web::body::EitherBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::http::header;
 use actix_web::http::Method;
 use actix_web::middleware::Next;
-use actix_web::{web, Error, HttpResponse};
+use actix_web::{web, Error, HttpMessage, HttpResponse};
 use jsonwebtoken::{decode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +15,42 @@ use crate::presentation::shared::app_state::AppState;
 pub struct Claims {
     pub sub: String,
     pub exp: usize,
+    /// Flattened permission set, embedded at login so authorization needs no DB
+    /// round-trip per request. `#[serde(default)]` keeps old 2-field tokens decodable.
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+/// Authenticated request context, inserted into request extensions by `jwt_middleware`
+/// after a successful token decode. Handlers extract it to check permissions.
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    pub user_id: i32,
+    pub permissions: HashSet<String>,
+}
+
+impl AuthContext {
+    pub fn has(&self, permission: &str) -> bool {
+        self.permissions.contains(permission)
+    }
+}
+
+/// Extracts `AuthContext` from request extensions and checks for `permission`.
+/// Returns the context on success, or a ready-to-send 401/403 `HttpResponse` on failure —
+/// handlers call this first and `return` the `Err` value directly.
+pub fn require_permission(
+    req: &actix_web::HttpRequest,
+    permission: &str,
+) -> Result<AuthContext, HttpResponse> {
+    use crate::presentation::responses::ApiError;
+
+    match req.extensions().get::<AuthContext>().cloned() {
+        Some(ctx) if ctx.has(permission) => Ok(ctx),
+        Some(_) => {
+            Err(ApiError::forbidden(&format!("missing permission: {permission}")).to_response())
+        }
+        None => Err(ApiError::unauthorized("authentication required").to_response()),
+    }
 }
 
 /// Returns `true` when the request must bypass JWT validation.
@@ -55,13 +93,27 @@ pub fn validate_jwt_allow_expired(token: &str, secret: &str) -> Result<Claims, S
         .map_err(|e| e.to_string())
 }
 
-/// Creates a signed HS256 token — used in tests and `sc auth login`.
+/// Creates a signed HS256 token with no permissions — used by the ~existing test suite
+/// (ticker/strategy/order endpoints) that only needs a validly-signed token, not
+/// authorization. Real login uses `mint_token_with_permissions`.
 /// `exp_from_now_secs` > 0 = future expiry (valid), < 0 = past expiry (expired).
 pub fn mint_token(sub: &str, secret: &str, exp_from_now_secs: i64) -> String {
+    mint_token_with_permissions(sub, secret, exp_from_now_secs, &[])
+}
+
+/// Creates a signed HS256 token carrying the user's flattened permission set.
+/// `sub` must be the user's numeric id (as a string) for `AuthContext` extraction to work.
+pub fn mint_token_with_permissions(
+    sub: &str,
+    secret: &str,
+    exp_from_now_secs: i64,
+    permissions: &[String],
+) -> String {
     let exp = (chrono::Utc::now().timestamp() + exp_from_now_secs) as usize;
     let claims = Claims {
         sub: sub.to_string(),
         exp,
+        permissions: permissions.to_vec(),
     };
     jsonwebtoken::encode(
         &Header::default(),
@@ -106,7 +158,15 @@ pub async fn jwt_middleware<B: actix_web::body::MessageBody + 'static>(
     };
 
     match validate_jwt(&token, &secret) {
-        Ok(_) => next.call(req).await.map(|r| r.map_into_left_body()),
+        Ok(claims) => {
+            if let Ok(user_id) = claims.sub.parse::<i32>() {
+                req.extensions_mut().insert(AuthContext {
+                    user_id,
+                    permissions: claims.permissions.into_iter().collect(),
+                });
+            }
+            next.call(req).await.map(|r| r.map_into_left_body())
+        }
         Err(reason) => {
             let (req, _) = req.into_parts();
             let res = HttpResponse::Unauthorized()
@@ -228,5 +288,55 @@ mod tests {
             validate_jwt_allow_expired(&token, "wrong").is_err(),
             "wrong secret must still fail even with expiry check disabled"
         );
+    }
+
+    #[test]
+    fn mint_token_with_permissions_round_trips_permissions() {
+        let secret = "test_secret";
+        let perms = vec!["users.manage".to_string(), "roles.manage".to_string()];
+        let token = mint_token_with_permissions("1", secret, 3600, &perms);
+        let claims = validate_jwt(&token, secret).unwrap();
+        assert_eq!(claims.permissions, perms);
+    }
+
+    #[test]
+    fn mint_token_produces_empty_permissions() {
+        let secret = "test_secret";
+        let token = mint_token("user", secret, 3600);
+        let claims = validate_jwt(&token, secret).unwrap();
+        assert!(claims.permissions.is_empty());
+    }
+
+    #[test]
+    fn claims_decode_old_two_field_token_with_empty_permissions() {
+        // Simulates a token minted before the `permissions` field existed.
+        #[derive(Serialize)]
+        struct OldClaims {
+            sub: String,
+            exp: usize,
+        }
+        let secret = "test_secret";
+        let old = OldClaims {
+            sub: "1".to_string(),
+            exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        };
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &old,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        let claims = validate_jwt(&token, secret).unwrap();
+        assert!(claims.permissions.is_empty());
+    }
+
+    #[test]
+    fn auth_context_has_returns_true_for_granted_permission() {
+        let ctx = AuthContext {
+            user_id: 1,
+            permissions: HashSet::from(["users.manage".to_string()]),
+        };
+        assert!(ctx.has("users.manage"));
+        assert!(!ctx.has("roles.manage"));
     }
 }

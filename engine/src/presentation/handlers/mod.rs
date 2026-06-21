@@ -1,8 +1,10 @@
 pub mod auth_handler;
 pub mod backtest_handler;
+pub mod credential_handler;
 pub mod exchange_handler;
 pub mod health_handler;
 pub mod order_handler;
 pub mod registry_handler;
 pub mod strategy_handler;
+pub mod user_handler;
 pub mod ws_handler;

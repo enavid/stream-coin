@@ -1,7 +1,9 @@
 pub mod auth;
 pub mod backtest;
+pub mod credential;
 pub mod exchange;
 pub mod health;
 pub mod order;
 pub mod strategy;
 pub mod ticker;
+pub mod user;

@@ -23,6 +23,8 @@ pub struct ApiError {
     success: bool,
     message: String,
     errors: Vec<FieldError>,
+    #[serde(skip)]
+    status: StatusCode,
 }
 
 impl ApiError {
@@ -31,11 +33,42 @@ impl ApiError {
             success: false,
             message: message.to_string(),
             errors,
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
+    /// 401 — missing or invalid credentials.
+    pub fn unauthorized(message: &str) -> Self {
+        ApiError {
+            success: false,
+            message: message.to_string(),
+            errors: vec![],
+            status: StatusCode::UNAUTHORIZED,
+        }
+    }
+
+    /// 403 — authenticated, but missing the required permission.
+    pub fn forbidden(message: &str) -> Self {
+        ApiError {
+            success: false,
+            message: message.to_string(),
+            errors: vec![],
+            status: StatusCode::FORBIDDEN,
+        }
+    }
+
+    /// 503 — a required dependency (e.g. credential encryption key) is not configured.
+    pub fn service_unavailable(message: &str) -> Self {
+        ApiError {
+            success: false,
+            message: message.to_string(),
+            errors: vec![],
+            status: StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
     pub fn to_response(&self) -> HttpResponse {
-        HttpResponse::BadRequest().json(self)
+        HttpResponse::build(self.status).json(self)
     }
 }
 
@@ -52,7 +85,7 @@ impl fmt::Display for ApiError {
 
 impl ResponseError for ApiError {
     fn status_code(&self) -> StatusCode {
-        StatusCode::BAD_REQUEST
+        self.status
     }
 
     fn error_response(&self) -> HttpResponse {
@@ -138,5 +171,31 @@ mod tests {
         let err = ApiError::new("bad request", vec![]);
         let resp = err.to_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn unauthorized_returns_401() {
+        let err = ApiError::unauthorized("missing token");
+        assert_eq!(err.to_response().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn forbidden_returns_403() {
+        let err = ApiError::forbidden("missing permission");
+        assert_eq!(err.to_response().status(), StatusCode::FORBIDDEN);
+    }
+
+    #[actix_web::test]
+    async fn service_unavailable_returns_503() {
+        let err = ApiError::service_unavailable("encryption key not configured");
+        assert_eq!(err.to_response().status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn forbidden_message_is_set_correctly() {
+        let err = ApiError::forbidden("missing permission: users.manage");
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["message"], "missing permission: users.manage");
+        assert_eq!(json["success"], false);
     }
 }

@@ -7,12 +7,15 @@ use tokio::task::AbortHandle;
 
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
+use crate::infrastructure::crypto::credential_cipher::CredentialCipher;
 use crate::infrastructure::db::candle_repository::CandleRepository;
+use crate::infrastructure::db::credential_repository::CredentialRepository;
 use crate::infrastructure::db::exchange_repository::ExchangeRepository;
 use crate::infrastructure::db::python_strategy_repository::PythonStrategyRepository;
 use crate::infrastructure::db::signal_repository::SignalRepository;
 use crate::infrastructure::db::strategy_repository::StrategyRepository;
 use crate::infrastructure::db::ticker_repository::TickerRepository;
+use crate::infrastructure::db::user_repository::UserRepository;
 use crate::kafka::port::MessagePublisher;
 use crate::order::manager::OrderManager;
 use crate::order::port::OrderAdapter;
@@ -22,9 +25,6 @@ pub type ClientMap = Arc<Mutex<HashMap<ClientKey, AbortHandle>>>;
 
 /// Factory function that constructs an `ExchangeAdapter` given a WebSocket URL.
 pub type AdapterFactory = Arc<dyn Fn(&str) -> Arc<dyn ExchangeAdapter> + Send + Sync>;
-
-/// Factory function that constructs an `OrderAdapter` given an API key.
-pub type OrderAdapterFactory = Arc<dyn Fn(&str) -> Arc<dyn OrderAdapter> + Send + Sync>;
 
 /// Capacity of the price broadcast channel; lagging WS clients drop oldest
 /// messages rather than blocking publishers.
@@ -73,13 +73,6 @@ pub struct AppState {
     /// Writable at runtime via `POST /v1/admin/exchanges/{name}/credentials` so
     /// operators can register API keys without restarting the server.
     pub order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
-    /// Hard-coded factory map: exchange name → `OrderAdapter` constructor. Mirrors
-    /// `adapter_factories` — order adapter types cannot be stored in a database, so
-    /// this is the only place exchange names are coupled to order adapter types.
-    pub order_adapter_factories: Arc<HashMap<String, OrderAdapterFactory>>,
-    /// Admin credentials for `POST /v1/auth/token`.
-    /// `None` = login endpoint disabled (server runs without a configured admin account).
-    pub admin_credentials: Option<Arc<(String, String)>>,
     /// Order Manager — processes signals into orders, enforces safety controls.
     /// `None` when no `OrderRepository` is available or in test stubs that do not
     /// exercise order placement.
@@ -93,6 +86,14 @@ pub struct AppState {
     /// `exchange_registry` is bootstrapped from hardcoded defaults and enable/disable
     /// changes do not survive a restart.
     pub exchange_repository: Option<Arc<dyn ExchangeRepository>>,
+    /// Persistent store for users, roles, and permissions. `None` = no DB — login and
+    /// user-management endpoints are unavailable.
+    pub user_repository: Option<Arc<dyn UserRepository>>,
+    /// Persistent store for per-user encrypted exchange credentials. `None` = no DB.
+    pub credential_repository: Option<Arc<dyn CredentialRepository>>,
+    /// AES-256-GCM cipher for exchange credentials, built from `CREDENTIALS_ENCRYPTION_KEY`.
+    /// `None` = credential-write endpoints return 503 rather than ever storing plaintext.
+    pub credential_cipher: Option<Arc<CredentialCipher>>,
 }
 
 impl AppState {

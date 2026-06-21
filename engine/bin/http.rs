@@ -16,17 +16,19 @@ use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::infrastructure::cache::redis;
+use stream_coin::infrastructure::crypto::credential_cipher::CredentialCipher;
+use stream_coin::infrastructure::db::credential_repository::CredentialRepository;
 use stream_coin::infrastructure::db::exchange_repository::ExchangeRepository;
 use stream_coin::infrastructure::db::order_repository::FakeOrderRepository;
 use stream_coin::infrastructure::db::postgres::{
-    PostgresExchangeRepository, PostgresTickerRepository,
+    PostgresCredentialRepository, PostgresExchangeRepository, PostgresTickerRepository,
+    PostgresUserRepository,
 };
 use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
+use stream_coin::infrastructure::db::user_repository::{seed_admin_if_empty, UserRepository};
 use stream_coin::kafka::port::MessagePublisher;
 use stream_coin::kafka::KafkaProducer;
 use stream_coin::order::entity::SafetyConfig;
-use stream_coin::order::exir::ExirOrderAdapter;
-use stream_coin::order::hitobit::HitobitOrderAdapter;
 use stream_coin::order::manager::{spawn_order_manager_listener, OrderManager};
 use stream_coin::order::port::OrderAdapter;
 use stream_coin::order::tabdeal::TabdealOrderAdapter;
@@ -34,7 +36,7 @@ use stream_coin::presentation::handlers::exchange_handler::restore_tickers;
 use stream_coin::presentation::handlers::strategy_handler::restore_python_strategies;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
 use stream_coin::presentation::routers::init_routes;
-use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState, OrderAdapterFactory};
+use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
 use stream_coin::presentation::swagger::ApiDoc;
 use stream_coin::price::entity::MarketType;
 
@@ -98,29 +100,6 @@ async fn main() -> std::io::Result<()> {
     );
     let adapter_factories = Arc::new(factories);
 
-    // Hard-coded factory map: order adapter constructors cannot be stored in a database,
-    // so this — like `adapter_factories` above — is the only place exchange names are
-    // coupled to order adapter types. Exir has an OrderAdapter but no ExchangeAdapter
-    // (WS feed) yet, so it is intentionally absent from the `exchanges` DB table/registry.
-    let mut order_factories: HashMap<String, OrderAdapterFactory> = HashMap::new();
-    order_factories.insert(
-        "tabdeal".to_string(),
-        Arc::new(|api_key: &str| {
-            Arc::new(TabdealOrderAdapter::new(api_key)) as Arc<dyn OrderAdapter>
-        }),
-    );
-    order_factories.insert(
-        "hitobit".to_string(),
-        Arc::new(|api_key: &str| {
-            Arc::new(HitobitOrderAdapter::new(api_key)) as Arc<dyn OrderAdapter>
-        }),
-    );
-    order_factories.insert(
-        "exir".to_string(),
-        Arc::new(|api_key: &str| Arc::new(ExirOrderAdapter::new(api_key)) as Arc<dyn OrderAdapter>),
-    );
-    let order_adapter_factories = Arc::new(order_factories);
-
     let db_pool: Option<sqlx::PgPool> = match env::var("DATABASE_URL") {
         Ok(url) => match sqlx::PgPool::connect(&url).await {
             Ok(pool) => match sqlx::migrate!("./migrations").run(&pool).await {
@@ -151,6 +130,28 @@ async fn main() -> std::io::Result<()> {
     let ticker_repository: Option<Arc<dyn TickerRepository>> = db_pool
         .clone()
         .map(|pool| Arc::new(PostgresTickerRepository::new(pool)) as Arc<dyn TickerRepository>);
+
+    let user_repository: Option<Arc<dyn UserRepository>> = db_pool
+        .clone()
+        .map(|pool| Arc::new(PostgresUserRepository::new(pool)) as Arc<dyn UserRepository>);
+
+    let credential_repository: Option<Arc<dyn CredentialRepository>> =
+        db_pool.clone().map(|pool| {
+            Arc::new(PostgresCredentialRepository::new(pool)) as Arc<dyn CredentialRepository>
+        });
+
+    let credential_cipher = match CredentialCipher::from_env() {
+        Some(c) => {
+            tracing::info!("credential encryption configured");
+            Some(Arc::new(c))
+        }
+        None => {
+            tracing::warn!(
+                "CREDENTIALS_ENCRYPTION_KEY not set or invalid — exchange credential endpoints return 503"
+            );
+            None
+        }
+    };
 
     // Bootstrap the registry from the database when available; fall back to hardcoded
     // defaults otherwise (dev without Postgres, or migration 0007 hasn't been seeded yet).
@@ -305,16 +306,22 @@ async fn main() -> std::io::Result<()> {
         "order manager starting"
     );
 
-    let admin_credentials = match (env::var("ADMIN_USERNAME"), env::var("ADMIN_PASSWORD")) {
-        (Ok(u), Ok(p)) if !u.is_empty() && !p.is_empty() => {
-            tracing::info!("admin account configured");
-            Some(Arc::new((u, p)))
+    // Seeds the very first admin account from env vars, once, when `users` is empty.
+    // After this, accounts are created via POST /v1/admin/users — env vars are a
+    // one-time bootstrap, not an ongoing login path.
+    if let Some(repo) = &user_repository {
+        match (env::var("ADMIN_USERNAME"), env::var("ADMIN_PASSWORD")) {
+            (Ok(u), Ok(p)) if !u.is_empty() && !p.is_empty() => {
+                match seed_admin_if_empty(repo.as_ref(), &u, &p).await {
+                    Ok(()) => tracing::info!("admin account bootstrap checked"),
+                    Err(e) => tracing::error!(error = %e, "failed to seed admin account"),
+                }
+            }
+            _ => {
+                tracing::warn!("ADMIN_USERNAME/ADMIN_PASSWORD not set — skipping admin bootstrap");
+            }
         }
-        _ => {
-            tracing::warn!("ADMIN_USERNAME/ADMIN_PASSWORD not set — POST /v1/auth/token disabled");
-            None
-        }
-    };
+    }
 
     let order_manager = Arc::new(OrderManager::new(
         order_adapters.clone(),
@@ -339,12 +346,13 @@ async fn main() -> std::io::Result<()> {
         strategy_repository: None,
         signal_repository: None,
         order_adapters,
-        order_adapter_factories,
-        admin_credentials,
         order_manager: Some(order_manager),
         python_strategy_repository: None,
         candle_repository: None,
         exchange_repository,
+        user_repository,
+        credential_repository,
+        credential_cipher,
     });
 
     restore_tickers(&app_state).await;

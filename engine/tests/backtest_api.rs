@@ -86,12 +86,13 @@ fn build_state(
         strategy_repository: None,
         signal_repository: None,
         order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: Some(python_repo),
         candle_repository: Some(candle_repo),
         exchange_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
     })
 }
 
@@ -232,12 +233,13 @@ async fn backtest_unknown_strategy_returns_4xx() {
         strategy_repository: None,
         signal_repository: None,
         order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: Some(python_repo),
         candle_repository: Some(candle_repo),
         exchange_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
     });
 
     let srv = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
@@ -281,12 +283,13 @@ async fn backtest_invalid_date_range_returns_4xx() {
         strategy_repository: None,
         signal_repository: None,
         order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: Some(python_repo),
         candle_repository: Some(candle_repo),
         exchange_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
     });
 
     let srv = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));

@@ -25,12 +25,13 @@ fn build_state() -> actix_web::web::Data<AppState> {
         strategy_repository: None,
         signal_repository: None,
         order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        order_adapter_factories: Arc::new(std::collections::HashMap::new()),
-        admin_credentials: None,
         order_manager: None,
         python_strategy_repository: None,
         candle_repository: None,
         exchange_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
     })
 }
 

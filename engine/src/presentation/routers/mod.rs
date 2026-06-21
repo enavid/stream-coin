@@ -5,6 +5,7 @@ mod health_router;
 mod order_router;
 mod registry_router;
 mod strategy_router;
+mod user_router;
 
 use actix_web::middleware::from_fn;
 use actix_web::web;
@@ -23,6 +24,7 @@ pub fn init_routes(cfg: &mut web::ServiceConfig) {
             .configure(strategy_router::strategy_router)
             .configure(order_router::order_router)
             .configure(backtest_router::backtest_router)
+            .configure(user_router::user_router)
             .route("/ws", web::get().to(ws_handler::ws_index)),
     );
 }
