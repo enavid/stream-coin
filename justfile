@@ -84,9 +84,12 @@ docker-down:
 
 # UI (Dioxus, separate workspace in ui/)
 
-# Run the web UI in dev mode (hot reload)
+# Run the web UI in dev mode (hot reload).
+# Pinned to a fixed port (rather than dx's default random one) so it
+# matches CORS_ALLOWED_ORIGINS in .env — see engine/src/presentation/
+# middlewares/cors.rs.
 ui-dev:
-    cd ui && dx serve --platform web --package web
+    cd ui && dx serve --platform web --package web --port 8081
 
 # Build the web UI for production (static assets in ui/target/dx/web/release/web/public)
 ui-build-web:

@@ -143,3 +143,31 @@ async fn cors_with_explicit_allowlist_allows_listed_origin() {
         .headers()
         .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
 }
+
+#[actix_web::test]
+async fn cors_rejects_arbitrary_internet_origin_when_no_allowlist_configured() {
+    let app = test::init_service(
+        App::new()
+            .wrap(cors_middleware(None))
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/v1/check/health")
+            .insert_header(("Origin", "https://evil.com"))
+            .to_request(),
+    )
+    .await;
+
+    assert!(
+        !resp
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        "an arbitrary internet origin must not be granted CORS access just because no allowlist is configured"
+    );
+}
