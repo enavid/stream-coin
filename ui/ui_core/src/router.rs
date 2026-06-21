@@ -9,6 +9,7 @@
 pub enum Route {
     Login,
     Dashboard,
+    Chart,
     Strategies,
     Backtest,
     Orders,
@@ -21,6 +22,7 @@ impl Route {
         match self {
             Route::Login => "/login",
             Route::Dashboard => "/",
+            Route::Chart => "/chart",
             Route::Strategies => "/strategies",
             Route::Backtest => "/backtest",
             Route::Orders => "/orders",
@@ -34,6 +36,7 @@ impl Route {
     pub fn from_path(path: &str) -> Self {
         match path {
             "/login" => Route::Login,
+            "/chart" => Route::Chart,
             "/strategies" => Route::Strategies,
             "/backtest" => Route::Backtest,
             "/orders" => Route::Orders,
@@ -53,6 +56,7 @@ mod tests {
         let routes = [
             Route::Login,
             Route::Dashboard,
+            Route::Chart,
             Route::Strategies,
             Route::Backtest,
             Route::Orders,

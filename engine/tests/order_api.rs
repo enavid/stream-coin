@@ -54,6 +54,7 @@ fn build_state_with_order_manager(
         order_manager: Some(manager),
         python_strategy_repository: None,
         candle_repository: None,
+        candle_history: AppState::new_candle_history(),
         exchange_repository: None,
         user_repository: None,
         credential_repository: None,

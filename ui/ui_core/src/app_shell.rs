@@ -2,10 +2,10 @@ use dioxus::prelude::*;
 
 use crate::api::ApiClient;
 use crate::icons::{
-    IconAdmin, IconBacktest, IconDashboard, IconLogout, IconMenu, IconMoon, IconOrders,
+    IconAdmin, IconBacktest, IconChart, IconDashboard, IconLogout, IconMenu, IconMoon, IconOrders,
     IconSettings, IconStrategy, IconSun,
 };
-use crate::pages::{Admin, Backtest, Login, Orders, Settings, Strategies};
+use crate::pages::{Admin, Backtest, Chart, Login, Orders, Settings, Strategies};
 use crate::router::Route;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -25,6 +25,12 @@ const PRIMARY_NAV_ITEMS: &[NavItem] = &[
         route: Route::Dashboard,
         label: "Dashboard",
         icon: || rsx! { IconDashboard {} },
+        requires: None,
+    },
+    NavItem {
+        route: Route::Chart,
+        label: "Chart",
+        icon: || rsx! { IconChart {} },
         requires: None,
     },
     NavItem {
@@ -193,6 +199,7 @@ pub fn AppShell(server_url: String) -> Element {
                 match current_route {
                     Route::Login => rsx! { Login { server_url: server_url.clone() } },
                     Route::Dashboard => rsx! { Dashboard { server_url: server_url.clone() } },
+                    Route::Chart => rsx! { Chart { server_url: server_url.clone() } },
                     Route::Strategies => rsx! { Strategies { server_url: server_url.clone() } },
                     Route::Backtest => rsx! { Backtest { server_url: server_url.clone() } },
                     Route::Orders => rsx! { Orders { server_url: server_url.clone() } },

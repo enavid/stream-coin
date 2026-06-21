@@ -1,5 +1,6 @@
 mod admin;
 mod backtest;
+mod chart;
 mod login;
 mod orders;
 mod settings;
@@ -7,6 +8,7 @@ mod strategies;
 
 pub use admin::Admin;
 pub use backtest::Backtest;
+pub use chart::Chart;
 pub use login::Login;
 pub use orders::Orders;
 pub use settings::Settings;

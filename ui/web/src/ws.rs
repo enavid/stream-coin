@@ -54,7 +54,8 @@ pub async fn connect_and_listen(api: ApiClient, mut state: AppState) {
                         }
                         Ok(WsEvent::Signal(signal)) => state.apply_signal(&signal),
                         Ok(WsEvent::OrderUpdate(order)) => state.apply_order_update(&order),
-                        Ok(WsEvent::Candle(_)) | Err(_) => {}
+                        Ok(WsEvent::Candle(candle)) => state.apply_candle(&candle),
+                        Err(_) => {}
                     },
                     Ok(Message::Bytes(_)) => {}
                     Err(_) => break,

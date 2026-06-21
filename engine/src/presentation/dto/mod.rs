@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod backtest;
+pub mod candle;
 pub mod credential;
 pub mod exchange;
 pub mod health;

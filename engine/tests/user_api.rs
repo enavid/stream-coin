@@ -60,6 +60,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         order_manager: None,
         python_strategy_repository: None,
         candle_repository: None,
+        candle_history: AppState::new_candle_history(),
         exchange_repository: None,
         user_repository: Some(user_repo),
         credential_repository: Some(credential_repo),

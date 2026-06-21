@@ -8,6 +8,12 @@ mod browser;
 mod ws;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
+/// TradingView's open-source `lightweight-charts` UMD bundle, vendored
+/// locally (not loaded from a CDN). The chart page (`ui_core::pages::Chart`)
+/// is platform-agnostic and just assumes `window.LightweightCharts` exists —
+/// loading the actual `<script>` tag is `ui/web`'s job, same split as
+/// `MAIN_CSS` above.
+const CHART_JS: Asset = asset!("/assets/lightweight-charts.standalone.production.js");
 
 /// Backend base URL. Hardcoded for now — promoting this to a runtime
 /// setting (e.g. a settings page backed by local storage) is a small,
@@ -50,6 +56,7 @@ fn App() -> Element {
 
     rsx! {
         document::Link { rel: "stylesheet", href: MAIN_CSS }
+        document::Script { src: CHART_JS }
         AppShell { server_url: SERVER_URL.to_string() }
     }
 }

@@ -1,5 +1,6 @@
 mod auth_router;
 mod backtest_router;
+mod candle_router;
 mod exchange_routers;
 mod health_router;
 mod order_router;
@@ -24,6 +25,7 @@ pub fn init_routes(cfg: &mut web::ServiceConfig) {
             .configure(strategy_router::strategy_router)
             .configure(order_router::order_router)
             .configure(backtest_router::backtest_router)
+            .configure(candle_router::candle_router)
             .configure(user_router::user_router)
             .route("/ws", web::get().to(ws_handler::ws_index)),
     );

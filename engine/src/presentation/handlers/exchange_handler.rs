@@ -19,6 +19,7 @@ fn spawn_price_forwarder(
     broadcaster: tokio::sync::broadcast::Sender<String>,
     publisher: Option<Arc<dyn MessagePublisher>>,
     mut aggregators: Vec<CandleAggregator>,
+    candle_history: crate::presentation::shared::app_state::CandleHistory,
 ) {
     use crate::candle::entity::CandlePayload;
     use crate::kafka::producer::KafkaProducer;
@@ -55,8 +56,20 @@ fn spawn_price_forwarder(
 
             for agg in &mut aggregators {
                 if let Some(candle) = agg.push(&price) {
+                    let payload = CandlePayload::from(&candle);
+                    {
+                        use crate::presentation::shared::app_state::CANDLE_HISTORY_CAPACITY;
+                        let history_key =
+                            format!("{}:{}:{}", payload.exchange, payload.pair, payload.interval);
+                        let mut history = candle_history.lock().await;
+                        let bucket = history.entry(history_key).or_default();
+                        bucket.push_back(payload.clone());
+                        while bucket.len() > CANDLE_HISTORY_CAPACITY {
+                            bucket.pop_front();
+                        }
+                    }
                     let key = format!("{}:{}", candle.exchange, candle.pair);
-                    match serde_json::to_string(&WsMessage::Candle(CandlePayload::from(&candle))) {
+                    match serde_json::to_string(&WsMessage::Candle(payload)) {
                         Ok(json) => {
                             let _ = broadcaster.send(json.clone());
                             if let Some(ref pub_) = publisher {
@@ -138,6 +151,7 @@ pub async fn restore_tickers(state: &web::Data<AppState>) {
             state.broadcaster.clone(),
             state.publisher.clone(),
             aggregators,
+            state.candle_history.clone(),
         );
 
         state.clients.lock().await.insert(key, abort);
@@ -237,6 +251,7 @@ pub async fn start_kline_symbol_ticker(
         state.broadcaster.clone(),
         state.publisher.clone(),
         aggregators,
+        state.candle_history.clone(),
     );
 
     clients.insert(key.clone(), abort);
@@ -480,6 +495,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -508,6 +524,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -642,6 +659,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -753,6 +771,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -811,6 +830,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -883,6 +903,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -946,6 +967,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -1028,6 +1050,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -1131,6 +1154,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -1227,6 +1251,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,
@@ -1283,6 +1308,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,
             credential_repository: None,

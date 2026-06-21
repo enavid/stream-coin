@@ -338,6 +338,30 @@ impl ApiClient {
         self.delete(&format!("/exchanges/{exchange}/credentials"), token)
             .await
     }
+
+    // --- candles ---
+
+    /// `GET /v1/candles?exchange=&pair=&interval=&limit=` — recent in-memory
+    /// candle history for the chart page (see `engine`'s `candle_handler.rs`).
+    pub async fn list_candles(
+        &self,
+        token: &str,
+        exchange: &str,
+        pair: &str,
+        interval: &str,
+        limit: u32,
+    ) -> Result<Vec<CandleItem>, String> {
+        self.get(
+            &candle_history_path(exchange, pair, interval, limit),
+            Some(token),
+        )
+        .await
+    }
+}
+
+/// A free function so the query string shape is testable without the network.
+fn candle_history_path(exchange: &str, pair: &str, interval: &str, limit: u32) -> String {
+    format!("/candles?exchange={exchange}&pair={pair}&interval={interval}&limit={limit}")
 }
 
 #[cfg(test)]
@@ -482,6 +506,23 @@ mod tests {
         let data = ApiClient::unwrap_envelope(body).unwrap();
         let token: TokenResponse = serde_json::from_value(data).unwrap();
         assert_eq!(token.token, "abc");
+    }
+
+    #[test]
+    fn candle_history_path_builds_query_string_with_all_params() {
+        assert_eq!(
+            candle_history_path("tabdeal", "USDT/IRT", "1m", 300),
+            "/candles?exchange=tabdeal&pair=USDT/IRT&interval=1m&limit=300"
+        );
+    }
+
+    #[test]
+    fn v1_url_builds_candles_path() {
+        let client = ApiClient::new("http://localhost:8080");
+        assert_eq!(
+            client.v1("/candles?exchange=tabdeal&pair=USDT/IRT&interval=1m&limit=300"),
+            "http://localhost:8080/v1/candles?exchange=tabdeal&pair=USDT/IRT&interval=1m&limit=300"
+        );
     }
 
     #[test]

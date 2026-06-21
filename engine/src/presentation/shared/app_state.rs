@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::AbortHandle;
 
+use crate::candle::entity::CandlePayload;
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
 use crate::infrastructure::crypto::credential_cipher::CredentialCipher;
@@ -22,6 +23,17 @@ use crate::order::port::OrderAdapter;
 
 pub type ClientKey = String;
 pub type ClientMap = Arc<Mutex<HashMap<ClientKey, AbortHandle>>>;
+
+/// In-memory ring buffer of recently closed candles, keyed by
+/// `"{exchange}:{pair}:{interval}"`, newest at the back. This is separate from
+/// `candle_repository` (the persistent store used by the backtest engine,
+/// currently unconfigured in production) — it exists so the live chart page
+/// has *something* to seed from even without a database, and is capped per
+/// key (see `CANDLE_HISTORY_CAPACITY`) rather than growing unboundedly.
+pub type CandleHistory = Arc<Mutex<HashMap<String, VecDeque<CandlePayload>>>>;
+
+/// Max candles retained per `(exchange, pair, interval)` key in `CandleHistory`.
+pub const CANDLE_HISTORY_CAPACITY: usize = 500;
 
 /// Factory function that constructs an `ExchangeAdapter` given a WebSocket URL.
 pub type AdapterFactory = Arc<dyn Fn(&str) -> Arc<dyn ExchangeAdapter> + Send + Sync>;
@@ -94,11 +106,163 @@ pub struct AppState {
     /// AES-256-GCM cipher for exchange credentials, built from `CREDENTIALS_ENCRYPTION_KEY`.
     /// `None` = credential-write endpoints return 503 rather than ever storing plaintext.
     pub credential_cipher: Option<Arc<CredentialCipher>>,
+    /// In-memory candle history for the live chart page (`GET /v1/candles`).
+    /// Populated by `exchange_handler::spawn_price_forwarder` as candles close.
+    pub candle_history: CandleHistory,
 }
 
 impl AppState {
     /// Creates the broadcast sender used to fan out price ticks to WS clients.
     pub fn new_broadcaster() -> broadcast::Sender<String> {
         broadcast::channel(BROADCAST_CAPACITY).0
+    }
+
+    /// Creates an empty `CandleHistory` map.
+    pub fn new_candle_history() -> CandleHistory {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    /// Appends a closed candle to its key's history, evicting the oldest
+    /// entry once `CANDLE_HISTORY_CAPACITY` is exceeded.
+    pub async fn push_candle_history(&self, candle: &CandlePayload) {
+        let key = format!("{}:{}:{}", candle.exchange, candle.pair, candle.interval);
+        let mut history = self.candle_history.lock().await;
+        let bucket = history.entry(key).or_default();
+        bucket.push_back(candle.clone());
+        while bucket.len() > CANDLE_HISTORY_CAPACITY {
+            bucket.pop_front();
+        }
+    }
+
+    /// Returns up to `limit` most recent candles for the given key, oldest first.
+    pub async fn recent_candles(
+        &self,
+        exchange: &str,
+        pair: &str,
+        interval: &str,
+        limit: usize,
+    ) -> Vec<CandlePayload> {
+        let key = format!("{exchange}:{pair}:{interval}");
+        let history = self.candle_history.lock().await;
+        match history.get(&key) {
+            Some(bucket) => {
+                let skip = bucket.len().saturating_sub(limit);
+                bucket.iter().skip(skip).cloned().collect()
+            }
+            None => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_candle(exchange: &str, pair: &str, interval: &str, close: u64) -> CandlePayload {
+        CandlePayload {
+            exchange: exchange.to_string(),
+            pair: pair.to_string(),
+            interval: interval.to_string(),
+            time: chrono::Utc::now(),
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1,
+        }
+    }
+
+    fn state_with_history() -> AppState {
+        AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: Arc::new(Mutex::new(
+                crate::exchange::registry::ExchangeRegistry::new(),
+            )),
+            adapter_factories: Arc::new(HashMap::new()),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            publisher: None,
+            broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
+            ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
+            signal_repository: None,
+            order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            order_manager: None,
+            python_strategy_repository: None,
+            candle_repository: None,
+            exchange_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
+            candle_history: AppState::new_candle_history(),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recent_candles_returns_empty_for_unknown_key() {
+        let state = state_with_history();
+        let result = state.recent_candles("tabdeal", "USDT/IRT", "1m", 10).await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_candle_history_then_recent_candles_returns_it() {
+        let state = state_with_history();
+        state
+            .push_candle_history(&sample_candle("tabdeal", "USDT/IRT", "1m", 100))
+            .await;
+        let result = state.recent_candles("tabdeal", "USDT/IRT", "1m", 10).await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].close, 100);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recent_candles_respects_limit_keeping_the_newest() {
+        let state = state_with_history();
+        for close in 1..=5u64 {
+            state
+                .push_candle_history(&sample_candle("tabdeal", "USDT/IRT", "1m", close))
+                .await;
+        }
+        let result = state.recent_candles("tabdeal", "USDT/IRT", "1m", 2).await;
+        assert_eq!(
+            result.iter().map(|c| c.close).collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_candle_history_evicts_oldest_past_capacity() {
+        let state = state_with_history();
+        for close in 0..(CANDLE_HISTORY_CAPACITY as u64 + 5) {
+            state
+                .push_candle_history(&sample_candle("tabdeal", "USDT/IRT", "1m", close))
+                .await;
+        }
+        let result = state
+            .recent_candles("tabdeal", "USDT/IRT", "1m", CANDLE_HISTORY_CAPACITY + 10)
+            .await;
+        assert_eq!(result.len(), CANDLE_HISTORY_CAPACITY);
+        assert_eq!(
+            result[0].close, 5,
+            "oldest 5 entries must have been evicted"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_candle_history_keeps_separate_keys_independent() {
+        let state = state_with_history();
+        state
+            .push_candle_history(&sample_candle("tabdeal", "USDT/IRT", "1m", 1))
+            .await;
+        state
+            .push_candle_history(&sample_candle("hitobit", "USDT/IRT", "1m", 2))
+            .await;
+        let tabdeal = state.recent_candles("tabdeal", "USDT/IRT", "1m", 10).await;
+        let hitobit = state.recent_candles("hitobit", "USDT/IRT", "1m", 10).await;
+        assert_eq!(tabdeal.len(), 1);
+        assert_eq!(hitobit.len(), 1);
     }
 }

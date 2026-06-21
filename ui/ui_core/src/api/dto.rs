@@ -243,3 +243,20 @@ pub struct CredentialSummaryResponse {
 pub struct CredentialListResponse {
     pub credentials: Vec<CredentialSummaryResponse>,
 }
+
+// --- candles ---
+
+/// Mirrors `engine`'s `CandlePayload`. `GET /v1/candles` returns its `data`
+/// as a bare array (no wrapper struct), unlike most other list endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CandleItem {
+    pub exchange: String,
+    pub pair: String,
+    pub interval: String,
+    pub time: String,
+    pub open: u64,
+    pub high: u64,
+    pub low: u64,
+    pub close: u64,
+    pub volume: u64,
+}

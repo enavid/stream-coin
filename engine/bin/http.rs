@@ -350,6 +350,7 @@ async fn main() -> std::io::Result<()> {
         order_manager: Some(order_manager),
         python_strategy_repository: None,
         candle_repository: None,
+        candle_history: AppState::new_candle_history(),
         exchange_repository,
         user_repository,
         credential_repository,

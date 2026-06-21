@@ -78,18 +78,38 @@ pub struct OrderUpdateMessage {
     pub timestamp: String,
 }
 
+/// Mirrors the backend's `CandlePayload` (`engine/src/candle/entity.rs`).
+/// `time` stays a `String` (RFC3339, as chrono serializes it) — same
+/// "never reparse the wire format" rule as `PriceMessage::timestamp`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandleMessage {
+    pub exchange: String,
+    pub pair: String,
+    pub interval: String,
+    pub time: String,
+    pub open: u64,
+    pub high: u64,
+    pub low: u64,
+    pub close: u64,
+    pub volume: u64,
+}
+
+impl CandleMessage {
+    /// Same `"{exchange}:{pair}:{interval}"` key the engine's in-memory
+    /// candle history buffer uses (`AppState::push_candle_history`).
+    pub fn key(&self) -> String {
+        format!("{}:{}:{}", self.exchange, self.pair, self.interval)
+    }
+}
+
 /// Every variant of the backend's `WsMessage` that this UI cares about.
-/// `Candle` is received but not yet consumed by anything — kept as an
-/// opaque JSON value so an unrecognized-but-valid candle frame doesn't
-/// fail parsing, matching the backend's own precedent of tolerating
-/// message types a given consumer doesn't act on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsEvent {
     PriceUpdate(PriceMessage),
     Signal(SignalMessage),
     OrderUpdate(OrderUpdateMessage),
-    Candle(serde_json::Value),
+    Candle(CandleMessage),
 }
 
 impl WsEvent {
@@ -278,10 +298,39 @@ mod tests {
     }
 
     #[test]
-    fn ws_event_parse_accepts_candle_without_erroring() {
+    fn ws_event_parse_decodes_candle() {
         let json = r#"{"type":"candle","exchange":"tabdeal","pair":"USDT/IRT","interval":"1m","time":"2026-06-21T00:00:00Z","open":58000,"high":58500,"low":57800,"close":58200,"volume":0}"#;
         let event = WsEvent::parse(json).unwrap();
-        assert!(matches!(event, WsEvent::Candle(_)));
+        assert_eq!(
+            event,
+            WsEvent::Candle(CandleMessage {
+                exchange: "tabdeal".to_string(),
+                pair: "USDT/IRT".to_string(),
+                interval: "1m".to_string(),
+                time: "2026-06-21T00:00:00Z".to_string(),
+                open: 58000,
+                high: 58500,
+                low: 57800,
+                close: 58200,
+                volume: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn candle_message_key_combines_exchange_pair_and_interval() {
+        let msg = CandleMessage {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            interval: "1m".to_string(),
+            time: "2026-06-21T00:00:00Z".to_string(),
+            open: 1,
+            high: 1,
+            low: 1,
+            close: 1,
+            volume: 1,
+        };
+        assert_eq!(msg.key(), "tabdeal:USDT/IRT:1m");
     }
 
     #[test]

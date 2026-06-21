@@ -3,14 +3,15 @@ mod store;
 
 pub use catalog::ExchangeCatalog;
 pub use store::{
-    FeedRow, OrderRow, OrderStore, SignalRow, SignalStore, TickerStore, MAX_SIGNAL_ROWS,
+    Candle, CandleStore, FeedRow, OrderRow, OrderStore, SignalRow, SignalStore, TickerStore,
+    MAX_SIGNAL_ROWS,
 };
 
 use dioxus::prelude::*;
 
-use crate::api::{ExchangeResponse, PairResponse};
+use crate::api::{CandleItem, ExchangeResponse, PairResponse};
 use crate::auth::Session;
-use crate::protocol::{OrderUpdateMessage, PriceMessage, SignalMessage};
+use crate::protocol::{CandleMessage, OrderUpdateMessage, PriceMessage, SignalMessage};
 use crate::router::Route;
 use crate::theme::Theme;
 
@@ -30,6 +31,7 @@ pub struct AppState {
     pub orders: Signal<OrderStore>,
     pub catalog: Signal<ExchangeCatalog>,
     pub theme: Signal<Theme>,
+    pub candles: Signal<CandleStore>,
 }
 
 impl Default for AppState {
@@ -49,6 +51,7 @@ impl AppState {
             orders: Signal::new(OrderStore::new()),
             catalog: Signal::new(ExchangeCatalog::new()),
             theme: Signal::new(Theme::default()),
+            candles: Signal::new(CandleStore::new()),
         }
     }
 
@@ -77,6 +80,18 @@ impl AppState {
 
     pub fn apply_order_update(&mut self, msg: &OrderUpdateMessage) {
         self.orders.write().apply(msg);
+    }
+
+    pub fn apply_candle(&mut self, msg: &CandleMessage) {
+        self.candles.write().apply(msg);
+    }
+
+    /// Seeds a `(exchange, pair, interval)` series from `GET /v1/candles` —
+    /// the chart page calls this on mount and on every selector change.
+    pub fn seed_candles(&mut self, key: &str, items: &[CandleItem]) {
+        self.candles
+            .write()
+            .seed(key, items.iter().map(Candle::from).collect());
     }
 
     pub fn set_exchanges(&mut self, exchanges: Vec<ExchangeResponse>) {

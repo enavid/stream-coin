@@ -4,9 +4,9 @@
 
 use std::collections::HashMap;
 
-use crate::api::OrderItem;
+use crate::api::{CandleItem, OrderItem};
 use crate::domain::{direction, extract_time, Direction, Ticker};
-use crate::protocol::{OrderUpdateMessage, PriceMessage, SignalMessage};
+use crate::protocol::{CandleMessage, OrderUpdateMessage, PriceMessage, SignalMessage};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeedRow {
@@ -234,6 +234,92 @@ impl From<&OrderItem> for OrderRow {
             fill_price: item.price.clone(),
             strategy_id: item.strategy_id.clone(),
         }
+    }
+}
+
+/// One OHLCV bar for the chart page. `time` stays the raw RFC3339 string
+/// from the wire/REST response — same "never reparse the wire format" rule
+/// as `FeedRow::time` — the JS chart layer parses it, not Rust. Derives
+/// `Serialize` so the chart page can hand a bar straight to `document::eval`
+/// as JSON without a separate wire-shape struct.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Candle {
+    pub time: String,
+    pub open: u64,
+    pub high: u64,
+    pub low: u64,
+    pub close: u64,
+    pub volume: u64,
+}
+
+impl From<&CandleMessage> for Candle {
+    fn from(msg: &CandleMessage) -> Self {
+        Self {
+            time: msg.time.clone(),
+            open: msg.open,
+            high: msg.high,
+            low: msg.low,
+            close: msg.close,
+            volume: msg.volume,
+        }
+    }
+}
+
+impl From<&CandleItem> for Candle {
+    fn from(item: &CandleItem) -> Self {
+        Self {
+            time: item.time.clone(),
+            open: item.open,
+            high: item.high,
+            low: item.low,
+            close: item.close,
+            volume: item.volume,
+        }
+    }
+}
+
+/// Cap on candles retained per `(exchange, pair, interval)` series —
+/// mirrors the engine's `CANDLE_HISTORY_CAPACITY`, so a long-running chart
+/// page doesn't grow the series vector unboundedly.
+pub const MAX_CANDLE_ROWS: usize = 500;
+
+/// Per-`(exchange, pair, interval)` OHLCV series for the chart page. Two
+/// write paths: `seed` (full replace from `GET /v1/candles` on page load or
+/// pair/interval switch) and `apply` (incremental, from the live WS feed —
+/// updates the last bar in place if its `time` is unchanged, since the
+/// engine can rebroadcast the same in-progress bucket before it closes;
+/// otherwise appends a new bar on the next interval boundary).
+#[derive(Debug, Clone, Default)]
+pub struct CandleStore {
+    series: HashMap<String, Vec<Candle>>,
+}
+
+impl CandleStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn seed(&mut self, key: &str, candles: Vec<Candle>) {
+        self.series.insert(key.to_string(), candles);
+    }
+
+    pub fn apply(&mut self, msg: &CandleMessage) {
+        let key = msg.key();
+        let candle = Candle::from(msg);
+        let series = self.series.entry(key).or_default();
+        match series.last_mut() {
+            Some(last) if last.time == candle.time => *last = candle,
+            _ => {
+                series.push(candle);
+                if series.len() > MAX_CANDLE_ROWS {
+                    series.remove(0);
+                }
+            }
+        }
+    }
+
+    pub fn series_for(&self, key: &str) -> &[Candle] {
+        self.series.get(key).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -535,5 +621,93 @@ mod tests {
             "updating cli-1 in place must not move it back to the front"
         );
         assert_eq!(store.rows()[1].client_order_id, "cli-1");
+    }
+
+    // --- CandleStore tests ---
+
+    fn candle_msg(time: &str, close: u64) -> CandleMessage {
+        CandleMessage {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            interval: "1m".to_string(),
+            time: time.to_string(),
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1,
+        }
+    }
+
+    #[test]
+    fn candle_store_seed_replaces_existing_history() {
+        let mut store = CandleStore::new();
+        store.seed(
+            "tabdeal:USDT/IRT:1m",
+            vec![Candle {
+                time: "t0".to_string(),
+                open: 1,
+                high: 1,
+                low: 1,
+                close: 1,
+                volume: 1,
+            }],
+        );
+        store.seed(
+            "tabdeal:USDT/IRT:1m",
+            vec![Candle {
+                time: "t1".to_string(),
+                open: 2,
+                high: 2,
+                low: 2,
+                close: 2,
+                volume: 1,
+            }],
+        );
+
+        let series = store.series_for("tabdeal:USDT/IRT:1m");
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].time, "t1");
+    }
+
+    #[test]
+    fn candle_store_apply_pushes_new_bucket() {
+        let mut store = CandleStore::new();
+        store.apply(&candle_msg("t0", 100));
+        store.apply(&candle_msg("t1", 200));
+
+        let series = store.series_for("tabdeal:USDT/IRT:1m");
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[0].close, 100);
+        assert_eq!(series[1].close, 200);
+    }
+
+    #[test]
+    fn candle_store_apply_updates_in_place_when_time_unchanged() {
+        let mut store = CandleStore::new();
+        store.apply(&candle_msg("t0", 100));
+        store.apply(&candle_msg("t0", 150));
+
+        let series = store.series_for("tabdeal:USDT/IRT:1m");
+        assert_eq!(series.len(), 1, "same time bucket must update in place");
+        assert_eq!(series[0].close, 150);
+    }
+
+    #[test]
+    fn candle_store_apply_caps_length() {
+        let mut store = CandleStore::new();
+        for i in 0..(MAX_CANDLE_ROWS + 5) {
+            store.apply(&candle_msg(&format!("t{i}"), i as u64));
+        }
+
+        let series = store.series_for("tabdeal:USDT/IRT:1m");
+        assert_eq!(series.len(), MAX_CANDLE_ROWS);
+        assert_eq!(series[0].close, 5, "oldest entries must be evicted");
+    }
+
+    #[test]
+    fn candle_store_series_for_unknown_key_returns_empty() {
+        let store = CandleStore::new();
+        assert!(store.series_for("does:not:exist").is_empty());
     }
 }

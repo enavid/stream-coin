@@ -35,6 +35,25 @@ pub fn IconStrategy() -> Element {
 }
 
 #[component]
+pub fn IconChart() -> Element {
+    rsx! {
+        svg { width: "18", height: "18", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            line { x1: "5", y1: "3", x2: "5", y2: "21" }
+            line { x1: "5", y1: "21", x2: "21", y2: "21" }
+            line { x1: "8", y1: "8", x2: "8", y2: "14" }
+            line { x1: "8", y1: "6", x2: "8", y2: "8" }
+            line { x1: "8", y1: "14", x2: "8", y2: "16" }
+            line { x1: "13", y1: "11", x2: "13", y2: "17" }
+            line { x1: "13", y1: "9", x2: "13", y2: "11" }
+            line { x1: "13", y1: "17", x2: "13", y2: "19" }
+            line { x1: "18", y1: "7", x2: "18", y2: "12" }
+            line { x1: "18", y1: "5", x2: "18", y2: "7" }
+            line { x1: "18", y1: "12", x2: "18", y2: "14" }
+        }
+    }
+}
+
+#[component]
 pub fn IconBacktest() -> Element {
     rsx! {
         svg { width: "18", height: "18", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
