@@ -10,7 +10,12 @@ const ORDER_TYPES: &[&str] = &["market", "limit"];
 #[component]
 pub fn Orders(server_url: String) -> Element {
     let state = use_context::<AppState>();
-    let api = use_signal(|| ApiClient::new(server_url));
+    let api = use_signal(|| {
+        ApiClient::new(server_url).with_unauthorized_handler(move || {
+            let mut state = state;
+            state.clear_session();
+        })
+    });
 
     let seed = move || {
         let api = api();

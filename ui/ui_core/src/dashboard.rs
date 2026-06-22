@@ -17,7 +17,12 @@ use crate::state::AppState;
 #[component]
 pub fn Dashboard(server_url: String) -> Element {
     let mut state = use_context::<AppState>();
-    let api = use_signal(|| ApiClient::new(server_url.clone()));
+    let api = use_signal(|| {
+        ApiClient::new(server_url.clone()).with_unauthorized_handler(move || {
+            let mut state = state;
+            state.clear_session();
+        })
+    });
 
     let store = state.store.read();
     let tickers = store.tickers().clone();

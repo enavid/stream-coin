@@ -7,7 +7,12 @@ use crate::state::AppState;
 #[component]
 pub fn Admin(server_url: String) -> Element {
     let state = use_context::<AppState>();
-    let api = use_signal(|| ApiClient::new(server_url));
+    let api = use_signal(|| {
+        ApiClient::new(server_url).with_unauthorized_handler(move || {
+            let mut state = state;
+            state.clear_session();
+        })
+    });
 
     let has_users_manage = state
         .session

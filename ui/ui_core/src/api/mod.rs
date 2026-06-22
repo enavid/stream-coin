@@ -11,8 +11,17 @@ mod dto;
 
 pub use dto::*;
 
+use std::rc::Rc;
+
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+
+/// Returned by every authenticated call when the engine's JWT middleware
+/// rejects the token (expired or otherwise invalid) — distinguishes "your
+/// session is gone" from every other failure so [`ApiClient::send`] can
+/// fire the unauthorized handler regardless of how the specific call site
+/// handles its `Result` (several discard the error entirely today).
+pub const UNAUTHORIZED_ERROR: &str = "session expired — please log in again";
 
 /// Body shared by the start/stop ticker endpoints. A free function so the
 /// `BASE/QUOTE` separator requirement can be pinned down by a unit test
@@ -24,6 +33,7 @@ fn ticker_request_body(exchange: &str, pair: &str) -> serde_json::Value {
 #[derive(Clone)]
 pub struct ApiClient {
     base_url: String,
+    on_unauthorized: Option<Rc<dyn Fn()>>,
 }
 
 impl ApiClient {
@@ -31,7 +41,31 @@ impl ApiClient {
         let base_url = base_url.into();
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
+            on_unauthorized: None,
         }
+    }
+
+    /// Registers a callback fired the moment any authenticated call comes
+    /// back `401 Unauthorized` — wire it to `AppState::clear_session` so an
+    /// expired JWT (the engine mints 24h-lived tokens) immediately bounces
+    /// the user to the login screen instead of every page silently failing
+    /// with no feedback until they manually log out and back in.
+    pub fn with_unauthorized_handler(mut self, handler: impl Fn() + 'static) -> Self {
+        self.on_unauthorized = Some(Rc::new(handler));
+        self
+    }
+
+    /// Pure decision given a status code — kept separate from `send` so the
+    /// unauthorized-handler wiring is testable without a real HTTP round
+    /// trip.
+    fn handle_response_status(&self, status: reqwest::StatusCode) -> Result<(), String> {
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(handler) = &self.on_unauthorized {
+                handler();
+            }
+            return Err(UNAUTHORIZED_ERROR.to_string());
+        }
+        Ok(())
     }
 
     fn v1(&self, path: &str) -> String {
@@ -107,8 +141,12 @@ impl ApiClient {
         }
     }
 
-    async fn send<T: DeserializeOwned>(builder: reqwest::RequestBuilder) -> Result<T, String> {
+    async fn send<T: DeserializeOwned>(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<T, String> {
         let resp = builder.send().await.map_err(|e| e.to_string())?;
+        self.handle_response_status(resp.status())?;
         let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
         let data = Self::unwrap_envelope(body)?;
         serde_json::from_value(data).map_err(|e| e.to_string())
@@ -119,7 +157,7 @@ impl ApiClient {
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
-        Self::send(req).await
+        self.send(req).await
     }
 
     async fn post_json<B: Serialize, T: DeserializeOwned>(
@@ -132,14 +170,14 @@ impl ApiClient {
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
-        Self::send(req).await
+        self.send(req).await
     }
 
     async fn delete<T: DeserializeOwned>(&self, path: &str, token: &str) -> Result<T, String> {
         let req = reqwest::Client::new()
             .delete(self.v1(path))
             .bearer_auth(token);
-        Self::send(req).await
+        self.send(req).await
     }
 
     // --- auth ---
@@ -523,6 +561,41 @@ mod tests {
             client.v1("/candles?exchange=tabdeal&pair=USDT/IRT&interval=1m&limit=300"),
             "http://localhost:8080/v1/candles?exchange=tabdeal&pair=USDT/IRT&interval=1m&limit=300"
         );
+    }
+
+    #[test]
+    fn handle_response_status_invokes_unauthorized_handler_on_401() {
+        let called = std::rc::Rc::new(std::cell::RefCell::new(false));
+        let called_inner = called.clone();
+        let client = ApiClient::new("http://localhost:8080")
+            .with_unauthorized_handler(move || *called_inner.borrow_mut() = true);
+
+        let result = client.handle_response_status(reqwest::StatusCode::UNAUTHORIZED);
+
+        assert_eq!(result, Err(UNAUTHORIZED_ERROR.to_string()));
+        assert!(*called.borrow());
+    }
+
+    #[test]
+    fn handle_response_status_does_not_invoke_handler_on_success() {
+        let called = std::rc::Rc::new(std::cell::RefCell::new(false));
+        let called_inner = called.clone();
+        let client = ApiClient::new("http://localhost:8080")
+            .with_unauthorized_handler(move || *called_inner.borrow_mut() = true);
+
+        let result = client.handle_response_status(reqwest::StatusCode::OK);
+
+        assert!(result.is_ok());
+        assert!(!*called.borrow());
+    }
+
+    #[test]
+    fn handle_response_status_returns_unauthorized_error_with_no_handler_registered() {
+        let client = ApiClient::new("http://localhost:8080");
+
+        let result = client.handle_response_status(reqwest::StatusCode::UNAUTHORIZED);
+
+        assert_eq!(result, Err(UNAUTHORIZED_ERROR.to_string()));
     }
 
     #[test]

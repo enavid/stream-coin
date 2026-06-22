@@ -9,7 +9,12 @@ const INTERVALS: &[&str] = &["1m", "5m", "15m", "1h"];
 #[component]
 pub fn Backtest(server_url: String) -> Element {
     let state = use_context::<AppState>();
-    let api = use_signal(|| ApiClient::new(server_url));
+    let api = use_signal(|| {
+        ApiClient::new(server_url).with_unauthorized_handler(move || {
+            let mut state = state;
+            state.clear_session();
+        })
+    });
 
     let mut strategy_id = use_signal(String::new);
     let mut exchange_choice = use_signal(String::new);

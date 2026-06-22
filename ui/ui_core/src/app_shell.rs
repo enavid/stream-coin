@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use crate::api::ApiClient;
 use crate::icons::{
     IconAdmin, IconBacktest, IconChart, IconDashboard, IconLogout, IconMenu, IconMoon, IconOrders,
-    IconSettings, IconStrategy, IconSun,
+    IconPanelLeft, IconSettings, IconStrategy, IconSun,
 };
 use crate::pages::{Admin, Backtest, Chart, Login, Orders, Settings, Strategies};
 use crate::router::Route;
@@ -77,7 +77,17 @@ const SECONDARY_NAV_ITEMS: &[NavItem] = &[
 pub fn AppShell(server_url: String) -> Element {
     let mut state = use_context::<AppState>();
     let mut mobile_nav_open = use_signal(|| false);
-    let api = use_signal(|| ApiClient::new(server_url.clone()));
+    // Desktop-only icon-rail collapse. Deliberately not persisted to
+    // `localStorage` (unlike theme/session) — collapsing the sidebar is a
+    // transient screen-space choice, not a setting worth restoring across
+    // a fresh page load the way the user's chosen theme is.
+    let mut sidebar_collapsed = use_signal(|| false);
+    let api = use_signal(|| {
+        ApiClient::new(server_url.clone()).with_unauthorized_handler(move || {
+            let mut state = state;
+            state.clear_session();
+        })
+    });
 
     // Registered unconditionally (must run on every render, login or not —
     // Dioxus requires a stable hook call sequence per component instance)
@@ -123,6 +133,7 @@ pub fn AppShell(server_url: String) -> Element {
             a {
                 key: "{item.label}",
                 class: if current_route == item.route { "nav-link active" } else { "nav-link" },
+                title: item.label,
                 onclick: {
                     let route = item.route;
                     move |_| {
@@ -131,19 +142,28 @@ pub fn AppShell(server_url: String) -> Element {
                     }
                 },
                 span { class: "ic", { (item.icon)() } }
-                "{item.label}"
+                span { class: "label-text", "{item.label}" }
             }
         }
     };
 
     rsx! {
-        div { id: "app", class: "active", "data-theme": theme.as_str(),
+        div {
+            id: "app",
+            class: if sidebar_collapsed() { "active sidebar-collapsed" } else { "active" },
+            "data-theme": theme.as_str(),
             header { class: "topbar",
                 div { class: "logo",
                     button {
                         class: "btn-ghost btn-sm hamburger-btn",
                         onclick: move |_| mobile_nav_open.set(!mobile_nav_open()),
                         IconMenu {}
+                    }
+                    button {
+                        class: "btn-ghost btn-sm collapse-btn",
+                        title: if sidebar_collapsed() { "Expand sidebar" } else { "Collapse sidebar" },
+                        onclick: move |_| sidebar_collapsed.set(!sidebar_collapsed()),
+                        IconPanelLeft {}
                     }
                     div { class: "logo-mark", "⚡" }
                     "stream-coin"

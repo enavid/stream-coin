@@ -12,7 +12,12 @@ pub fn Strategies(server_url: String) -> Element {
     // `Signal<ApiClient>` is `Copy`, so every closure below can capture
     // `api` freely and stay `Fn` (reusable across multiple events)
     // without manual re-cloning gymnastics — same pattern Dashboard uses.
-    let api = use_signal(|| ApiClient::new(server_url));
+    let api = use_signal(|| {
+        ApiClient::new(server_url).with_unauthorized_handler(move || {
+            let mut state = state;
+            state.clear_session();
+        })
+    });
 
     let mut active = use_signal(Vec::<ActiveStrategy>::new);
     let mut list_error = use_signal(|| None::<String>);

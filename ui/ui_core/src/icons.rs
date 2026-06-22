@@ -146,6 +146,19 @@ pub fn IconPlus() -> Element {
     }
 }
 
+/// Sidebar collapse/expand toggle — a panel outline with a divider near
+/// the left edge, the same glyph convention used by VS Code/Linear/Notion
+/// for "toggle sidebar".
+#[component]
+pub fn IconPanelLeft() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            rect { x: "3", y: "4", width: "18", height: "16", rx: "2" }
+            line { x1: "9.5", y1: "4", x2: "9.5", y2: "20" }
+        }
+    }
+}
+
 #[component]
 pub fn IconChevronDown() -> Element {
     rsx! {
