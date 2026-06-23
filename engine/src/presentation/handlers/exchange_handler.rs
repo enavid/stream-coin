@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::candle::aggregator::CandleAggregator;
 use crate::candle::entity::Interval;
+use crate::infrastructure::db::candle_repository::CandleRepository;
 use crate::kafka::port::MessagePublisher;
 use crate::presentation::dto::ticker::{
     ActiveTicker, SymbolRequest, TickerList, TickerStarted, TickerStopped,
@@ -20,6 +21,7 @@ fn spawn_price_forwarder(
     publisher: Option<Arc<dyn MessagePublisher>>,
     mut aggregators: Vec<CandleAggregator>,
     candle_history: crate::presentation::shared::app_state::CandleHistory,
+    candle_repository: Option<Arc<dyn CandleRepository>>,
 ) {
     use crate::candle::entity::CandlePayload;
     use crate::kafka::producer::KafkaProducer;
@@ -57,6 +59,18 @@ fn spawn_price_forwarder(
             for agg in &mut aggregators {
                 match agg.push(&price) {
                     Some(candle) => {
+                        if let Some(ref repo) = candle_repository {
+                            if let Err(e) = repo.upsert_candles(std::slice::from_ref(&candle)).await
+                            {
+                                tracing::error!(
+                                    exchange = %candle.exchange,
+                                    pair = %candle.pair,
+                                    interval = candle.interval.as_str(),
+                                    error = %e,
+                                    "failed to persist closed candle to db"
+                                );
+                            }
+                        }
                         let payload = CandlePayload::from(&candle);
                         {
                             use crate::presentation::shared::app_state::CANDLE_HISTORY_CAPACITY;
@@ -170,6 +184,7 @@ pub async fn restore_tickers(state: &web::Data<AppState>) {
             state.publisher.clone(),
             aggregators,
             state.candle_history.clone(),
+            state.candle_repository.clone(),
         );
 
         state.clients.lock().await.insert(key, abort);
@@ -270,6 +285,7 @@ pub async fn start_kline_symbol_ticker(
         state.publisher.clone(),
         aggregators,
         state.candle_history.clone(),
+        state.candle_repository.clone(),
     );
 
     clients.insert(key.clone(), abort);

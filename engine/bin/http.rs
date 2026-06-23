@@ -18,12 +18,13 @@ use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingP
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::infrastructure::cache::redis;
 use stream_coin::infrastructure::crypto::credential_cipher::CredentialCipher;
+use stream_coin::infrastructure::db::candle_repository::CandleRepository;
 use stream_coin::infrastructure::db::credential_repository::CredentialRepository;
 use stream_coin::infrastructure::db::exchange_repository::ExchangeRepository;
 use stream_coin::infrastructure::db::order_repository::FakeOrderRepository;
 use stream_coin::infrastructure::db::postgres::{
-    PostgresCredentialRepository, PostgresExchangeRepository, PostgresTickerRepository,
-    PostgresUserRepository,
+    PostgresCandleRepository, PostgresCredentialRepository, PostgresExchangeRepository,
+    PostgresTickerRepository, PostgresUserRepository,
 };
 use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
 use stream_coin::infrastructure::db::user_repository::{seed_admin_if_empty, UserRepository};
@@ -147,6 +148,10 @@ async fn main() -> std::io::Result<()> {
         db_pool.clone().map(|pool| {
             Arc::new(PostgresCredentialRepository::new(pool)) as Arc<dyn CredentialRepository>
         });
+
+    let candle_repository: Option<Arc<dyn CandleRepository>> = db_pool
+        .clone()
+        .map(|pool| Arc::new(PostgresCandleRepository::new(pool)) as Arc<dyn CandleRepository>);
 
     let credential_cipher = match CredentialCipher::from_env() {
         Some(c) => {
@@ -362,7 +367,7 @@ async fn main() -> std::io::Result<()> {
         order_adapters,
         order_manager: Some(order_manager),
         python_strategy_repository: None,
-        candle_repository: None,
+        candle_repository,
         candle_history: AppState::new_candle_history(),
         exchange_repository,
         user_repository,

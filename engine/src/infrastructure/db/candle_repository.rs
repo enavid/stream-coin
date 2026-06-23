@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
-use crate::candle::entity::CandlePayload;
+use crate::candle::entity::{Candle, CandlePayload};
 
 #[derive(Debug, Error)]
 pub enum CandleRepositoryError {
@@ -10,10 +10,10 @@ pub enum CandleRepositoryError {
     Database(String),
 }
 
-/// Port for reading historical candle data.
+/// Port for reading and persisting historical candle data.
 ///
-/// The production implementation queries the TimescaleDB `candles` hypertable.
-/// Tests use `FakeCandleRepository`.
+/// The production implementation (`PostgresCandleRepository`) queries and
+/// writes the TimescaleDB `candles` hypertable. Tests use `FakeCandleRepository`.
 #[async_trait]
 pub trait CandleRepository: Send + Sync {
     async fn list_candles(
@@ -24,18 +24,33 @@ pub trait CandleRepository: Send + Sync {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<Vec<CandlePayload>, CandleRepositoryError>;
+
+    /// Inserts or updates candles, keyed by `(exchange, pair, interval, time)`.
+    /// Idempotent: re-upserting the same key updates that row in place rather
+    /// than creating a duplicate — safe for both the live aggregator's
+    /// closed-candle writes and a backfill re-run over an overlapping range.
+    async fn upsert_candles(&self, candles: &[Candle]) -> Result<(), CandleRepositoryError>;
 }
 
-/// In-memory candle store for tests.  Filters by time range; ignores
-/// exchange/pair/interval so a single `FakeCandleRepository` can cover
-/// all combinations in a test suite.
+/// In-memory candle store for tests. `list_candles` filters by time range;
+/// ignores exchange/pair/interval so a single `FakeCandleRepository` can
+/// cover all combinations in a test suite. `upsert_candles` replicates the
+/// production `ON CONFLICT ... DO UPDATE` semantics so callers can assert
+/// idempotency without a real database.
+#[derive(Default)]
 pub struct FakeCandleRepository {
-    candles: Vec<CandlePayload>,
+    candles: std::sync::Mutex<Vec<CandlePayload>>,
 }
 
 impl FakeCandleRepository {
     pub fn new(candles: Vec<CandlePayload>) -> Self {
-        Self { candles }
+        Self {
+            candles: std::sync::Mutex::new(candles),
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<CandlePayload> {
+        self.candles.lock().unwrap().clone()
     }
 }
 
@@ -51,10 +66,29 @@ impl CandleRepository for FakeCandleRepository {
     ) -> Result<Vec<CandlePayload>, CandleRepositoryError> {
         Ok(self
             .candles
+            .lock()
+            .unwrap()
             .iter()
             .filter(|c| c.time >= from && c.time <= to)
             .cloned()
             .collect())
+    }
+
+    async fn upsert_candles(&self, candles: &[Candle]) -> Result<(), CandleRepositoryError> {
+        let mut store = self.candles.lock().unwrap();
+        for candle in candles {
+            let payload = CandlePayload::from(candle);
+            match store.iter_mut().find(|c| {
+                c.exchange == payload.exchange
+                    && c.pair == payload.pair
+                    && c.interval == payload.interval
+                    && c.time == payload.time
+            }) {
+                Some(existing) => *existing = payload,
+                None => store.push(payload),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -75,6 +109,31 @@ mod tests {
             low: 99_000,
             close: 100_000,
             volume: 10,
+        }
+    }
+
+    fn candle_entity(
+        exchange: &str,
+        pair: &str,
+        interval: &str,
+        time_secs: i64,
+        close: u64,
+    ) -> Candle {
+        Candle {
+            exchange: exchange.to_string(),
+            pair: pair.to_string(),
+            interval: match interval {
+                "5m" => crate::candle::entity::Interval::FiveMinutes,
+                "15m" => crate::candle::entity::Interval::FifteenMinutes,
+                "1h" => crate::candle::entity::Interval::OneHour,
+                _ => crate::candle::entity::Interval::OneMinute,
+            },
+            time: Utc.timestamp_opt(time_secs, 0).unwrap(),
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1,
         }
     }
 
@@ -117,5 +176,111 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_empty());
+    }
+
+    // --- upsert_candles ---
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_candles_is_idempotent_on_duplicate_time() {
+        let repo = FakeCandleRepository::default();
+        let candle = candle_entity("tabdeal", "USDT/IRT", "1m", 1000, 100);
+
+        repo.upsert_candles(std::slice::from_ref(&candle))
+            .await
+            .unwrap();
+        repo.upsert_candles(&[candle]).await.unwrap();
+
+        assert_eq!(
+            repo.snapshot().len(),
+            1,
+            "re-upserting the same key must not create a duplicate row"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_candles_updates_close_when_time_matches_existing_row() {
+        let repo = FakeCandleRepository::default();
+        repo.upsert_candles(&[candle_entity("tabdeal", "USDT/IRT", "1m", 1000, 100)])
+            .await
+            .unwrap();
+        repo.upsert_candles(&[candle_entity("tabdeal", "USDT/IRT", "1m", 1000, 200)])
+            .await
+            .unwrap();
+
+        let snapshot = repo.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].close, 200, "matching key must update in place");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_candles_keeps_distinct_exchanges_separate() {
+        let repo = FakeCandleRepository::default();
+        repo.upsert_candles(&[
+            candle_entity("tabdeal", "USDT/IRT", "1m", 1000, 100),
+            candle_entity("hitobit", "USDT/IRT", "1m", 1000, 200),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(
+            repo.snapshot().len(),
+            2,
+            "same time, different exchange must not collide"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_candles_keeps_distinct_intervals_separate() {
+        let repo = FakeCandleRepository::default();
+        repo.upsert_candles(&[
+            candle_entity("tabdeal", "USDT/IRT", "1m", 1000, 100),
+            candle_entity("tabdeal", "USDT/IRT", "5m", 1000, 200),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(
+            repo.snapshot().len(),
+            2,
+            "same time, different interval must not collide"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_candles_persists_multiple_distinct_times_in_one_call() {
+        let repo = FakeCandleRepository::default();
+        repo.upsert_candles(&[
+            candle_entity("tabdeal", "USDT/IRT", "1m", 1000, 100),
+            candle_entity("tabdeal", "USDT/IRT", "1m", 2000, 200),
+            candle_entity("tabdeal", "USDT/IRT", "1m", 3000, 300),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(repo.snapshot().len(), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_candles_empty_slice_is_a_no_op() {
+        let repo = FakeCandleRepository::default();
+        repo.upsert_candles(&[]).await.unwrap();
+        assert!(repo.snapshot().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upserted_candle_is_visible_through_list_candles() {
+        let repo = FakeCandleRepository::default();
+        repo.upsert_candles(&[candle_entity("tabdeal", "USDT/IRT", "1m", 1000, 100)])
+            .await
+            .unwrap();
+
+        let from = Utc.timestamp_opt(0, 0).unwrap();
+        let to = Utc.timestamp_opt(2000, 0).unwrap();
+        let result = repo
+            .list_candles("tabdeal", "USDT/IRT", "1m", from, to)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].close, 100);
     }
 }

@@ -1,9 +1,12 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use sqlx::Row;
 
+use crate::candle::entity::{Candle, CandlePayload};
 use crate::exchange::registry::{ExchangeRecord, TradingPairRecord};
 use crate::infrastructure::crypto::credential_cipher::EncryptedEnvelope;
+use crate::infrastructure::db::candle_repository::{CandleRepository, CandleRepositoryError};
 use crate::infrastructure::db::credential_repository::{
     CredentialRepository, CredentialRepositoryError, CredentialSummary,
 };
@@ -15,6 +18,111 @@ use crate::infrastructure::db::user_repository::{
     RoleRecord, UserRecord, UserRepository, UserRepositoryError,
 };
 use crate::price::entity::MarketType;
+
+/// TimescaleDB-backed `CandleRepository`. Reads/writes the `candles`
+/// hypertable, keyed by `(exchange, pair, interval, time)` per the unique
+/// constraint added in migration `0012`.
+pub struct PostgresCandleRepository {
+    pool: PgPool,
+}
+
+impl PostgresCandleRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl CandleRepository for PostgresCandleRepository {
+    async fn list_candles(
+        &self,
+        exchange: &str,
+        pair: &str,
+        interval: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<CandlePayload>, CandleRepositoryError> {
+        let rows = sqlx::query(
+            "SELECT exchange, pair, interval, time, open, high, low, close, volume
+             FROM candles
+             WHERE exchange = $1 AND pair = $2 AND interval = $3 AND time >= $4 AND time <= $5
+             ORDER BY time",
+        )
+        .bind(exchange)
+        .bind(pair)
+        .bind(interval)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| CandleRepositoryError::Database(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| CandlePayload {
+                exchange: r.get("exchange"),
+                pair: r.get("pair"),
+                interval: r.get("interval"),
+                time: r.get("time"),
+                open: r.get::<i64, _>("open") as u64,
+                high: r.get::<i64, _>("high") as u64,
+                low: r.get::<i64, _>("low") as u64,
+                close: r.get::<i64, _>("close") as u64,
+                volume: r.get::<i64, _>("volume") as u64,
+            })
+            .collect())
+    }
+
+    async fn upsert_candles(&self, candles: &[Candle]) -> Result<(), CandleRepositoryError> {
+        if candles.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| CandleRepositoryError::Database(e.to_string()))?;
+
+        for candle in candles {
+            sqlx::query(
+                "INSERT INTO candles (time, exchange, pair, interval, open, high, low, close, volume)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT (exchange, pair, interval, time)
+                 DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
+                               close = EXCLUDED.close, volume = EXCLUDED.volume",
+            )
+            .bind(candle.time)
+            .bind(&candle.exchange)
+            .bind(&candle.pair)
+            .bind(candle.interval.as_str())
+            .bind(candle.open as i64)
+            .bind(candle.high as i64)
+            .bind(candle.low as i64)
+            .bind(candle.close as i64)
+            .bind(candle.volume as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    exchange = %candle.exchange,
+                    pair = %candle.pair,
+                    interval = candle.interval.as_str(),
+                    error = %e,
+                    "failed to upsert candle"
+                );
+                CandleRepositoryError::Database(e.to_string())
+            })?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| CandleRepositoryError::Database(e.to_string()))?;
+
+        tracing::debug!(candle_count = candles.len(), "upserted candles to db");
+        Ok(())
+    }
+}
 
 pub struct PostgresTickerRepository {
     pool: PgPool,
