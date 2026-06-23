@@ -3,13 +3,13 @@ mod store;
 
 pub use catalog::ExchangeCatalog;
 pub use store::{
-    Candle, CandleStore, FeedRow, OrderRow, OrderStore, SignalRow, SignalStore, TickerStore,
-    MAX_SIGNAL_ROWS,
+    BacktestStore, Candle, CandleStore, FeedRow, OrderRow, OrderStore, SignalRow, SignalStore,
+    TickerStore, MAX_SIGNAL_ROWS,
 };
 
 use dioxus::prelude::*;
 
-use crate::api::{CandleItem, ExchangeResponse, PairResponse};
+use crate::api::{BacktestResult, CandleItem, ExchangeResponse, PairResponse};
 use crate::auth::Session;
 use crate::protocol::{CandleMessage, OrderUpdateMessage, PriceMessage, SignalMessage};
 use crate::router::Route;
@@ -32,6 +32,7 @@ pub struct AppState {
     pub catalog: Signal<ExchangeCatalog>,
     pub theme: Signal<Theme>,
     pub candles: Signal<CandleStore>,
+    pub backtest: Signal<BacktestStore>,
 }
 
 impl Default for AppState {
@@ -52,6 +53,7 @@ impl AppState {
             catalog: Signal::new(ExchangeCatalog::new()),
             theme: Signal::new(Theme::default()),
             candles: Signal::new(CandleStore::new()),
+            backtest: Signal::new(BacktestStore::new()),
         }
     }
 
@@ -92,6 +94,14 @@ impl AppState {
         self.candles
             .write()
             .seed(key, items.iter().map(Candle::from).collect());
+    }
+
+    pub fn set_backtest_result(&mut self, result: BacktestResult) {
+        self.backtest.write().set(result);
+    }
+
+    pub fn clear_backtest_result(&mut self) {
+        self.backtest.write().clear();
     }
 
     pub fn set_exchanges(&mut self, exchanges: Vec<ExchangeResponse>) {

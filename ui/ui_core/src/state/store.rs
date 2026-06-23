@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::api::{CandleItem, OrderItem};
+use crate::api::{BacktestResult, CandleItem, OrderItem};
 use crate::domain::{direction, extract_time, Direction, Ticker};
 use crate::protocol::{CandleMessage, OrderUpdateMessage, PriceMessage, SignalMessage};
 
@@ -320,6 +320,29 @@ impl CandleStore {
 
     pub fn series_for(&self, key: &str) -> &[Candle] {
         self.series.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// Holds the most recent backtest run so the chart page can read it
+/// regardless of which page triggered `POST /v1/backtest/run` — there is no
+/// dedicated Backtest page yet, so this is the first piece of that future
+/// store, scoped to what the chart's trade overlay needs today.
+#[derive(Debug, Clone, Default)]
+pub struct BacktestStore {
+    pub result: Option<BacktestResult>,
+}
+
+impl BacktestStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&mut self, result: BacktestResult) {
+        self.result = Some(result);
+    }
+
+    pub fn clear(&mut self) {
+        self.result = None;
     }
 }
 
@@ -709,5 +732,42 @@ mod tests {
     fn candle_store_series_for_unknown_key_returns_empty() {
         let store = CandleStore::new();
         assert!(store.series_for("does:not:exist").is_empty());
+    }
+
+    fn backtest_result(win_rate: f64) -> BacktestResult {
+        BacktestResult {
+            strategy_id: "s1".to_string(),
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            interval: "1m".to_string(),
+            candle_count: 10,
+            signal_count: 1,
+            total_return_pct: 1.0,
+            max_drawdown_pct: 0.1,
+            trade_log: vec![],
+            signal_log: vec![],
+            closed_trades: vec![],
+            win_rate,
+            avg_rr: None,
+        }
+    }
+
+    #[test]
+    fn backtest_store_set_replaces_previous_result() {
+        let mut store = BacktestStore::new();
+        store.set(backtest_result(0.5));
+        store.set(backtest_result(0.75));
+
+        assert_eq!(store.result.unwrap().win_rate, 0.75);
+    }
+
+    #[test]
+    fn backtest_store_clear_empties_result() {
+        let mut store = BacktestStore::new();
+        store.set(backtest_result(0.5));
+
+        store.clear();
+
+        assert!(store.result.is_none());
     }
 }
