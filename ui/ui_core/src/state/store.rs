@@ -160,6 +160,10 @@ impl SignalStore {
 pub struct OrderRow {
     pub client_order_id: String,
     pub time: String,
+    /// Full RFC3339 timestamp — `time` above is just the `HH:MM:SS` display
+    /// slice (see `extract_time`), which isn't enough to place a marker at
+    /// the right point on the chart's time axis.
+    pub full_timestamp: String,
     pub order_id: String,
     pub exchange: String,
     pub pair: String,
@@ -175,6 +179,7 @@ impl From<&OrderUpdateMessage> for OrderRow {
         Self {
             client_order_id: msg.client_order_id.clone(),
             time: extract_time(&msg.timestamp).to_string(),
+            full_timestamp: msg.timestamp.clone(),
             order_id: msg.order_id.clone(),
             exchange: msg.exchange.clone(),
             pair: msg.pair.clone(),
@@ -185,6 +190,16 @@ impl From<&OrderUpdateMessage> for OrderRow {
             strategy_id: msg.strategy_id.clone(),
         }
     }
+}
+
+/// The one thing Stage 10's live-order overlay can render today: an entry
+/// marker at the open position's fill time/side. A live trade rectangle or
+/// SL/TP lines would need `OrderUpdatePayload` to carry those prices, which
+/// it doesn't — see `ROADMAP.md` Phase 7's "Stage 10" note.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct OpenPositionMarker {
+    pub time: String,
+    pub side: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -218,6 +233,24 @@ impl OrderStore {
     pub fn seed(&mut self, items: &[OrderItem]) {
         self.rows = items.iter().map(OrderRow::from).collect();
     }
+
+    /// The current open position for an exchange/pair, if any — the most
+    /// recent row that isn't cancelled/failed. Intentionally simple (no
+    /// fill-netting): Stage 10 only needs the one order to put an entry
+    /// marker on, not a full position-tracking model.
+    pub fn open_position_for(&self, exchange: &str, pair: &str) -> Option<OpenPositionMarker> {
+        self.rows
+            .iter()
+            .find(|r| {
+                r.exchange == exchange
+                    && r.pair == pair
+                    && !matches!(r.status.as_str(), "cancelled" | "failed")
+            })
+            .map(|r| OpenPositionMarker {
+                time: r.full_timestamp.clone(),
+                side: r.side.clone(),
+            })
+    }
 }
 
 impl From<&OrderItem> for OrderRow {
@@ -225,6 +258,7 @@ impl From<&OrderItem> for OrderRow {
         Self {
             client_order_id: item.client_order_id.clone(),
             time: extract_time(&item.created_at).to_string(),
+            full_timestamp: item.created_at.clone(),
             order_id: item.exchange_order_id.clone().unwrap_or_default(),
             exchange: item.exchange.clone(),
             pair: item.pair.clone(),
@@ -644,6 +678,38 @@ mod tests {
             "updating cli-1 in place must not move it back to the front"
         );
         assert_eq!(store.rows()[1].client_order_id, "cli-1");
+    }
+
+    #[test]
+    fn order_store_open_position_renders_entry_marker_only() {
+        let mut store = OrderStore::new();
+        store.apply(&order("cli-1", "filled"));
+
+        let marker = store
+            .open_position_for("tabdeal", "USDT/IRT")
+            .expect("a filled order for this exchange/pair must produce a marker");
+
+        assert_eq!(marker.side, "buy");
+        assert_eq!(marker.time, "2026-06-21T10:00:00Z");
+        // Intentionally partial — stop_loss/take_profit don't exist on
+        // OrderUpdatePayload yet, so there is no rectangle/SL/TP line to
+        // render, only this single entry marker.
+    }
+
+    #[test]
+    fn order_store_open_position_ignores_cancelled_orders() {
+        let mut store = OrderStore::new();
+        store.apply(&order("cli-1", "cancelled"));
+
+        assert!(store.open_position_for("tabdeal", "USDT/IRT").is_none());
+    }
+
+    #[test]
+    fn order_store_open_position_ignores_other_pairs() {
+        let mut store = OrderStore::new();
+        store.apply(&order("cli-1", "filled"));
+
+        assert!(store.open_position_for("tabdeal", "BTC/IRT").is_none());
     }
 
     // --- CandleStore tests ---

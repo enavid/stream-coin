@@ -224,6 +224,7 @@ const CHART_GLUE_JS: &str = r##"
       allTrades: [],
       tradeDensity: "all",
       statsEl: null,
+      liveOrderMarker: null,
     };
     if (window.ResizeObserver) {
       var ro = new ResizeObserver(function () {
@@ -289,7 +290,7 @@ const CHART_GLUE_JS: &str = r##"
         };
         live.markers.push(marker);
         live.markers.sort(function (a, b) { return a.time - b.time; });
-        series.setMarkers(live.markers);
+        refreshAllMarkers(containerId);
         live.drawings.push({ type: "marker", ref: marker });
         return;
       }
@@ -376,6 +377,7 @@ const CHART_GLUE_JS: &str = r##"
     window.scChartClearDrawings(containerId);
     window.scChartClearTrades(containerId);
     window.scChartClearStats(containerId);
+    window.scChartSetLiveOrderMarker(containerId, null);
     entry.series.setData(candles.map(toPoint));
     entry.chart.timeScale().fitContent();
   };
@@ -421,8 +423,36 @@ const CHART_GLUE_JS: &str = r##"
     });
     entry.drawings = [];
     entry.markers = [];
-    entry.series.setMarkers([]);
+    refreshAllMarkers(containerId);
     entry.pendingPoint = null;
+  };
+  // `setMarkers` always replaces the whole array, so the manually-drawn
+  // buy/sell markers and the one live-order entry marker (Stage 10) have to
+  // be merged and re-sent together every time either one changes.
+  function refreshAllMarkers(containerId) {
+    var entry = window.scCharts[containerId];
+    if (!entry) return;
+    var markers = entry.markers.slice();
+    if (entry.liveOrderMarker) markers.push(entry.liveOrderMarker);
+    markers.sort(function (a, b) { return a.time - b.time; });
+    entry.series.setMarkers(markers);
+  }
+  // Entry marker only — a live trade rectangle or SL/TP lines would need
+  // `OrderUpdatePayload` to carry those prices, which it doesn't yet (see
+  // `ROADMAP.md` Phase 7, Stage 10).
+  window.scChartSetLiveOrderMarker = function (containerId, marker) {
+    var entry = window.scCharts[containerId];
+    if (!entry) return;
+    entry.liveOrderMarker = marker
+      ? {
+          time: tradeTime(marker.time),
+          position: marker.side === "buy" ? "belowBar" : "aboveBar",
+          color: marker.side === "buy" ? entry.colors.up : entry.colors.down,
+          shape: marker.side === "buy" ? "arrowUp" : "arrowDown",
+          text: marker.side === "buy" ? "Buy" : "Sell",
+        }
+      : null;
+    refreshAllMarkers(containerId);
   };
   // --- Trade overlay (backtest closed trades) ---------------------------
   // Canvas-based Series Primitives (`series.attachPrimitive`), not DOM
@@ -936,6 +966,30 @@ pub fn Chart(server_url: String) -> Element {
                     .await;
                 }
             }
+        });
+    });
+
+    // Live order overlay (Stage 10, intentionally partial) — an entry
+    // marker only, since `OrderUpdatePayload` carries no SL/TP to draw a
+    // full trade rectangle/lines from. Reads `state.orders` and the
+    // exchange/pair memos inside the closure for the same reactivity
+    // reason as every other effect on this page.
+    use_effect(move || {
+        let exchange = selected_exchange();
+        let pair = selected_pair();
+        let marker = state.orders.read().open_position_for(&exchange, &pair);
+        if !chart_ready() {
+            return;
+        }
+        spawn(async move {
+            let json = match &marker {
+                Some(m) => serde_json::to_string(m).unwrap_or_else(|_| "null".to_string()),
+                None => "null".to_string(),
+            };
+            let _ = document::eval(&format!(
+                "window.scChartSetLiveOrderMarker('{CONTAINER_ID}', {json})"
+            ))
+            .await;
         });
     });
 
