@@ -902,6 +902,43 @@ pub fn Chart(server_url: String) -> Element {
         });
     });
 
+    // Mirrors the most recent backtest result onto the chart whenever
+    // `BacktestStore` changes — reads it *inside* the closure (not a
+    // snapshot captured outside) so Dioxus actually subscribes this effect
+    // to it, the same reactivity rule the exchange/pair/interval memos
+    // above call out; getting this wrong is the exact bug that made
+    // timeframe switching silently do nothing earlier in this page's life.
+    use_effect(move || {
+        let result = state.backtest.read().result.clone();
+        if !chart_ready() {
+            return;
+        }
+        spawn(async move {
+            match result {
+                Some(result) => {
+                    let stats_row = format_stats_row(&result);
+                    if let (Ok(trades_json), Ok(stats_json)) = (
+                        serde_json::to_string(&result.closed_trades),
+                        serde_json::to_string(&stats_row),
+                    ) {
+                        let _ = document::eval(&format!(
+                            "window.scChartSetTrades('{CONTAINER_ID}', {trades_json}); \
+                             window.scChartSetStats('{CONTAINER_ID}', {stats_json})"
+                        ))
+                        .await;
+                    }
+                }
+                None => {
+                    let _ = document::eval(&format!(
+                        "window.scChartClearTrades('{CONTAINER_ID}'); \
+                         window.scChartClearStats('{CONTAINER_ID}')"
+                    ))
+                    .await;
+                }
+            }
+        });
+    });
+
     // Push only the latest bar from the live WS feed (cheap — avoids
     // re-serializing the whole history on every tick); skips re-sending a
     // bar whose `time` was already pushed. Reads `series_key()` inside the
@@ -1179,7 +1216,7 @@ fn sign_class(value: f64) -> &'static str {
 
 /// The 2-column x 5-row corner stats table's content for one backtest
 /// result — title | total trades | win rate | total PnL | avg RR.
-#[allow(dead_code)]
+#[derive(serde::Serialize)]
 struct StatsRow {
     title: String,
     total_trades: usize,
@@ -1193,9 +1230,6 @@ struct StatsRow {
 /// Builds the stats row from a `BacktestResult` — kept as a plain Rust
 /// function so the win-rate/PnL sign coloring is unit testable, rather than
 /// computed only inside the JS DOM-overlay template (`scChartSetStats`).
-/// Not yet called from non-test code: the chart page doesn't mount the
-/// stats table until it's wired up.
-#[allow(dead_code)]
 fn format_stats_row(result: &crate::api::BacktestResult) -> StatsRow {
     let total_pnl: i64 = result.closed_trades.iter().map(|t| t.pnl).sum();
     StatsRow {

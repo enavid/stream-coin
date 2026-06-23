@@ -98,14 +98,14 @@ pub struct BacktestSignalRecord {
     pub timestamp: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeSide {
     Long,
     Short,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeOutcome {
     Win,
@@ -113,7 +113,7 @@ pub enum TradeOutcome {
     Breakeven,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClosedTrade {
     pub strategy_id: String,
     pub side: TradeSide,
