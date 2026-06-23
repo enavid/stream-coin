@@ -98,6 +98,38 @@ pub struct BacktestSignalRecord {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeSide {
+    Long,
+    Short,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeOutcome {
+    Win,
+    Loss,
+    Breakeven,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ClosedTrade {
+    pub strategy_id: String,
+    pub side: TradeSide,
+    pub entry_price: u64,
+    pub exit_price: u64,
+    pub stop_loss: Option<u64>,
+    pub take_profit: Option<u64>,
+    pub quantity: u64,
+    pub entry_time: String,
+    pub exit_time: String,
+    pub pnl: i64,
+    pub pnl_pct: f64,
+    pub rr: Option<f64>,
+    pub outcome: TradeOutcome,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct BacktestResult {
     pub strategy_id: String,
@@ -110,6 +142,29 @@ pub struct BacktestResult {
     pub max_drawdown_pct: f64,
     pub trade_log: Vec<TradeRecord>,
     pub signal_log: Vec<BacktestSignalRecord>,
+    pub closed_trades: Vec<ClosedTrade>,
+    pub win_rate: f64,
+    pub avg_rr: Option<f64>,
+}
+
+#[cfg(test)]
+mod backtest_result_tests {
+    use super::*;
+
+    #[test]
+    fn backtest_result_dto_deserializes_closed_trades_from_engine_payload() {
+        let json = r#"{"strategy_id":"s1","exchange":"tabdeal","pair":"USDT/IRT","interval":"1m","candle_count":10,"signal_count":2,"total_return_pct":1.5,"max_drawdown_pct":0.2,"trade_log":[],"signal_log":[],"closed_trades":[{"strategy_id":"s1","side":"long","entry_price":100000,"exit_price":110000,"stop_loss":null,"take_profit":null,"quantity":1,"entry_time":"2026-01-01T00:00:00Z","exit_time":"2026-01-01T00:01:00Z","pnl":10000,"pnl_pct":10.0,"rr":null,"outcome":"win"}],"win_rate":1.0,"avg_rr":null}"#;
+        let result: BacktestResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.win_rate, 1.0);
+        assert_eq!(result.avg_rr, None);
+        assert_eq!(result.closed_trades.len(), 1);
+        let trade = &result.closed_trades[0];
+        assert_eq!(trade.side, TradeSide::Long);
+        assert_eq!(trade.outcome, TradeOutcome::Win);
+        assert_eq!(trade.entry_price, 100_000);
+        assert_eq!(trade.pnl, 10_000);
+        assert_eq!(trade.rr, None);
+    }
 }
 
 // --- orders ---

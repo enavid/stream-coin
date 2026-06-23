@@ -526,6 +526,29 @@ mod closed_trade_tests {
         assert_eq!(trade.outcome, TradeOutcome::Breakeven);
     }
 
+    #[test]
+    fn closed_trade_serializes_with_plain_numeric_fields() {
+        let trade = ClosedTrade::close(
+            "s1".to_string(),
+            TradeSide::Long,
+            100_000,
+            110_000,
+            None,
+            None,
+            1,
+            t(0),
+            t(60),
+        );
+        let value = serde_json::to_value(&trade).unwrap();
+        assert!(
+            value["entry_price"].is_number(),
+            "entry_price must serialize as a plain number, not a string — this module uses the scaled-u64 convention, not Decimal-as-string"
+        );
+        assert!(value["pnl"].is_number());
+        assert_eq!(value["side"], "long");
+        assert_eq!(value["outcome"], "win");
+    }
+
     proptest! {
         #[test]
         fn closed_trade_pnl_sign_matches_price_direction_long(
