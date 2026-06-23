@@ -223,6 +223,7 @@ const CHART_GLUE_JS: &str = r##"
       tradePrimitives: [],
       allTrades: [],
       tradeDensity: "all",
+      statsEl: null,
     };
     if (window.ResizeObserver) {
       var ro = new ResizeObserver(function () {
@@ -374,6 +375,7 @@ const CHART_GLUE_JS: &str = r##"
     // over an unrelated instrument's candles.
     window.scChartClearDrawings(containerId);
     window.scChartClearTrades(containerId);
+    window.scChartClearStats(containerId);
     entry.series.setData(candles.map(toPoint));
     entry.chart.timeScale().fitContent();
   };
@@ -637,6 +639,30 @@ const CHART_GLUE_JS: &str = r##"
         refreshVisibleTrades(containerId);
       }
     }
+  };
+  // Stats dashboard table — a DOM overlay, not a primitive: text-heavy UI
+  // is what DOM is for (stage 5's own reasoning, applied in the other
+  // direction). Fixed top-right; unlike vline/rect/fib it never needs
+  // `repositionOverlays` since it doesn't track any time/price coordinate.
+  window.scChartSetStats = function (containerId, statsRow) {
+    var entry = window.scCharts[containerId];
+    if (!entry) return;
+    window.scChartClearStats(containerId);
+    var el = document.getElementById(containerId);
+    var table = makeOverlayDiv(el, "sc-stats-table");
+    table.innerHTML =
+      '<div class="sc-stats-title">' + statsRow.title + '</div>' +
+      '<div class="sc-stats-row"><span>Trades</span><b>' + statsRow.total_trades + '</b></div>' +
+      '<div class="sc-stats-row"><span>Win rate</span><b class="' + statsRow.win_rate_class + '">' + statsRow.win_rate_pct + '</b></div>' +
+      '<div class="sc-stats-row"><span>PnL</span><b class="' + statsRow.total_pnl_class + '">' + statsRow.total_pnl + '</b></div>' +
+      '<div class="sc-stats-row"><span>Avg RR</span><b>' + statsRow.avg_rr + '</b></div>';
+    entry.statsEl = table;
+  };
+  window.scChartClearStats = function (containerId) {
+    var entry = window.scCharts[containerId];
+    if (!entry || !entry.statsEl) return;
+    entry.statsEl.remove();
+    entry.statsEl = null;
   };
   window.scChartSetTheme = function (containerId, theme) {
     var entry = window.scCharts[containerId];
@@ -1138,6 +1164,54 @@ fn visible_trades<'a>(
     overlapping
 }
 
+/// CSS class for a sign-colored stats cell — green/red/neutral by plain
+/// class toggle (per `ROADMAP.md` Phase 7: "plain CSS class toggle, not
+/// inline-computed colors").
+fn sign_class(value: f64) -> &'static str {
+    if value > 0.0 {
+        "stat-positive"
+    } else if value < 0.0 {
+        "stat-negative"
+    } else {
+        "stat-neutral"
+    }
+}
+
+/// The 2-column x 5-row corner stats table's content for one backtest
+/// result — title | total trades | win rate | total PnL | avg RR.
+#[allow(dead_code)]
+struct StatsRow {
+    title: String,
+    total_trades: usize,
+    win_rate_pct: String,
+    win_rate_class: &'static str,
+    total_pnl: i64,
+    total_pnl_class: &'static str,
+    avg_rr: String,
+}
+
+/// Builds the stats row from a `BacktestResult` — kept as a plain Rust
+/// function so the win-rate/PnL sign coloring is unit testable, rather than
+/// computed only inside the JS DOM-overlay template (`scChartSetStats`).
+/// Not yet called from non-test code: the chart page doesn't mount the
+/// stats table until it's wired up.
+#[allow(dead_code)]
+fn format_stats_row(result: &crate::api::BacktestResult) -> StatsRow {
+    let total_pnl: i64 = result.closed_trades.iter().map(|t| t.pnl).sum();
+    StatsRow {
+        title: format!("{} · {}", result.strategy_id, result.pair),
+        total_trades: result.closed_trades.len(),
+        win_rate_pct: format!("{:.1}%", result.win_rate * 100.0),
+        win_rate_class: sign_class(result.win_rate - 0.5),
+        total_pnl,
+        total_pnl_class: sign_class(total_pnl as f64),
+        avg_rr: result
+            .avg_rr
+            .map(|rr| format!("{rr:.2}"))
+            .unwrap_or_else(|| "—".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1272,5 +1346,62 @@ mod tests {
             visible.windows(2).all(|w| w[0].exit_time >= w[1].exit_time),
             "trades must be ordered most-recent-exit first"
         );
+    }
+
+    fn backtest_result_with_trades(
+        trades: Vec<crate::api::ClosedTrade>,
+    ) -> crate::api::BacktestResult {
+        crate::api::BacktestResult {
+            strategy_id: "s1".to_string(),
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            interval: "1m".to_string(),
+            candle_count: 10,
+            signal_count: 1,
+            total_return_pct: 0.0,
+            max_drawdown_pct: 0.0,
+            trade_log: vec![],
+            signal_log: vec![],
+            win_rate: 0.0,
+            avg_rr: None,
+            closed_trades: trades,
+        }
+    }
+
+    #[test]
+    fn format_stats_row_colors_negative_pnl_class() {
+        let mut trade = closed_trade_at("2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
+        trade.pnl = -5_000;
+        let result = backtest_result_with_trades(vec![trade]);
+
+        let row = format_stats_row(&result);
+
+        assert_eq!(row.total_pnl, -5_000);
+        assert_eq!(row.total_pnl_class, "stat-negative");
+    }
+
+    #[test]
+    fn format_stats_row_colors_positive_win_rate_class() {
+        let mut result = backtest_result_with_trades(vec![]);
+        result.win_rate = 0.75;
+
+        let row = format_stats_row(&result);
+
+        assert_eq!(row.win_rate_class, "stat-positive");
+    }
+
+    #[test]
+    fn format_stats_row_sums_pnl_across_closed_trades() {
+        let mut a = closed_trade_at("2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
+        a.pnl = 10_000;
+        let mut b = closed_trade_at("2026-01-01T01:00:00Z", "2026-01-01T01:01:00Z");
+        b.pnl = -3_000;
+        let result = backtest_result_with_trades(vec![a, b]);
+
+        let row = format_stats_row(&result);
+
+        assert_eq!(row.total_trades, 2);
+        assert_eq!(row.total_pnl, 7_000);
+        assert_eq!(row.total_pnl_class, "stat-positive");
     }
 }

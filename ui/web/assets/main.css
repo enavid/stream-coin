@@ -707,6 +707,26 @@
       white-space: nowrap; z-index: 2;
     }
 
+    /* Backtest stats corner table — fixed top-right, never repositioned
+       (unlike vline/rect/fib above, it tracks no time/price coordinate). */
+    .sc-stats-table {
+      position: absolute; top: 8px; right: 8px;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 8px 10px;
+      font-size: 11.5px; font-family: var(--mono); color: var(--text);
+      pointer-events: none; z-index: 3; min-width: 150px;
+    }
+    .sc-stats-title {
+      font-weight: 600; color: var(--text-strong); margin-bottom: 4px;
+      white-space: nowrap;
+    }
+    .sc-stats-row {
+      display: flex; justify-content: space-between; gap: 10px;
+    }
+    .sc-stats-row .stat-positive { color: var(--green); }
+    .sc-stats-row .stat-negative { color: var(--red); }
+    .sc-stats-row .stat-neutral { color: var(--text); }
+
     .chart-state {
       position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
       flex-direction: column; gap: 10px;
