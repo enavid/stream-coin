@@ -1,3 +1,4 @@
+pub mod coinex;
 pub mod entity;
 pub mod hitobit;
 pub mod port;

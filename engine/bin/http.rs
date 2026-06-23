@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use stream_coin::exchange::coinex::CoinexWsAdapter;
 use stream_coin::exchange::hitobit::HitobitWsAdapter;
 use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
@@ -97,6 +98,12 @@ async fn main() -> std::io::Result<()> {
         "hitobit".to_string(),
         Arc::new(|ws_url: &str| {
             Arc::new(HitobitWsAdapter::with_url(ws_url.to_string())) as Arc<dyn ExchangeAdapter>
+        }),
+    );
+    factories.insert(
+        "coinex".to_string(),
+        Arc::new(|ws_url: &str| {
+            Arc::new(CoinexWsAdapter::with_url(ws_url.to_string())) as Arc<dyn ExchangeAdapter>
         }),
     );
     let adapter_factories = Arc::new(factories);
@@ -190,6 +197,12 @@ async fn main() -> std::io::Result<()> {
             display_name: "Hitobit".to_string(),
             ws_url: "wss://stream.hitobit.com/stream".to_string(),
             enabled: true,
+        });
+        registry.add_exchange(ExchangeRecord {
+            name: "coinex".to_string(),
+            display_name: "CoinEx".to_string(),
+            ws_url: "wss://socket.coinex.com/v2/spot".to_string(),
+            enabled: false,
         });
         registry.add_pair(TradingPairRecord {
             exchange_name: "tabdeal".to_string(),
