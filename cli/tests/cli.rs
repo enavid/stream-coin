@@ -50,6 +50,52 @@ fn sc_without_args_exits_with_error() {
 }
 
 #[test]
+fn sc_candle_subcommand_shows_help() {
+    Command::cargo_bin("sc")
+        .unwrap()
+        .args(["candle", "--help"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn sc_candle_backfill_subcommand_shows_help() {
+    Command::cargo_bin("sc")
+        .unwrap()
+        .args(["candle", "backfill", "--help"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn sc_candle_backfill_without_from_to_fails_argument_parsing() {
+    Command::cargo_bin("sc")
+        .unwrap()
+        .args(["candle", "backfill", "coinex", "BTC/USDT", "1h"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn sc_candle_backfill_attempts_request_and_reports_connection_error() {
+    let dir = tempdir().unwrap();
+    sc(&dir)
+        .args([
+            "candle",
+            "backfill",
+            "coinex",
+            "BTC/USDT",
+            "1h",
+            "--from",
+            "2026-01-01T00:00:00Z",
+            "--to",
+            "2026-01-02T00:00:00Z",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn sc_config_show_exits_successfully() {
     let dir = tempdir().unwrap();
     sc(&dir).args(["config", "show"]).assert().success();

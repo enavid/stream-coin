@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 
 mod auth;
+mod candle;
 mod client;
 mod config;
 mod response;
@@ -38,6 +39,11 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Manage historical candle data
+    Candle {
+        #[command(subcommand)]
+        command: CandleCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -68,6 +74,24 @@ enum ConfigCommands {
     Show,
 }
 
+#[derive(Subcommand)]
+enum CandleCommands {
+    /// Fetch historical klines from the exchange and persist them
+    Backfill {
+        exchange: String,
+        /// Trading pair in "BASE/QUOTE" form, e.g. "BTC/USDT"
+        pair: String,
+        /// Candle interval: 1m, 5m, 15m, or 1h
+        interval: String,
+        /// Start of the range, RFC3339 (e.g. "2026-01-01T00:00:00Z")
+        #[arg(long)]
+        from: String,
+        /// End of the range, RFC3339 (e.g. "2026-01-02T00:00:00Z")
+        #[arg(long)]
+        to: String,
+    },
+}
+
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let mut config = Config::load();
@@ -92,6 +116,21 @@ async fn run() -> Result<(), String> {
                     ticker::handle_stop(&client, &exchange, &symbol).await
                 }
                 TickerCommands::List => ticker::handle_list(&client).await,
+            }
+        }
+
+        Commands::Candle { command } => {
+            let client = ApiClient::new(&config);
+            match command {
+                CandleCommands::Backfill {
+                    exchange,
+                    pair,
+                    interval,
+                    from,
+                    to,
+                } => {
+                    candle::handle_backfill(&client, &exchange, &pair, &interval, &from, &to).await
+                }
             }
         }
 

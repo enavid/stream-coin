@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::response::{ApiError, ApiSuccess, TickerData, TickerListData};
+use crate::response::{ApiError, ApiSuccess, BackfillData, TickerData, TickerListData};
 
 pub struct ApiClient {
     inner: Client,
@@ -36,6 +36,10 @@ impl ApiClient {
 
     pub fn ticker_list_url(&self) -> String {
         format!("{}/v1/exchanges/futures/tickers", self.base_url)
+    }
+
+    pub fn candle_backfill_url(&self) -> String {
+        format!("{}/v1/candles/backfill", self.base_url)
     }
 
     async fn post(&self, url: &str, body: Value) -> Result<Value, String> {
@@ -97,6 +101,36 @@ impl ApiClient {
     pub async fn ticker_list(&self) -> Result<ApiSuccess<TickerListData>, ApiError> {
         let value = self
             .get(&self.ticker_list_url())
+            .await
+            .map_err(|e| ApiError {
+                success: false,
+                message: e,
+                errors: vec![],
+            })?;
+        parse_response(value)
+    }
+
+    /// `from`/`to` are passed through verbatim as RFC3339 timestamps — the
+    /// engine validates and parses them; the CLI does not duplicate that logic.
+    pub async fn candle_backfill(
+        &self,
+        exchange: &str,
+        pair: &str,
+        interval: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<ApiSuccess<BackfillData>, ApiError> {
+        let value = self
+            .post(
+                &self.candle_backfill_url(),
+                serde_json::json!({
+                    "exchange": exchange,
+                    "pair": pair,
+                    "interval": interval,
+                    "from": from,
+                    "to": to,
+                }),
+            )
             .await
             .map_err(|e| ApiError {
                 success: false,
@@ -170,6 +204,15 @@ mod tests {
     }
 
     #[test]
+    fn client_candle_backfill_url_uses_base_url() {
+        let client = make_client("http://localhost:8080");
+        assert_eq!(
+            client.candle_backfill_url(),
+            "http://localhost:8080/v1/candles/backfill"
+        );
+    }
+
+    #[test]
     fn client_uses_custom_server_url() {
         let client = make_client("http://prod.example.com:9000");
         assert!(client
@@ -211,5 +254,31 @@ mod tests {
         let result: Result<ApiSuccess<TickerData>, _> = parse_response(value);
         let err = result.unwrap_err();
         assert_eq!(err.errors[0].field, "symbol");
+    }
+
+    #[test]
+    fn parse_response_backfill_success_extracts_candles_written() {
+        let value = serde_json::json!({
+            "success": true,
+            "message": "Backfill complete",
+            "data": { "candles_written": 7 }
+        });
+        let result: Result<ApiSuccess<BackfillData>, _> = parse_response(value);
+        assert_eq!(result.unwrap().data.candles_written, 7);
+    }
+
+    #[test]
+    fn parse_response_backfill_error_for_unsupported_exchange() {
+        let value = serde_json::json!({
+            "success": false,
+            "message": "exchange 'tabdeal' has no historical candle source",
+            "errors": []
+        });
+        let result: Result<ApiSuccess<BackfillData>, _> = parse_response(value);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("historical candle source"));
     }
 }

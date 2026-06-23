@@ -6,6 +6,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::AbortHandle;
 
 use crate::candle::entity::CandlePayload;
+use crate::exchange::historical_port::HistoricalCandleSource;
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
 use crate::infrastructure::crypto::credential_cipher::CredentialCipher;
@@ -109,6 +110,12 @@ pub struct AppState {
     /// In-memory candle history for the live chart page (`GET /v1/candles`).
     /// Populated by `exchange_handler::spawn_price_forwarder` as candles close.
     pub candle_history: CandleHistory,
+    /// Hard-coded registry of historical REST candle sources, keyed by exchange
+    /// name (e.g. `"coinex"`). Deliberately separate from `adapter_factories`:
+    /// not every exchange has a public historical-kline endpoint (Tabdeal and
+    /// Hitobit do not), so an exchange simply has no entry here rather than an
+    /// `Unsupported` stub implementation.
+    pub historical_sources: Arc<HashMap<String, Arc<dyn HistoricalCandleSource>>>,
 }
 
 impl AppState {
@@ -197,6 +204,7 @@ mod tests {
             credential_repository: None,
             credential_cipher: None,
             candle_history: AppState::new_candle_history(),
+            historical_sources: Arc::new(HashMap::new()),
         }
     }
 

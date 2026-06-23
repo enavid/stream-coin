@@ -1,8 +1,27 @@
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+use crate::candle::entity::Interval;
 
 /// Default and maximum candle counts for `GET /v1/candles?limit=`.
 pub const DEFAULT_CANDLE_LIMIT: usize = 300;
 pub const MAX_CANDLE_LIMIT: usize = 1000;
+
+#[derive(Debug, Deserialize)]
+pub struct BackfillRequest {
+    pub exchange: String,
+    /// `"BASE/QUOTE"`, e.g. `"BTC/USDT"`.
+    pub pair: String,
+    pub interval: Interval,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BackfillResponse {
+    pub candles_written: usize,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CandleHistoryQuery {

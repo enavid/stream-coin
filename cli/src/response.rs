@@ -51,6 +51,11 @@ pub struct TickerListData {
     pub tickers: Vec<TickerData>,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct BackfillData {
+    pub candles_written: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +110,21 @@ mod tests {
         let json = r#"{"success":true,"message":"ok","data":{"tickers":[]}}"#;
         let result: ApiSuccess<TickerListData> = serde_json::from_str(json).unwrap();
         assert!(result.data.tickers.is_empty());
+    }
+
+    #[test]
+    fn backfill_success_deserializes_candles_written_count() {
+        let json =
+            r#"{"success":true,"message":"Backfill complete","data":{"candles_written":42}}"#;
+        let result: ApiSuccess<BackfillData> = serde_json::from_str(json).unwrap();
+        assert_eq!(result.data.candles_written, 42);
+    }
+
+    #[test]
+    fn backfill_error_response_deserializes_as_api_error() {
+        let json = r#"{"success":false,"message":"exchange 'tabdeal' has no historical candle source","errors":[]}"#;
+        let result: ApiError = serde_json::from_str(json).unwrap();
+        assert!(result.message.contains("historical candle source"));
     }
 
     #[test]

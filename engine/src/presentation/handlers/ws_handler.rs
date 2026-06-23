@@ -82,6 +82,7 @@ mod tests {
             order_manager: None,
             python_strategy_repository: None,
             candle_repository: None,
+            historical_sources: Arc::new(HashMap::new()),
             candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             user_repository: None,

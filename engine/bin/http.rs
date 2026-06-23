@@ -11,7 +11,8 @@ use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use stream_coin::exchange::coinex::CoinexWsAdapter;
+use stream_coin::exchange::coinex::{CoinexHistoricalAdapter, CoinexWsAdapter};
+use stream_coin::exchange::historical_port::HistoricalCandleSource;
 use stream_coin::exchange::hitobit::HitobitWsAdapter;
 use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
@@ -108,6 +109,16 @@ async fn main() -> std::io::Result<()> {
         }),
     );
     let adapter_factories = Arc::new(factories);
+
+    // Hard-coded registry of historical REST candle sources — mirrors
+    // `adapter_factories` above but deliberately sparse: only exchanges with
+    // a public historical-kline endpoint get an entry (Tabdeal/Hitobit do not).
+    let mut historical_sources: HashMap<String, Arc<dyn HistoricalCandleSource>> = HashMap::new();
+    historical_sources.insert(
+        "coinex".to_string(),
+        Arc::new(CoinexHistoricalAdapter::new()) as Arc<dyn HistoricalCandleSource>,
+    );
+    let historical_sources = Arc::new(historical_sources);
 
     let db_pool: Option<sqlx::PgPool> = match env::var("DATABASE_URL") {
         Ok(url) => match sqlx::PgPool::connect(&url).await {
@@ -369,6 +380,7 @@ async fn main() -> std::io::Result<()> {
         python_strategy_repository: None,
         candle_repository,
         candle_history: AppState::new_candle_history(),
+        historical_sources,
         exchange_repository,
         user_repository,
         credential_repository,
