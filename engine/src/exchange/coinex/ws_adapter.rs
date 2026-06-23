@@ -78,7 +78,7 @@ impl CoinexWsAdapter {
 
         Ok(Price {
             exchange: ExchangeId::new("coinex"),
-            pair: Self::parse_trading_pair(market),
+            pair: super::market_to_pair(market),
             bid,
             ask,
             timestamp: Utc::now(),
@@ -93,18 +93,6 @@ impl CoinexWsAdapter {
         integer_part
             .parse::<u64>()
             .map_err(|_| format!("invalid price: {s}"))
-    }
-
-    fn parse_trading_pair(market: &str) -> TradingPair {
-        if let Some(base) = market.strip_suffix("USDT") {
-            TradingPair::new(base, "USDT")
-        } else if let Some(base) = market.strip_suffix("USDC") {
-            TradingPair::new(base, "USDC")
-        } else if let Some(base) = market.strip_suffix("BTC") {
-            TradingPair::new(base, "BTC")
-        } else {
-            TradingPair::new(market, "")
-        }
     }
 }
 
