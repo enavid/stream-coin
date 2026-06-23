@@ -218,8 +218,11 @@ const CHART_GLUE_JS: &str = r##"
       pendingPoint: null,
       // Trade-overlay primitives (`scChartSetTrades`) — separate from
       // `drawings` since they're cleared independently on every backtest
-      // re-run, not on every symbol/interval switch.
+      // re-run, not on every symbol/interval switch. `tradeDensity` is
+      // "all" or "markers-only" (the "Rectangles" toolbar toggle).
       tradePrimitives: [],
+      allTrades: [],
+      tradeDensity: "all",
     };
     if (window.ResizeObserver) {
       var ro = new ResizeObserver(function () {
@@ -231,6 +234,7 @@ const CHART_GLUE_JS: &str = r##"
     }
     chart.timeScale().subscribeVisibleTimeRangeChange(function () {
       repositionOverlays(containerId);
+      refreshVisibleTrades(containerId);
     });
     var legendEl = document.getElementById(legendId);
     chart.subscribeCrosshairMove(function (param) {
@@ -538,16 +542,25 @@ const CHART_GLUE_JS: &str = r##"
       timeAxisViews: function () { return []; },
     };
   }
-  // Single entry point: clears any previously-attached trade primitives,
-  // then attaches a rectangle + up to 3 lines (entry/SL/TP) per trade —
-  // mirrors the `scChartSetData`/`scChartClearDrawings` naming already
-  // used above.
-  window.scChartSetTrades = function (containerId, closedTrades) {
-    var entry = window.scCharts[containerId];
-    if (!entry) return;
-    window.scChartClearTrades(containerId);
+  var TRADE_DENSITY_CAP = 500;
+  // Filters to trades overlapping the chart's currently visible time
+  // range, capped at the `cap` most-recent (by exit time) — same logic as
+  // `pages::chart::visible_trades` in Rust, kept in sync by hand since this
+  // half runs only in JS (Series Primitives can't be driven from Rust
+  // directly). Recency-within-visible-range, not a hard global drop, per
+  // the Pine-Script/FreqUI/vectorbt precedent in `ROADMAP.md` Phase 7.
+  function visibleTradesJs(trades, fromSec, toSec, cap) {
+    var overlapping = trades.filter(function (t) {
+      var t1 = tradeTime(t.entry_time);
+      var t2 = tradeTime(t.exit_time);
+      return t1 <= toSec && t2 >= fromSec;
+    });
+    overlapping.sort(function (a, b) { return tradeTime(b.exit_time) - tradeTime(a.exit_time); });
+    return overlapping.slice(0, cap);
+  }
+  function attachTradePrimitives(entry, trades) {
     var primitives = [];
-    closedTrades.forEach(function (trade) {
+    trades.forEach(function (trade) {
       var rect = makeTradeRectanglePrimitive(trade, entry.colors);
       entry.series.attachPrimitive(rect);
       primitives.push(rect);
@@ -569,12 +582,61 @@ const CHART_GLUE_JS: &str = r##"
       }
     });
     entry.tradePrimitives = primitives;
+  }
+  // Recomputes which trades have primitives attached for the chart's
+  // current visible range — a no-op below the density cap (every trade
+  // just stays attached), only filters once the set is too large to draw
+  // all at once.
+  function refreshVisibleTrades(containerId) {
+    var entry = window.scCharts[containerId];
+    if (!entry || !entry.allTrades || entry.tradeDensity === "markers-only") return;
+    if (entry.allTrades.length <= TRADE_DENSITY_CAP) return;
+    var range = entry.chart.timeScale().getVisibleRange();
+    if (!range) return;
+    (entry.tradePrimitives || []).forEach(function (p) { entry.series.detachPrimitive(p); });
+    attachTradePrimitives(entry, visibleTradesJs(entry.allTrades, range.from, range.to, TRADE_DENSITY_CAP));
+  }
+  // Single entry point: clears any previously-attached trade primitives,
+  // then attaches a rectangle + up to 3 lines (entry/SL/TP) per trade —
+  // mirrors the `scChartSetData`/`scChartClearDrawings` naming already
+  // used above. Above `TRADE_DENSITY_CAP` trades, only the most-recent
+  // ones in the currently visible range get primitives; the rest follow as
+  // the user pans/zooms, via `refreshVisibleTrades` below.
+  window.scChartSetTrades = function (containerId, closedTrades) {
+    var entry = window.scCharts[containerId];
+    if (!entry) return;
+    window.scChartClearTrades(containerId);
+    entry.allTrades = closedTrades;
+    if (entry.tradeDensity === "markers-only") return;
+    if (closedTrades.length <= TRADE_DENSITY_CAP) {
+      attachTradePrimitives(entry, closedTrades);
+    } else {
+      refreshVisibleTrades(containerId);
+    }
   };
   window.scChartClearTrades = function (containerId) {
     var entry = window.scCharts[containerId];
     if (!entry) return;
     (entry.tradePrimitives || []).forEach(function (p) { entry.series.detachPrimitive(p); });
     entry.tradePrimitives = [];
+  };
+  // Toggle for the "Rectangles" button: "markers-only" detaches every
+  // rectangle/line primitive without forgetting the underlying trade list,
+  // so switching back to "all" redraws correctly rather than needing a
+  // fresh `scChartSetTrades` call.
+  window.scChartSetTradeDensity = function (containerId, density) {
+    var entry = window.scCharts[containerId];
+    if (!entry) return;
+    entry.tradeDensity = density;
+    if (density === "markers-only") {
+      window.scChartClearTrades(containerId);
+    } else if (entry.allTrades) {
+      if (entry.allTrades.length <= TRADE_DENSITY_CAP) {
+        attachTradePrimitives(entry, entry.allTrades);
+      } else {
+        refreshVisibleTrades(containerId);
+      }
+    }
   };
   window.scChartSetTheme = function (containerId, theme) {
     var entry = window.scCharts[containerId];
@@ -620,6 +682,7 @@ pub fn Chart(server_url: String) -> Element {
     let mut symbol_query = use_signal(String::new);
     let mut symbol_dropdown_open = use_signal(|| false);
     let mut drawing_tool = use_signal(|| "cursor".to_string());
+    let mut trade_rectangles_on = use_signal(|| true);
 
     // `use_memo` (not a plain `let` derived from signals) so the values are
     // themselves reactive reads — capturing the plain `String` they'd
@@ -972,6 +1035,24 @@ pub fn Chart(server_url: String) -> Element {
                         },
                         IconTrash {}
                     }
+                    div { class: "draw-btn-sep" }
+                    button {
+                        class: if trade_rectangles_on() { "draw-btn active" } else { "draw-btn" },
+                        title: "Toggle trade rectangles (backtest overlay)",
+                        r#type: "button",
+                        onclick: move |_| {
+                            let next = !trade_rectangles_on();
+                            trade_rectangles_on.set(next);
+                            let density = if next { "all" } else { "markers-only" };
+                            spawn(async move {
+                                let _ = document::eval(&format!(
+                                    "window.scChartSetTradeDensity('{CONTAINER_ID}', '{density}')"
+                                ))
+                                .await;
+                            });
+                        },
+                        IconRectangle {}
+                    }
                 }
                 }
                 if loading() {
@@ -1028,6 +1109,33 @@ fn format_trade_label(trade: &crate::api::ClosedTrade) -> String {
         parts.push(format!("TP: {tp}"));
     }
     parts.join(" | ")
+}
+
+/// Which closed trades to actually attach primitives for when the set is
+/// large — filters to those whose `entry_time..exit_time` overlaps the
+/// currently visible time range, then caps at the `cap` most-recent (by
+/// `exit_time`), rather than a hard global drop. Mirrors the recency-within-
+/// visible-range approach `ROADMAP.md`'s Phase 7 research found in
+/// FreqUI/vectorbt for "too many trades to render legibly".
+///
+/// Timestamps are compared as plain strings — RFC3339 with a fixed
+/// fractional-second precision and `Z` suffix (this codebase's convention,
+/// see `BacktestRunRequest::from`'s doc comment) sorts identically whether
+/// compared as text or as parsed instants, so no date library is needed.
+#[allow(dead_code)]
+fn visible_trades<'a>(
+    trades: &'a [crate::api::ClosedTrade],
+    visible_from: &str,
+    visible_to: &str,
+    cap: usize,
+) -> Vec<&'a crate::api::ClosedTrade> {
+    let mut overlapping: Vec<&crate::api::ClosedTrade> = trades
+        .iter()
+        .filter(|t| t.entry_time.as_str() <= visible_to && t.exit_time.as_str() >= visible_from)
+        .collect();
+    overlapping.sort_by(|a, b| b.exit_time.cmp(&a.exit_time));
+    overlapping.truncate(cap);
+    overlapping
 }
 
 #[cfg(test)]
@@ -1112,5 +1220,57 @@ mod tests {
         assert!(!label.contains("RR:"), "label was: {label}");
         assert!(!label.contains("SL:"), "label was: {label}");
         assert!(!label.contains("TP:"), "label was: {label}");
+    }
+
+    fn closed_trade_at(entry_time: &str, exit_time: &str) -> crate::api::ClosedTrade {
+        crate::api::ClosedTrade {
+            strategy_id: "s1".to_string(),
+            side: crate::api::TradeSide::Long,
+            entry_price: 100_000,
+            exit_price: 110_000,
+            stop_loss: None,
+            take_profit: None,
+            quantity: 1,
+            entry_time: entry_time.to_string(),
+            exit_time: exit_time.to_string(),
+            pnl: 10_000,
+            pnl_pct: 10.0,
+            rr: None,
+            outcome: crate::api::TradeOutcome::Win,
+        }
+    }
+
+    #[test]
+    fn visible_trades_filters_to_overlapping_range_only() {
+        let trades = vec![
+            closed_trade_at("2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z"), // before range
+            closed_trade_at("2026-01-01T01:00:00Z", "2026-01-01T01:05:00Z"), // inside range
+            closed_trade_at("2026-01-01T03:00:00Z", "2026-01-01T03:05:00Z"), // after range
+        ];
+
+        let visible = visible_trades(&trades, "2026-01-01T00:30:00Z", "2026-01-01T02:00:00Z", 500);
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].entry_time, "2026-01-01T01:00:00Z");
+    }
+
+    #[test]
+    fn visible_trades_caps_at_500_preferring_most_recent() {
+        let trades: Vec<crate::api::ClosedTrade> = (0..600)
+            .map(|i| {
+                closed_trade_at(
+                    &format!("2026-01-01T{:02}:00:00Z", i % 24),
+                    &format!("2026-01-02T{:02}:00:00Z", i % 24),
+                )
+            })
+            .collect();
+
+        let visible = visible_trades(&trades, "2026-01-01T00:00:00Z", "2026-01-03T00:00:00Z", 500);
+
+        assert_eq!(visible.len(), 500);
+        assert!(
+            visible.windows(2).all(|w| w[0].exit_time >= w[1].exit_time),
+            "trades must be ordered most-recent-exit first"
+        );
     }
 }
