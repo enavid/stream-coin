@@ -3,7 +3,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::response::{ApiError, ApiSuccess, BackfillData, TickerData, TickerListData};
+use crate::response::{
+    ApiError, ApiSuccess, BackfillData, SeedTopPairsData, TickerData, TickerListData,
+};
 
 pub struct ApiClient {
     inner: Client,
@@ -40,6 +42,13 @@ impl ApiClient {
 
     pub fn candle_backfill_url(&self) -> String {
         format!("{}/v1/candles/backfill", self.base_url)
+    }
+
+    pub fn exchange_seed_top_pairs_url(&self, exchange: &str, top: u32) -> String {
+        format!(
+            "{}/v1/admin/exchanges/{exchange}/seed-top-pairs?count={top}",
+            self.base_url
+        )
     }
 
     async fn post(&self, url: &str, body: Value) -> Result<Value, String> {
@@ -101,6 +110,25 @@ impl ApiClient {
     pub async fn ticker_list(&self) -> Result<ApiSuccess<TickerListData>, ApiError> {
         let value = self
             .get(&self.ticker_list_url())
+            .await
+            .map_err(|e| ApiError {
+                success: false,
+                message: e,
+                errors: vec![],
+            })?;
+        parse_response(value)
+    }
+
+    pub async fn exchange_seed_top_pairs(
+        &self,
+        exchange: &str,
+        top: u32,
+    ) -> Result<ApiSuccess<SeedTopPairsData>, ApiError> {
+        let value = self
+            .post(
+                &self.exchange_seed_top_pairs_url(exchange, top),
+                Value::Null,
+            )
             .await
             .map_err(|e| ApiError {
                 success: false,
@@ -213,6 +241,15 @@ mod tests {
     }
 
     #[test]
+    fn client_exchange_seed_top_pairs_url_includes_exchange_and_count() {
+        let client = make_client("http://localhost:8080");
+        assert_eq!(
+            client.exchange_seed_top_pairs_url("coinex", 20),
+            "http://localhost:8080/v1/admin/exchanges/coinex/seed-top-pairs?count=20"
+        );
+    }
+
+    #[test]
     fn client_uses_custom_server_url() {
         let client = make_client("http://prod.example.com:9000");
         assert!(client
@@ -280,5 +317,16 @@ mod tests {
             .unwrap_err()
             .message
             .contains("historical candle source"));
+    }
+
+    #[test]
+    fn parse_response_seed_top_pairs_success_extracts_count() {
+        let value = serde_json::json!({
+            "success": true,
+            "message": "Top pairs seeded",
+            "data": { "pairs_seeded": 20 }
+        });
+        let result: Result<ApiSuccess<SeedTopPairsData>, _> = parse_response(value);
+        assert_eq!(result.unwrap().data.pairs_seeded, 20);
     }
 }

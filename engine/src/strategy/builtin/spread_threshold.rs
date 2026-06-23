@@ -1,5 +1,5 @@
 use crate::price::entity::Price;
-use crate::strategy::entity::{Action, Signal};
+use crate::strategy::entity::{Action, RiskRewardConfig, Signal};
 use crate::strategy::port::Strategy;
 
 pub struct SpreadThresholdStrategy {
@@ -7,6 +7,7 @@ pub struct SpreadThresholdStrategy {
     exchange: String,
     pair: String,
     threshold: u64,
+    risk_reward: Option<RiskRewardConfig>,
 }
 
 impl SpreadThresholdStrategy {
@@ -16,7 +17,16 @@ impl SpreadThresholdStrategy {
             exchange: exchange.to_string(),
             pair: pair.to_string(),
             threshold,
+            risk_reward: None,
         }
+    }
+
+    /// Attaches a `RiskRewardConfig` so future `Buy` signals carry computed
+    /// `stop_loss`/`take_profit` levels. Additive — strategies built without
+    /// calling this keep emitting `None`/`None`, exactly as before.
+    pub fn with_risk_reward(mut self, config: RiskRewardConfig) -> Self {
+        self.risk_reward = Some(config);
+        self
     }
 }
 
@@ -31,6 +41,10 @@ impl Strategy for SpreadThresholdStrategy {
             return None;
         }
         if price.spread() > self.threshold {
+            let (stop_loss, take_profit) = self
+                .risk_reward
+                .map(|rr| rr.compute(price.ask, &Action::Buy))
+                .unwrap_or((None, None));
             Some(Signal {
                 strategy_id: self.strategy_id.clone(),
                 exchange: price.exchange.to_string(),
@@ -38,8 +52,8 @@ impl Strategy for SpreadThresholdStrategy {
                 action: Action::Buy,
                 confidence: 1.0,
                 timestamp: price.timestamp,
-                stop_loss: None,
-                take_profit: None,
+                stop_loss,
+                take_profit,
             })
         } else {
             None
@@ -143,5 +157,49 @@ mod tests {
             .expect("spread > threshold must emit a signal");
         assert!(signal.stop_loss.is_none());
         assert!(signal.take_profit.is_none());
+    }
+
+    #[test]
+    fn spread_threshold_without_risk_reward_config_leaves_sl_tp_none() {
+        let strategy = SpreadThresholdStrategy::new("my-id", "tabdeal", "USDT/IRT", 1_000);
+        let price = make_price(175_000, 177_500);
+        let signal = strategy.on_price(&price).unwrap();
+        assert!(signal.stop_loss.is_none());
+        assert!(signal.take_profit.is_none());
+    }
+
+    #[test]
+    fn spread_threshold_with_risk_reward_config_sets_stop_and_target() {
+        let strategy = SpreadThresholdStrategy::new("my-id", "tabdeal", "USDT/IRT", 1_000)
+            .with_risk_reward(crate::strategy::entity::RiskRewardConfig {
+                stop_pct: 0.02,
+                target_rr: 2.0,
+            });
+        let price = make_price(175_000, 177_500);
+        let signal = strategy.on_price(&price).unwrap();
+
+        // entry = ask = 177_500; risk = 177_500 * 0.02 = 3_550
+        assert_eq!(signal.stop_loss, Some(173_950));
+        assert_eq!(signal.take_profit, Some(184_600));
+    }
+
+    #[test]
+    fn spread_threshold_with_risk_reward_config_stop_is_below_entry_for_buy() {
+        let strategy = SpreadThresholdStrategy::new("my-id", "tabdeal", "USDT/IRT", 1_000)
+            .with_risk_reward(crate::strategy::entity::RiskRewardConfig {
+                stop_pct: 0.01,
+                target_rr: 1.5,
+            });
+        let price = make_price(175_000, 177_500);
+        let signal = strategy.on_price(&price).unwrap();
+
+        assert!(
+            signal.stop_loss.unwrap() < price.ask,
+            "stop must be below entry for a Buy"
+        );
+        assert!(
+            signal.take_profit.unwrap() > price.ask,
+            "target must be above entry for a Buy"
+        );
     }
 }

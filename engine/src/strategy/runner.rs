@@ -121,6 +121,8 @@ pub fn spawn_strategy_runner(
                     action: sig.action.as_str().to_string(),
                     confidence: sig.confidence,
                     timestamp: sig.timestamp,
+                    stop_loss: sig.stop_loss,
+                    take_profit: sig.take_profit,
                 };
 
                 match serde_json::to_string(&WsMessage::Signal(payload)) {

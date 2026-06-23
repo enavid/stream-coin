@@ -119,15 +119,21 @@ impl BacktestEngine {
         let mut trade_log: Vec<TradeRecord> = Vec::new();
 
         for candle in candles {
-            // Fill orders from the previous candle at this candle's close.
-            // The strictly-after invariant in SimulatedVenue prevents look-ahead.
-            let new_fills = venue.apply_candle_close(candle.close, candle.time).await;
+            // Fill orders from the previous candle at this candle's close, and
+            // force-exit any open position whose stop-loss/take-profit this
+            // candle's range touches intrabar. The strictly-after invariant
+            // in SimulatedVenue prevents look-ahead for the former.
+            let new_fills = venue
+                .apply_candle_close(candle.close, candle.low, candle.high, candle.time)
+                .await;
             for fill in new_fills {
                 tracing::debug!(
                     strategy_id = %self.strategy_id,
                     side = %fill.side,
                     fill_price = fill.fill_price,
                     candle_time = %fill.candle_time,
+                    stop_loss = ?fill.stop_loss,
+                    take_profit = ?fill.take_profit,
                     "backtest fill"
                 );
                 trade_log.push(TradeRecord {
@@ -137,6 +143,8 @@ impl BacktestEngine {
                     fill_price: fill.fill_price,
                     strategy_id: fill.strategy_id,
                     candle_time: fill.candle_time,
+                    stop_loss: fill.stop_loss,
+                    take_profit: fill.take_profit,
                 });
             }
 
@@ -195,6 +203,8 @@ impl BacktestEngine {
                             quantity: DEFAULT_ORDER_QUANTITY,
                             strategy_id: signal.strategy_id,
                             placed_at: candle.time,
+                            stop_loss: signal.stop_loss,
+                            take_profit: signal.take_profit,
                         })
                         .await;
                 }
@@ -401,6 +411,104 @@ for line in sys.stdin:
         }), flush=True)
 "#;
 
+    // Buys on candle 1 with an explicit stop_loss/take_profit; never sells —
+    // the position must be closed by the venue's intrabar SL/TP check, not
+    // by an opposite-side signal.
+    const BUY_WITH_SL_TP_NO_EXIT_SIGNAL: &str = r#"
+import sys, json, uuid
+from datetime import datetime, timezone
+count = 0
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    candle = json.loads(line)
+    count += 1
+    if count == 1:
+        print(json.dumps({
+            "signal_id": str(uuid.uuid4()),
+            "strategy_id": _STRATEGY_ID,
+            "exchange": candle["exchange"],
+            "pair": candle["pair"],
+            "action": "buy",
+            "confidence": 1.0,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "stop_loss": 95000,
+            "take_profit": 120000,
+        }), flush=True)
+"#;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backtest_closed_trade_rr_is_populated_when_strategy_sets_sl_tp() {
+        // candle[0]: triggers the buy signal, entry fills at candle[1].close=100_000.
+        // candle[2]: low=94_000 crosses the 95_000 stop -> forced exit at 95_000.
+        let candles = vec![
+            CandlePayload {
+                exchange: "tabdeal".to_string(),
+                pair: "USDT/IRT".to_string(),
+                interval: "1m".to_string(),
+                time: Utc.timestamp_opt(1_000_000, 0).unwrap(),
+                open: 100_000,
+                high: 100_000,
+                low: 100_000,
+                close: 100_000,
+                volume: 10,
+            },
+            CandlePayload {
+                exchange: "tabdeal".to_string(),
+                pair: "USDT/IRT".to_string(),
+                interval: "1m".to_string(),
+                time: Utc.timestamp_opt(1_000_060, 0).unwrap(),
+                open: 100_000,
+                high: 100_000,
+                low: 100_000,
+                close: 100_000,
+                volume: 10,
+            },
+            CandlePayload {
+                exchange: "tabdeal".to_string(),
+                pair: "USDT/IRT".to_string(),
+                interval: "1m".to_string(),
+                time: Utc.timestamp_opt(1_000_120, 0).unwrap(),
+                open: 100_000,
+                high: 100_000,
+                low: 94_000,
+                close: 96_000,
+                volume: 10,
+            },
+        ];
+
+        let engine = BacktestEngine::new(
+            "test-sl-tp".to_string(),
+            BUY_WITH_SL_TP_NO_EXIT_SIGNAL.to_string(),
+            FillModel::LastClose,
+        );
+        let result = engine.run(&candles).await.unwrap();
+
+        assert_eq!(
+            result.trade_log.len(),
+            2,
+            "entry fill + forced sl exit fill"
+        );
+        assert_eq!(
+            result.closed_trades.len(),
+            1,
+            "the sl-tp-forced exit must pair with the entry into a closed trade"
+        );
+        let trade = &result.closed_trades[0];
+        assert_eq!(trade.stop_loss, Some(95_000));
+        assert_eq!(trade.take_profit, Some(120_000));
+        assert_eq!(trade.exit_price, 95_000, "must exit at the stop price");
+        assert!(
+            trade.rr.is_some(),
+            "rr must be populated once the closed trade carries a stop_loss"
+        );
+        assert!(
+            result.avg_rr.is_some(),
+            "BacktestResult.avg_rr must reflect the populated rr"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn backtest_engine_empty_candles_returns_empty_result() {
         let engine = BacktestEngine::new(
@@ -586,6 +694,8 @@ for line in sys.stdin:
                 fill_price: 90_000,
                 strategy_id: "s".to_string(),
                 candle_time: Utc::now(),
+                stop_loss: None,
+                take_profit: None,
             },
             TradeRecord {
                 order_id: "2".to_string(),
@@ -594,6 +704,8 @@ for line in sys.stdin:
                 fill_price: 110_000,
                 strategy_id: "s".to_string(),
                 candle_time: Utc::now(),
+                stop_loss: None,
+                take_profit: None,
             },
         ];
         let (ret, dd) = calculate_metrics(&trades);
@@ -611,6 +723,8 @@ for line in sys.stdin:
                 fill_price: 110_000,
                 strategy_id: "s".to_string(),
                 candle_time: Utc::now(),
+                stop_loss: None,
+                take_profit: None,
             },
             TradeRecord {
                 order_id: "2".to_string(),
@@ -619,6 +733,8 @@ for line in sys.stdin:
                 fill_price: 80_000,
                 strategy_id: "s".to_string(),
                 candle_time: Utc::now(),
+                stop_loss: None,
+                take_profit: None,
             },
         ];
         let (ret, dd) = calculate_metrics(&trades);

@@ -216,6 +216,8 @@ mod tests {
             action: "buy".to_string(),
             confidence: 0.85,
             timestamp: chrono::Utc::now(),
+            stop_loss: None,
+            take_profit: None,
         };
         let json = serde_json::to_string(&WsMessage::Signal(payload)).unwrap();
         broadcaster.send(json).unwrap();

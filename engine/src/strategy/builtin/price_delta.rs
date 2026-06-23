@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use crate::candle::entity::Candle;
-use crate::strategy::entity::{Action, Signal};
+use crate::strategy::entity::{Action, RiskRewardConfig, Signal};
 use crate::strategy::port::Strategy;
 
 pub struct PriceDeltaStrategy {
@@ -12,6 +12,7 @@ pub struct PriceDeltaStrategy {
     window: usize,
     threshold: f64,
     history: Mutex<VecDeque<u64>>,
+    risk_reward: Option<RiskRewardConfig>,
 }
 
 impl PriceDeltaStrategy {
@@ -29,7 +30,16 @@ impl PriceDeltaStrategy {
             window,
             threshold,
             history: Mutex::new(VecDeque::with_capacity(window)),
+            risk_reward: None,
         }
+    }
+
+    /// Attaches a `RiskRewardConfig` so future `Buy`/`Sell` signals carry
+    /// computed `stop_loss`/`take_profit` levels. Additive — strategies
+    /// built without calling this keep emitting `None`/`None`.
+    pub fn with_risk_reward(mut self, config: RiskRewardConfig) -> Self {
+        self.risk_reward = Some(config);
+        self
     }
 }
 
@@ -65,6 +75,10 @@ impl Strategy for PriceDeltaStrategy {
         let delta = (newest as f64 - oldest as f64) / oldest as f64;
 
         if delta > self.threshold {
+            let (stop_loss, take_profit) = self
+                .risk_reward
+                .map(|rr| rr.compute(newest, &Action::Buy))
+                .unwrap_or((None, None));
             Some(Signal {
                 strategy_id: self.strategy_id.clone(),
                 exchange: candle.exchange.clone(),
@@ -72,10 +86,14 @@ impl Strategy for PriceDeltaStrategy {
                 action: Action::Buy,
                 confidence: delta.min(1.0),
                 timestamp: candle.time,
-                stop_loss: None,
-                take_profit: None,
+                stop_loss,
+                take_profit,
             })
         } else if delta < -self.threshold {
+            let (stop_loss, take_profit) = self
+                .risk_reward
+                .map(|rr| rr.compute(newest, &Action::Sell))
+                .unwrap_or((None, None));
             Some(Signal {
                 strategy_id: self.strategy_id.clone(),
                 exchange: candle.exchange.clone(),
@@ -83,8 +101,8 @@ impl Strategy for PriceDeltaStrategy {
                 action: Action::Sell,
                 confidence: (-delta).min(1.0),
                 timestamp: candle.time,
-                stop_loss: None,
-                take_profit: None,
+                stop_loss,
+                take_profit,
             })
         } else {
             None
@@ -214,5 +232,39 @@ mod tests {
             .unwrap();
         assert!(signal.stop_loss.is_none());
         assert!(signal.take_profit.is_none());
+    }
+
+    #[test]
+    fn price_delta_with_risk_reward_config_sets_stop_and_target_on_buy() {
+        let strategy = PriceDeltaStrategy::new("my-id", "tabdeal", "USDT/IRT", 2, 0.05)
+            .with_risk_reward(crate::strategy::entity::RiskRewardConfig {
+                stop_pct: 0.02,
+                target_rr: 2.0,
+            });
+        strategy.on_candle(&make_candle("tabdeal", "USDT/IRT", 100_000));
+        let signal = strategy
+            .on_candle(&make_candle("tabdeal", "USDT/IRT", 110_000))
+            .unwrap();
+
+        // entry = newest close = 110_000; risk = 110_000 * 0.02 = 2_200
+        assert_eq!(signal.stop_loss, Some(107_800));
+        assert_eq!(signal.take_profit, Some(114_400));
+    }
+
+    #[test]
+    fn price_delta_with_risk_reward_config_sets_stop_and_target_on_sell() {
+        let strategy = PriceDeltaStrategy::new("my-id", "tabdeal", "USDT/IRT", 2, 0.05)
+            .with_risk_reward(crate::strategy::entity::RiskRewardConfig {
+                stop_pct: 0.02,
+                target_rr: 2.0,
+            });
+        strategy.on_candle(&make_candle("tabdeal", "USDT/IRT", 100_000));
+        let signal = strategy
+            .on_candle(&make_candle("tabdeal", "USDT/IRT", 90_000))
+            .unwrap();
+
+        // entry = newest close = 90_000; risk = 90_000 * 0.02 = 1_800
+        assert_eq!(signal.stop_loss, Some(91_800));
+        assert_eq!(signal.take_profit, Some(86_400));
     }
 }

@@ -39,6 +39,12 @@ pub struct SignalPayload {
     pub action: String,
     pub confidence: f64,
     pub timestamp: DateTime<Utc>,
+    /// `#[serde(default)]` so signals from strategies (Python or otherwise)
+    /// written before this field existed still deserialize without error.
+    #[serde(default)]
+    pub stop_loss: Option<u64>,
+    #[serde(default)]
+    pub take_profit: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -101,6 +107,8 @@ mod tests {
             action: "buy".to_string(),
             confidence: 0.85,
             timestamp: Utc::now(),
+            stop_loss: None,
+            take_profit: None,
         }
     }
 
@@ -220,6 +228,36 @@ mod tests {
             json["data"].is_null(),
             "there must be no 'data' wrapper key"
         );
+    }
+
+    #[test]
+    fn signal_payload_deserializes_without_stop_loss_take_profit_fields() {
+        let json = r#"{"signal_id":"id","strategy_id":"s1","exchange":"tabdeal","pair":"USDT/IRT","action":"buy","confidence":0.9,"timestamp":"2026-06-20T00:00:00Z"}"#;
+        let payload: SignalPayload = serde_json::from_str(json)
+            .expect("old signal JSON without stop_loss/take_profit must still parse");
+        assert!(payload.stop_loss.is_none());
+        assert!(payload.take_profit.is_none());
+    }
+
+    #[test]
+    fn signal_payload_round_trips_stop_loss_and_take_profit() {
+        let mut payload = sample_signal_payload();
+        payload.stop_loss = Some(173_460);
+        payload.take_profit = Some(184_080);
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let parsed: SignalPayload = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.stop_loss, Some(173_460));
+        assert_eq!(parsed.take_profit, Some(184_080));
+    }
+
+    #[test]
+    fn signal_payload_serializes_stop_loss_as_number_not_string() {
+        let mut payload = sample_signal_payload();
+        payload.stop_loss = Some(100_000);
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        assert!(json["stop_loss"].is_number());
     }
 
     #[test]

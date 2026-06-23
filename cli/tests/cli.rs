@@ -96,6 +96,44 @@ fn sc_candle_backfill_attempts_request_and_reports_connection_error() {
 }
 
 #[test]
+fn sc_exchange_subcommand_shows_help() {
+    Command::cargo_bin("sc")
+        .unwrap()
+        .args(["exchange", "--help"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn sc_exchange_seed_subcommand_shows_help() {
+    Command::cargo_bin("sc")
+        .unwrap()
+        .args(["exchange", "seed", "--help"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn sc_exchange_seed_attempts_request_and_reports_connection_error() {
+    let dir = tempdir().unwrap();
+    sc(&dir)
+        .args(["exchange", "seed", "coinex", "--top", "20"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn sc_exchange_seed_uses_default_top_of_twenty_without_flag() {
+    let dir = tempdir().unwrap();
+    // No --top flag: parses fine (default applies), fails only on the
+    // network call since no server is running.
+    sc(&dir)
+        .args(["exchange", "seed", "coinex"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn sc_config_show_exits_successfully() {
     let dir = tempdir().unwrap();
     sc(&dir).args(["config", "show"]).assert().success();

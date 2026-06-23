@@ -5,6 +5,7 @@ mod auth;
 mod candle;
 mod client;
 mod config;
+mod exchange;
 mod response;
 mod ticker;
 
@@ -43,6 +44,11 @@ enum Commands {
     Candle {
         #[command(subcommand)]
         command: CandleCommands,
+    },
+    /// Manage exchange registry
+    Exchange {
+        #[command(subcommand)]
+        command: ExchangeCommands,
     },
 }
 
@@ -92,6 +98,17 @@ enum CandleCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum ExchangeCommands {
+    /// Seed the top N markets by 24h quote volume as active trading pairs
+    Seed {
+        exchange: String,
+        /// How many top markets to seed
+        #[arg(long = "top", default_value_t = 20)]
+        top: u32,
+    },
+}
+
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let mut config = Config::load();
@@ -130,6 +147,15 @@ async fn run() -> Result<(), String> {
                     to,
                 } => {
                     candle::handle_backfill(&client, &exchange, &pair, &interval, &from, &to).await
+                }
+            }
+        }
+
+        Commands::Exchange { command } => {
+            let client = ApiClient::new(&config);
+            match command {
+                ExchangeCommands::Seed { exchange, top } => {
+                    exchange::handle_seed(&client, &exchange, top).await
                 }
             }
         }

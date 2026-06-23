@@ -159,6 +159,73 @@ async fn running_strategy_emits_signal_on_price_tick() {
 }
 
 #[actix_web::test]
+async fn running_strategy_with_risk_reward_emits_signal_with_stop_loss_and_take_profit() {
+    use chrono::Utc;
+    use stream_coin::presentation::ws_message::PricePayload;
+
+    let state = build_state();
+    let broadcaster = state.broadcaster.clone();
+
+    let mut srv =
+        actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let mut conn = srv.ws_at("/v1/ws").await.unwrap();
+
+    let resp = srv
+        .post("/v1/strategies/start")
+        .send_json(&json!({
+            "strategy_id": "test-spread-rr",
+            "strategy_type": "spread_threshold",
+            "exchange": "tabdeal",
+            "pair": "USDT/IRT",
+            "params": {
+                "threshold": 1000,
+                "risk_reward": { "stop_pct": 0.02, "target_rr": 2.0 }
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let price_json = serde_json::to_string(&WsMessage::PriceUpdate(PricePayload {
+        exchange: "tabdeal".to_string(),
+        pair: "USDT/IRT".to_string(),
+        bid: 175_000,
+        ask: 177_000,
+        timestamp: Utc::now(),
+    }))
+    .unwrap();
+    broadcaster.send(price_json).unwrap();
+
+    let deadline = Duration::from_millis(500);
+    loop {
+        match tokio::time::timeout(deadline, conn.next()).await {
+            Ok(Some(Ok(ws::Frame::Text(bytes)))) => {
+                let val: Value = serde_json::from_slice(&bytes).unwrap();
+                if val["type"] == "signal" {
+                    assert!(
+                        val["stop_loss"].is_number(),
+                        "signal must carry a computed stop_loss, got {:?}",
+                        val["stop_loss"]
+                    );
+                    assert!(
+                        val["take_profit"].is_number(),
+                        "signal must carry a computed take_profit, got {:?}",
+                        val["take_profit"]
+                    );
+                    // entry = ask = 177_000; risk = 177_000 * 0.02 = 3_540
+                    assert_eq!(val["stop_loss"], 173_460);
+                    assert_eq!(val["take_profit"], 184_080);
+                    return;
+                }
+            }
+            Ok(Some(Ok(_))) => continue,
+            _ => panic!("WS client did not receive a signal frame within the deadline"),
+        }
+    }
+}
+
+#[actix_web::test]
 async fn start_strategy_with_unknown_type_returns_error() {
     let state = build_state();
     let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));

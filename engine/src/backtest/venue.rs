@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
@@ -43,6 +45,10 @@ pub struct PendingOrder {
     /// value may fill the order — this is the time-frontier invariant that
     /// prevents look-ahead bias.
     pub placed_at: DateTime<Utc>,
+    /// Carried into the resulting `OpenPosition` when this order opens a new
+    /// position, so later candles can be checked for an intrabar SL/TP touch.
+    pub stop_loss: Option<u64>,
+    pub take_profit: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +59,20 @@ pub struct SimulatedFill {
     pub fill_price: u64,
     pub strategy_id: String,
     pub candle_time: DateTime<Utc>,
+    /// Set only on a fill that opens a new position (mirrors the originating
+    /// order's SL/TP); `None` on exit fills, including forced SL/TP exits.
+    pub stop_loss: Option<u64>,
+    pub take_profit: Option<u64>,
+}
+
+/// An open position the venue is tracking for intrabar stop-loss/take-profit
+/// checks, keyed by `strategy_id` — same one-position-per-strategy
+/// assumption `pair_closed_trades` makes.
+struct OpenPosition {
+    side: String,
+    quantity: u64,
+    stop_loss: Option<u64>,
+    take_profit: Option<u64>,
 }
 
 /// In-memory simulated venue used during backtesting.
@@ -64,6 +84,7 @@ pub struct SimulatedVenue {
     fill_model: FillModel,
     pending: Mutex<Vec<PendingOrder>>,
     fills: Mutex<Vec<SimulatedFill>>,
+    open_positions: Mutex<HashMap<String, OpenPosition>>,
 }
 
 impl SimulatedVenue {
@@ -72,6 +93,7 @@ impl SimulatedVenue {
             fill_model,
             pending: Mutex::new(Vec::new()),
             fills: Mutex::new(Vec::new()),
+            open_positions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -79,23 +101,123 @@ impl SimulatedVenue {
         self.pending.lock().await.push(order);
     }
 
-    /// Fill every pending order whose `placed_at` is strictly before
-    /// `candle_time`.  Returns the fills produced; removes them from the
-    /// pending queue.
+    /// Processes one candle in two steps, in order:
+    ///
+    /// 1. Intrabar stop-loss/take-profit check: for every currently open
+    ///    position, if this candle's `[low, high]` range touches its
+    ///    stop-loss or take-profit, force an exit fill at that level and
+    ///    close the position — *before* any pending order for this candle
+    ///    is considered. If both levels are touched in the same candle, the
+    ///    stop-loss wins (conservative: assume the worse outcome).
+    /// 2. Fill every pending order whose `placed_at` is strictly before
+    ///    `candle_time` at `close_price`, same as before SL/TP existed.
+    ///    A fill that opens a new position (no open position for that
+    ///    `strategy_id` after step 1) is recorded for future intrabar checks.
     pub async fn apply_candle_close(
         &self,
         close_price: u64,
+        low: u64,
+        high: u64,
         candle_time: DateTime<Utc>,
     ) -> Vec<SimulatedFill> {
-        let mut pending = self.pending.lock().await;
         let mut all_fills = self.fills.lock().await;
-
-        let mut remaining = Vec::with_capacity(pending.len());
         let mut new_fills = Vec::new();
+
+        {
+            let mut positions = self.open_positions.lock().await;
+            let mut stopped_out = Vec::new();
+
+            for (strategy_id, pos) in positions.iter() {
+                let (sl_hit, tp_hit) = match pos.side.as_str() {
+                    "buy" => (
+                        pos.stop_loss.is_some_and(|sl| low <= sl),
+                        pos.take_profit.is_some_and(|tp| high >= tp),
+                    ),
+                    "sell" => (
+                        pos.stop_loss.is_some_and(|sl| high >= sl),
+                        pos.take_profit.is_some_and(|tp| low <= tp),
+                    ),
+                    _ => (false, false),
+                };
+
+                let exit_price = if sl_hit {
+                    pos.stop_loss
+                } else if tp_hit {
+                    pos.take_profit
+                } else {
+                    None
+                };
+
+                if let Some(exit_price) = exit_price {
+                    let exit_side = match pos.side.as_str() {
+                        "buy" => "sell",
+                        _ => "buy",
+                    };
+                    let fill = SimulatedFill {
+                        order_id: format!("{strategy_id}-sl-tp-exit"),
+                        side: exit_side.to_string(),
+                        quantity: pos.quantity,
+                        fill_price: exit_price,
+                        strategy_id: strategy_id.clone(),
+                        candle_time,
+                        stop_loss: None,
+                        take_profit: None,
+                    };
+                    tracing::debug!(
+                        strategy_id = %strategy_id,
+                        side = exit_side,
+                        exit_price,
+                        sl_hit,
+                        tp_hit,
+                        "backtest venue forced sl/tp exit"
+                    );
+                    all_fills.push(fill.clone());
+                    new_fills.push(fill);
+                    stopped_out.push(strategy_id.clone());
+                }
+            }
+
+            for strategy_id in stopped_out {
+                positions.remove(&strategy_id);
+            }
+        }
+
+        let mut pending = self.pending.lock().await;
+        let mut remaining = Vec::with_capacity(pending.len());
 
         for order in pending.drain(..) {
             if candle_time > order.placed_at {
                 let fill_price = self.fill_model.apply(close_price, &order.side);
+                let mut positions = self.open_positions.lock().await;
+
+                // Only an entry fill (no pre-existing position for this
+                // strategy) carries SL/TP forward onto the fill record —
+                // `pair_closed_trades` only ever reads the entry's.
+                let (fill_stop_loss, fill_take_profit) = match positions.get(&order.strategy_id) {
+                    None => {
+                        positions.insert(
+                            order.strategy_id.clone(),
+                            OpenPosition {
+                                side: order.side.clone(),
+                                quantity: order.quantity,
+                                stop_loss: order.stop_loss,
+                                take_profit: order.take_profit,
+                            },
+                        );
+                        (order.stop_loss, order.take_profit)
+                    }
+                    Some(existing) if existing.side == order.side => {
+                        // Same-side fill while already in a position — not a
+                        // new entry, leave the original position untouched.
+                        (None, None)
+                    }
+                    Some(_) => {
+                        positions.remove(&order.strategy_id);
+                        (None, None)
+                    }
+                };
+                drop(positions);
+
                 let fill = SimulatedFill {
                     order_id: order.order_id,
                     side: order.side,
@@ -103,6 +225,8 @@ impl SimulatedVenue {
                     fill_price,
                     strategy_id: order.strategy_id,
                     candle_time,
+                    stop_loss: fill_stop_loss,
+                    take_profit: fill_take_profit,
                 };
                 all_fills.push(fill.clone());
                 new_fills.push(fill);
@@ -136,13 +260,30 @@ mod tests {
             quantity: 1,
             strategy_id: "strat".to_string(),
             placed_at,
+            stop_loss: None,
+            take_profit: None,
+        }
+    }
+
+    fn pending_with_sl_tp(
+        side: &str,
+        placed_at: DateTime<Utc>,
+        stop_loss: Option<u64>,
+        take_profit: Option<u64>,
+    ) -> PendingOrder {
+        PendingOrder {
+            stop_loss,
+            take_profit,
+            ..pending(side, placed_at)
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn simulated_venue_empty_pending_returns_empty_fills() {
         let venue = SimulatedVenue::new(FillModel::LastClose);
-        let fills = venue.apply_candle_close(100_000, t(1000)).await;
+        let fills = venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(1000))
+            .await;
         assert!(fills.is_empty());
     }
 
@@ -152,7 +293,9 @@ mod tests {
         venue.place_order(pending("buy", t(1000))).await;
 
         // Candle AFTER placed_at must produce a fill
-        let fills = venue.apply_candle_close(90_000, t(2000)).await;
+        let fills = venue
+            .apply_candle_close(90_000, 90_000, 90_000, t(2000))
+            .await;
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].fill_price, 90_000);
         assert_eq!(fills[0].side, "buy");
@@ -165,21 +308,27 @@ mod tests {
         venue.place_order(pending("buy", t(2000))).await;
 
         // Candle from BEFORE placed_at must NOT fill
-        let fills = venue.apply_candle_close(100_000, t(1000)).await;
+        let fills = venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(1000))
+            .await;
         assert!(
             fills.is_empty(),
             "past candle must not fill an order (look-ahead bias)"
         );
 
         // Candle AT EXACTLY placed_at must NOT fill (strictly-after invariant)
-        let fills = venue.apply_candle_close(100_000, t(2000)).await;
+        let fills = venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(2000))
+            .await;
         assert!(
             fills.is_empty(),
             "same-timestamp candle must not fill an order"
         );
 
         // Candle STRICTLY AFTER placed_at must fill
-        let fills = venue.apply_candle_close(100_000, t(3000)).await;
+        let fills = venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(3000))
+            .await;
         assert_eq!(fills.len(), 1, "future candle must fill the pending order");
         assert_eq!(fills[0].fill_price, 100_000);
     }
@@ -220,6 +369,8 @@ mod tests {
                 quantity: 1,
                 strategy_id: "s".to_string(),
                 placed_at: t(1000),
+                stop_loss: None,
+                take_profit: None,
             })
             .await;
         venue
@@ -227,12 +378,16 @@ mod tests {
                 order_id: "ord-b".to_string(),
                 side: "sell".to_string(),
                 quantity: 2,
-                strategy_id: "s".to_string(),
+                strategy_id: "s2".to_string(),
                 placed_at: t(1000),
+                stop_loss: None,
+                take_profit: None,
             })
             .await;
 
-        let fills = venue.apply_candle_close(90_000, t(2000)).await;
+        let fills = venue
+            .apply_candle_close(90_000, 90_000, 90_000, t(2000))
+            .await;
         assert_eq!(fills.len(), 2, "both pending orders must be filled");
     }
 
@@ -241,14 +396,202 @@ mod tests {
         let venue = SimulatedVenue::new(FillModel::LastClose);
         venue.place_order(pending("buy", t(1000))).await;
 
-        let fills_first = venue.apply_candle_close(100_000, t(2000)).await;
+        let fills_first = venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(2000))
+            .await;
         assert_eq!(fills_first.len(), 1);
 
         // Second apply must not produce duplicate fills
-        let fills_second = venue.apply_candle_close(100_000, t(3000)).await;
+        let fills_second = venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(3000))
+            .await;
         assert!(
             fills_second.is_empty(),
             "already-filled order must not be applied twice"
         );
+    }
+
+    // --- intrabar stop-loss / take-profit ---
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn venue_closes_position_when_low_crosses_stop_loss() {
+        let venue = SimulatedVenue::new(FillModel::LastClose);
+        venue
+            .place_order(pending_with_sl_tp(
+                "buy",
+                t(1000),
+                Some(95_000),
+                Some(110_000),
+            ))
+            .await;
+        // Entry fill at close=100_000
+        venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(2000))
+            .await;
+
+        // Next candle dips to low=94_000, crossing the 95_000 stop.
+        let fills = venue
+            .apply_candle_close(105_000, 94_000, 106_000, t(3000))
+            .await;
+        assert_eq!(fills.len(), 1, "stop-loss touch must force an exit fill");
+        assert_eq!(fills[0].side, "sell");
+        assert_eq!(
+            fills[0].fill_price, 95_000,
+            "must exit at the stop price, not the close"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn venue_closes_position_when_high_crosses_take_profit() {
+        let venue = SimulatedVenue::new(FillModel::LastClose);
+        venue
+            .place_order(pending_with_sl_tp(
+                "buy",
+                t(1000),
+                Some(95_000),
+                Some(110_000),
+            ))
+            .await;
+        venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(2000))
+            .await;
+
+        // Next candle spikes to high=112_000, crossing the 110_000 target.
+        let fills = venue
+            .apply_candle_close(108_000, 99_000, 112_000, t(3000))
+            .await;
+        assert_eq!(fills.len(), 1, "take-profit touch must force an exit fill");
+        assert_eq!(fills[0].side, "sell");
+        assert_eq!(
+            fills[0].fill_price, 110_000,
+            "must exit at the target price, not the close"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn venue_prefers_stop_loss_when_both_sl_and_tp_are_within_same_candle() {
+        let venue = SimulatedVenue::new(FillModel::LastClose);
+        venue
+            .place_order(pending_with_sl_tp(
+                "buy",
+                t(1000),
+                Some(95_000),
+                Some(110_000),
+            ))
+            .await;
+        venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(2000))
+            .await;
+
+        // A single wide candle whose range covers both levels.
+        let fills = venue
+            .apply_candle_close(102_000, 90_000, 120_000, t(3000))
+            .await;
+        assert_eq!(fills.len(), 1);
+        assert_eq!(
+            fills[0].fill_price, 95_000,
+            "conservative tie-break must assume the worse outcome (stop-loss)"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn venue_does_not_force_exit_when_candle_range_misses_both_levels() {
+        let venue = SimulatedVenue::new(FillModel::LastClose);
+        venue
+            .place_order(pending_with_sl_tp(
+                "buy",
+                t(1000),
+                Some(95_000),
+                Some(110_000),
+            ))
+            .await;
+        venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(2000))
+            .await;
+
+        let fills = venue
+            .apply_candle_close(101_000, 99_000, 103_000, t(3000))
+            .await;
+        assert!(
+            fills.is_empty(),
+            "candle range that touches neither level must not force an exit"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn venue_short_position_stop_loss_triggers_on_high_not_low() {
+        let venue = SimulatedVenue::new(FillModel::LastClose);
+        venue
+            .place_order(pending_with_sl_tp(
+                "sell",
+                t(1000),
+                Some(105_000),
+                Some(90_000),
+            ))
+            .await;
+        venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(2000))
+            .await;
+
+        let fills = venue
+            .apply_candle_close(104_000, 99_000, 106_000, t(3000))
+            .await;
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].side, "buy", "closing a short must buy back");
+        assert_eq!(fills[0].fill_price, 105_000);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn venue_no_open_position_means_no_forced_exit() {
+        let venue = SimulatedVenue::new(FillModel::LastClose);
+        // No position ever placed — a wild candle range must produce nothing.
+        let fills = venue
+            .apply_candle_close(100_000, 1, 1_000_000, t(1000))
+            .await;
+        assert!(fills.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn venue_forced_exit_does_not_apply_twice_for_same_position() {
+        let venue = SimulatedVenue::new(FillModel::LastClose);
+        venue
+            .place_order(pending_with_sl_tp(
+                "buy",
+                t(1000),
+                Some(95_000),
+                Some(110_000),
+            ))
+            .await;
+        venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(2000))
+            .await;
+
+        let first = venue
+            .apply_candle_close(94_000, 90_000, 96_000, t(3000))
+            .await;
+        assert_eq!(first.len(), 1);
+
+        let second = venue
+            .apply_candle_close(94_000, 90_000, 96_000, t(4000))
+            .await;
+        assert!(
+            second.is_empty(),
+            "position already closed by sl/tp must not be closed again"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn venue_entry_fill_with_no_risk_reward_never_force_exits() {
+        let venue = SimulatedVenue::new(FillModel::LastClose);
+        venue.place_order(pending("buy", t(1000))).await;
+        venue
+            .apply_candle_close(100_000, 100_000, 100_000, t(2000))
+            .await;
+
+        // Wild range, but no stop_loss/take_profit was ever set on entry.
+        let fills = venue
+            .apply_candle_close(100_000, 1, 1_000_000, t(3000))
+            .await;
+        assert!(fills.is_empty());
     }
 }

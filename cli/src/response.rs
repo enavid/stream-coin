@@ -56,6 +56,11 @@ pub struct BackfillData {
     pub candles_written: usize,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct SeedTopPairsData {
+    pub pairs_seeded: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +151,13 @@ mod tests {
             result.is_err(),
             "success as a string must fail deserialization"
         );
+    }
+
+    #[test]
+    fn seed_top_pairs_success_deserializes_pairs_seeded_count() {
+        let json = r#"{"success":true,"message":"Top pairs seeded","data":{"pairs_seeded":20}}"#;
+        let result: ApiSuccess<SeedTopPairsData> = serde_json::from_str(json).unwrap();
+        assert_eq!(result.data.pairs_seeded, 20);
     }
 
     #[test]

@@ -166,6 +166,8 @@ async fn signal_produces_order_in_db() {
         action: "buy".to_string(),
         confidence: 0.9,
         timestamp: chrono::Utc::now(),
+        stop_loss: None,
+        take_profit: None,
     };
 
     manager.process_signal(&signal).await.unwrap();

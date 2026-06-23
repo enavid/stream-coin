@@ -644,6 +644,8 @@ mod tests {
             action: action.to_string(),
             confidence,
             timestamp: Utc::now(),
+            stop_loss: None,
+            take_profit: None,
         }
     }
 

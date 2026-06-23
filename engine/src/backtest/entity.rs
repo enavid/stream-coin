@@ -9,6 +9,11 @@ pub struct TradeRecord {
     pub fill_price: u64,
     pub strategy_id: String,
     pub candle_time: DateTime<Utc>,
+    /// Stop-loss/take-profit the *entry* fill was placed with, if any —
+    /// `None` for fills with no `RiskRewardConfig` upstream, and irrelevant
+    /// (ignored by `pair_closed_trades`) on the exit fill.
+    pub stop_loss: Option<u64>,
+    pub take_profit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,8 +166,9 @@ impl ClosedTrade {
 /// already in a position is neither a new entry nor a close — it's ignored
 /// for pairing purposes, leaving the original entry in place.
 ///
-/// SL/TP are always `None` here because nothing upstream produces them yet
-/// (`Signal.stop_loss`/`take_profit` are always `None` — see Stage 1).
+/// The entry fill's `stop_loss`/`take_profit` (set when the originating
+/// signal carried a `RiskRewardConfig`) are carried into the resulting
+/// `ClosedTrade` — the exit fill's own SL/TP, if any, are irrelevant here.
 pub fn pair_closed_trades(trade_log: &[TradeRecord]) -> Vec<ClosedTrade> {
     use std::collections::HashMap;
 
@@ -171,6 +177,8 @@ pub fn pair_closed_trades(trade_log: &[TradeRecord]) -> Vec<ClosedTrade> {
         price: u64,
         quantity: u64,
         time: DateTime<Utc>,
+        stop_loss: Option<u64>,
+        take_profit: Option<u64>,
     }
 
     let mut open: HashMap<String, OpenEntry> = HashMap::new();
@@ -192,6 +200,8 @@ pub fn pair_closed_trades(trade_log: &[TradeRecord]) -> Vec<ClosedTrade> {
                         price: record.fill_price,
                         quantity: record.quantity,
                         time: record.candle_time,
+                        stop_loss: record.stop_loss,
+                        take_profit: record.take_profit,
                     },
                 );
             }
@@ -204,8 +214,8 @@ pub fn pair_closed_trades(trade_log: &[TradeRecord]) -> Vec<ClosedTrade> {
                     entry.side,
                     entry.price,
                     record.fill_price,
-                    None,
-                    None,
+                    entry.stop_loss,
+                    entry.take_profit,
                     entry.quantity,
                     entry.time,
                     record.candle_time,
@@ -257,6 +267,23 @@ mod pairing_tests {
             fill_price: price,
             strategy_id: strategy_id.to_string(),
             candle_time: t(time_secs),
+            stop_loss: None,
+            take_profit: None,
+        }
+    }
+
+    fn fill_with_sl_tp(
+        strategy_id: &str,
+        side: &str,
+        price: u64,
+        time_secs: i64,
+        stop_loss: Option<u64>,
+        take_profit: Option<u64>,
+    ) -> TradeRecord {
+        TradeRecord {
+            stop_loss,
+            take_profit,
+            ..fill(strategy_id, side, price, time_secs)
         }
     }
 
@@ -335,6 +362,46 @@ mod pairing_tests {
             closed.is_empty(),
             "two same-side fills with no opposite-side close must produce nothing"
         );
+    }
+
+    #[test]
+    fn pairing_threads_entry_stop_loss_and_take_profit_into_closed_trade() {
+        let log = vec![
+            fill_with_sl_tp("s1", "buy", 100_000, 0, Some(98_000), Some(104_000)),
+            fill("s1", "sell", 110_000, 60),
+        ];
+        let closed = pair_closed_trades(&log);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].stop_loss, Some(98_000));
+        assert_eq!(closed[0].take_profit, Some(104_000));
+        assert!(
+            closed[0].rr.is_some(),
+            "rr must be populated once stop_loss is known"
+        );
+    }
+
+    #[test]
+    fn pairing_ignores_exit_fills_own_stop_loss_take_profit() {
+        // The exit fill carries its own (irrelevant) SL/TP — pairing must use
+        // only the entry's, not the exit's.
+        let log = vec![
+            fill_with_sl_tp("s1", "buy", 100_000, 0, Some(98_000), Some(104_000)),
+            fill_with_sl_tp("s1", "sell", 110_000, 60, Some(999), Some(999)),
+        ];
+        let closed = pair_closed_trades(&log);
+        assert_eq!(closed[0].stop_loss, Some(98_000));
+        assert_eq!(closed[0].take_profit, Some(104_000));
+    }
+
+    #[test]
+    fn pairing_leaves_sl_tp_none_when_entry_has_none() {
+        let log = vec![
+            fill("s1", "buy", 100_000, 0),
+            fill("s1", "sell", 110_000, 60),
+        ];
+        let closed = pair_closed_trades(&log);
+        assert!(closed[0].stop_loss.is_none());
+        assert!(closed[0].take_profit.is_none());
     }
 }
 
