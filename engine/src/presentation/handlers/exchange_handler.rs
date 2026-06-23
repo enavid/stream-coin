@@ -55,31 +55,49 @@ fn spawn_price_forwarder(
             }
 
             for agg in &mut aggregators {
-                if let Some(candle) = agg.push(&price) {
-                    let payload = CandlePayload::from(&candle);
-                    {
-                        use crate::presentation::shared::app_state::CANDLE_HISTORY_CAPACITY;
-                        let history_key =
-                            format!("{}:{}:{}", payload.exchange, payload.pair, payload.interval);
-                        let mut history = candle_history.lock().await;
-                        let bucket = history.entry(history_key).or_default();
-                        bucket.push_back(payload.clone());
-                        while bucket.len() > CANDLE_HISTORY_CAPACITY {
-                            bucket.pop_front();
-                        }
-                    }
-                    let key = format!("{}:{}", candle.exchange, candle.pair);
-                    match serde_json::to_string(&WsMessage::Candle(payload)) {
-                        Ok(json) => {
-                            let _ = broadcaster.send(json.clone());
-                            if let Some(ref pub_) = publisher {
-                                if let Err(e) = pub_.publish(&candle_topic, &key, &json).await {
-                                    tracing::error!(error = %e, "failed to publish candle to kafka");
-                                }
+                match agg.push(&price) {
+                    Some(candle) => {
+                        let payload = CandlePayload::from(&candle);
+                        {
+                            use crate::presentation::shared::app_state::CANDLE_HISTORY_CAPACITY;
+                            let history_key = format!(
+                                "{}:{}:{}",
+                                payload.exchange, payload.pair, payload.interval
+                            );
+                            let mut history = candle_history.lock().await;
+                            let bucket = history.entry(history_key).or_default();
+                            bucket.push_back(payload.clone());
+                            while bucket.len() > CANDLE_HISTORY_CAPACITY {
+                                bucket.pop_front();
                             }
                         }
-                        Err(e) => {
-                            tracing::error!(error = %e, "failed to serialize candle");
+                        let key = format!("{}:{}", candle.exchange, candle.pair);
+                        match serde_json::to_string(&WsMessage::Candle(payload)) {
+                            Ok(json) => {
+                                let _ = broadcaster.send(json.clone());
+                                if let Some(ref pub_) = publisher {
+                                    if let Err(e) = pub_.publish(&candle_topic, &key, &json).await {
+                                        tracing::error!(error = %e, "failed to publish candle to kafka");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "failed to serialize candle");
+                            }
+                        }
+                    }
+                    None => {
+                        // No interval boundary crossed — still broadcast the
+                        // forming bar's live OHLC so the UI's chart updates
+                        // tick-by-tick instead of jumping only on candle close.
+                        // Not persisted to candle_history/Kafka: those stay
+                        // closed-candle-only (history is the durable record;
+                        // Kafka consumers expect immutable bars).
+                        if let Some(forming) = agg.current_candle() {
+                            let payload = CandlePayload::from(&forming);
+                            if let Ok(json) = serde_json::to_string(&WsMessage::Candle(payload)) {
+                                let _ = broadcaster.send(json);
+                            }
                         }
                     }
                 }

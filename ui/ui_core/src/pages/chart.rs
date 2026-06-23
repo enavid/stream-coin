@@ -225,7 +225,10 @@ const CHART_GLUE_JS: &str = r##"
       tradeDensity: "all",
       statsEl: null,
       liveOrderMarker: null,
+      tradeMarkers: [],
+      tooltipEl: makeOverlayDiv(el, "sc-trade-tooltip"),
     };
+    entry.tooltipEl.style.display = "none";
     if (window.ResizeObserver) {
       var ro = new ResizeObserver(function () {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
@@ -252,6 +255,27 @@ const CHART_GLUE_JS: &str = r##"
       }
       legendEl.style.display = "flex";
       renderLegend(legendEl, window.scCharts[containerId].colors, data.open, data.high, data.low, data.close);
+    });
+    // Trade-exit tooltip — `setMarkers` has no native hover support (a
+    // plain shape-and-text API), so full trade context on hover needs its
+    // own crosshair-proximity hit test against the closed trades' exit
+    // times, same pattern as TradingView's own Tooltip/Delta Tooltip
+    // plugin examples.
+    chart.subscribeCrosshairMove(function (param) {
+      var live = window.scCharts[containerId];
+      if (!live || !live.tooltipEl) return;
+      var trade = null;
+      if (param && param.time !== undefined && live.allTrades) {
+        trade = live.allTrades.find(function (t) { return tradeTime(t.exit_time) === param.time; });
+      }
+      if (trade && param.point) {
+        live.tooltipEl.style.display = "block";
+        live.tooltipEl.style.left = (param.point.x + 14) + "px";
+        live.tooltipEl.style.top = (param.point.y + 14) + "px";
+        live.tooltipEl.textContent = formatTradeTooltip(trade);
+      } else {
+        live.tooltipEl.style.display = "none";
+      }
     });
     chart.subscribeClick(function (param) {
       var live = window.scCharts[containerId];
@@ -427,12 +451,13 @@ const CHART_GLUE_JS: &str = r##"
     entry.pendingPoint = null;
   };
   // `setMarkers` always replaces the whole array, so the manually-drawn
-  // buy/sell markers and the one live-order entry marker (Stage 10) have to
-  // be merged and re-sent together every time either one changes.
+  // buy/sell markers, the one live-order entry marker (Stage 10), and the
+  // closed-trade exit markers (Stage 11 gap fix) all have to be merged and
+  // re-sent together every time any one of them changes.
   function refreshAllMarkers(containerId) {
     var entry = window.scCharts[containerId];
     if (!entry) return;
-    var markers = entry.markers.slice();
+    var markers = entry.markers.slice().concat(entry.tradeMarkers || []);
     if (entry.liveOrderMarker) markers.push(entry.liveOrderMarker);
     markers.sort(function (a, b) { return a.time - b.time; });
     entry.series.setMarkers(markers);
@@ -476,6 +501,32 @@ const CHART_GLUE_JS: &str = r##"
     if (trade.stop_loss !== null && trade.stop_loss !== undefined) parts.push("SL: " + trade.stop_loss);
     if (trade.take_profit !== null && trade.take_profit !== undefined) parts.push("TP: " + trade.take_profit);
     return parts.join(" | ");
+  }
+  // Mirrors Rust's `format_trade_tooltip` — kept in sync by hand, same as
+  // every other JS/Rust pair in this file, since Series Primitives and
+  // crosshair hit-testing can't be driven from Rust directly.
+  function formatTradeTooltip(trade) {
+    var outcomeText = trade.outcome === "win" ? "Win" : (trade.outcome === "loss" ? "Loss" : "Breakeven");
+    var sign = trade.pnl_pct >= 0 ? "+" : "";
+    return outcomeText + " " + sign + trade.pnl_pct.toFixed(2) + "% | " + formatTradeLabel(trade);
+  }
+  // Exit markers via the existing `setMarkers` mechanism (cheap — unlike
+  // the rectangle/line primitives, these stay attached for every trade
+  // regardless of the density cap, since "Rectangles off" is meant to
+  // leave them visible). Marker color encodes *outcome* (win/loss),
+  // independent of the rectangle's side color — so a losing Long and a
+  // losing Short read identically, matching how FreqUI does it.
+  function buildTradeMarkers(trades, colors) {
+    return trades.map(function (trade) {
+      var color = trade.outcome === "win" ? colors.up : (trade.outcome === "loss" ? colors.down : colors.text);
+      return {
+        time: tradeTime(trade.exit_time),
+        position: "inBar",
+        color: color,
+        shape: "circle",
+        text: trade.outcome === "win" ? "W" : (trade.outcome === "loss" ? "L" : "BE"),
+      };
+    });
   }
   // One primitive instance per trade rectangle. `attached`/`detached` are
   // the standard `ISeriesPrimitive` lifecycle hooks this build exposes
@@ -625,20 +676,31 @@ const CHART_GLUE_JS: &str = r##"
     if (entry.allTrades.length <= TRADE_DENSITY_CAP) return;
     var range = entry.chart.timeScale().getVisibleRange();
     if (!range) return;
-    (entry.tradePrimitives || []).forEach(function (p) { entry.series.detachPrimitive(p); });
+    detachTradePrimitives(entry);
     attachTradePrimitives(entry, visibleTradesJs(entry.allTrades, range.from, range.to, TRADE_DENSITY_CAP));
+  }
+  // Detaches rectangle/line primitives only — leaves `allTrades`/
+  // `tradeMarkers` untouched, since "Rectangles off" (the density toggle)
+  // is meant to keep exit markers visible, only drop the expensive part.
+  function detachTradePrimitives(entry) {
+    (entry.tradePrimitives || []).forEach(function (p) { entry.series.detachPrimitive(p); });
+    entry.tradePrimitives = [];
   }
   // Single entry point: clears any previously-attached trade primitives,
   // then attaches a rectangle + up to 3 lines (entry/SL/TP) per trade —
   // mirrors the `scChartSetData`/`scChartClearDrawings` naming already
   // used above. Above `TRADE_DENSITY_CAP` trades, only the most-recent
   // ones in the currently visible range get primitives; the rest follow as
-  // the user pans/zooms, via `refreshVisibleTrades` below.
+  // the user pans/zooms, via `refreshVisibleTrades` below. Exit markers are
+  // built for every trade regardless of the cap — cheap, and meant to stay
+  // visible even with "Rectangles" toggled off.
   window.scChartSetTrades = function (containerId, closedTrades) {
     var entry = window.scCharts[containerId];
     if (!entry) return;
     window.scChartClearTrades(containerId);
     entry.allTrades = closedTrades;
+    entry.tradeMarkers = buildTradeMarkers(closedTrades, entry.colors);
+    refreshAllMarkers(containerId);
     if (entry.tradeDensity === "markers-only") return;
     if (closedTrades.length <= TRADE_DENSITY_CAP) {
       attachTradePrimitives(entry, closedTrades);
@@ -649,19 +711,21 @@ const CHART_GLUE_JS: &str = r##"
   window.scChartClearTrades = function (containerId) {
     var entry = window.scCharts[containerId];
     if (!entry) return;
-    (entry.tradePrimitives || []).forEach(function (p) { entry.series.detachPrimitive(p); });
-    entry.tradePrimitives = [];
+    detachTradePrimitives(entry);
+    entry.allTrades = [];
+    entry.tradeMarkers = [];
+    refreshAllMarkers(containerId);
   };
-  // Toggle for the "Rectangles" button: "markers-only" detaches every
-  // rectangle/line primitive without forgetting the underlying trade list,
-  // so switching back to "all" redraws correctly rather than needing a
-  // fresh `scChartSetTrades` call.
+  // Toggle for the "Rectangles" button: "markers-only" detaches the
+  // rectangle/line primitives only, leaving the underlying trade list and
+  // exit markers intact, so switching back to "all" redraws correctly
+  // without needing a fresh `scChartSetTrades` call.
   window.scChartSetTradeDensity = function (containerId, density) {
     var entry = window.scCharts[containerId];
     if (!entry) return;
     entry.tradeDensity = density;
     if (density === "markers-only") {
-      window.scChartClearTrades(containerId);
+      detachTradePrimitives(entry);
     } else if (entry.allTrades) {
       if (entry.allTrades.length <= TRADE_DENSITY_CAP) {
         attachTradePrimitives(entry, entry.allTrades);
@@ -734,7 +798,7 @@ pub fn Chart(server_url: String) -> Element {
     let mut load_error = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
     let mut chart_ready = use_signal(|| false);
-    let mut last_pushed_time = use_signal(|| None::<String>);
+    let mut last_pushed_candle = use_signal(|| None::<crate::state::Candle>);
     let mut symbol_query = use_signal(String::new);
     let mut symbol_dropdown_open = use_signal(|| false);
     let mut drawing_tool = use_signal(|| "cursor".to_string());
@@ -908,7 +972,7 @@ pub fn Chart(server_url: String) -> Element {
             return;
         };
         let mut state = state;
-        last_pushed_time.set(None);
+        last_pushed_candle.set(None);
         load_error.set(None);
         loading.set(true);
         spawn(async move {
@@ -993,12 +1057,14 @@ pub fn Chart(server_url: String) -> Element {
         });
     });
 
-    // Push only the latest bar from the live WS feed (cheap — avoids
-    // re-serializing the whole history on every tick); skips re-sending a
-    // bar whose `time` was already pushed. Reads `series_key()` inside the
-    // closure for the same reason as the seeding effect above — otherwise
-    // a pair/interval switch keeps pushing updates into the chart for the
-    // *previous* selection.
+    // Push only the latest bar from the live WS feed. The engine rebroadcasts
+    // the still-forming bar on every tick (same `time`, growing high/low/
+    // close) so the chart's current candle animates exactly like a real
+    // exchange feed — dedupe on full bar equality, not just `time`, or every
+    // tick after the first one for a given bar gets silently dropped here.
+    // Reads `series_key()` inside the closure for the same reason as the
+    // seeding effect above — otherwise a pair/interval switch keeps pushing
+    // updates into the chart for the *previous* selection.
     use_effect(move || {
         let key = series_key();
         let candles = state.candles.read();
@@ -1006,10 +1072,10 @@ pub fn Chart(server_url: String) -> Element {
             return;
         };
         drop(candles);
-        if !chart_ready() || last_pushed_time() == Some(latest.time.clone()) {
+        if !chart_ready() || last_pushed_candle() == Some(latest.clone()) {
             return;
         }
-        last_pushed_time.set(Some(latest.time.clone()));
+        last_pushed_candle.set(Some(latest.clone()));
         spawn(async move {
             if let Ok(json) = serde_json::to_string(&latest) {
                 let _ = document::eval(&format!("window.scChartUpdate('{CONTAINER_ID}', {json})"))
@@ -1300,6 +1366,40 @@ fn format_stats_row(result: &crate::api::BacktestResult) -> StatsRow {
     }
 }
 
+/// Short code drawn on a closed trade's exit marker (`setMarkers`'
+/// `text` field) — independent of `format_trade_label`'s side/RR/E/SL/TP
+/// text, which lives in the rectangle instead. Not yet called from
+/// non-test code — mirrors the JS `buildTradeMarkers`' exit-marker
+/// text until the gap (exit markers + tooltip weren't built in Stage 5)
+/// is wired up.
+#[allow(dead_code)]
+fn exit_marker_label(outcome: crate::api::TradeOutcome) -> &'static str {
+    match outcome {
+        crate::api::TradeOutcome::Win => "W",
+        crate::api::TradeOutcome::Loss => "L",
+        crate::api::TradeOutcome::Breakeven => "BE",
+    }
+}
+
+/// Full hover-tooltip text for a closed trade (outcome + PnL%, then the
+/// same side/RR/entry/SL/TP line as `format_trade_label`) — kept as a
+/// plain Rust function so it's unit testable, same rationale as
+/// `format_trade_label`.
+#[allow(dead_code)]
+fn format_trade_tooltip(trade: &crate::api::ClosedTrade) -> String {
+    let outcome_text = match trade.outcome {
+        crate::api::TradeOutcome::Win => "Win",
+        crate::api::TradeOutcome::Loss => "Loss",
+        crate::api::TradeOutcome::Breakeven => "Breakeven",
+    };
+    let sign = if trade.pnl_pct >= 0.0 { "+" } else { "" };
+    format!(
+        "{outcome_text} {sign}{:.2}% | {}",
+        trade.pnl_pct,
+        format_trade_label(trade)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1382,6 +1482,39 @@ mod tests {
         assert!(!label.contains("RR:"), "label was: {label}");
         assert!(!label.contains("SL:"), "label was: {label}");
         assert!(!label.contains("TP:"), "label was: {label}");
+    }
+
+    #[test]
+    fn exit_marker_label_maps_outcome_to_short_code() {
+        assert_eq!(exit_marker_label(crate::api::TradeOutcome::Win), "W");
+        assert_eq!(exit_marker_label(crate::api::TradeOutcome::Loss), "L");
+        assert_eq!(exit_marker_label(crate::api::TradeOutcome::Breakeven), "BE");
+    }
+
+    #[test]
+    fn format_trade_tooltip_includes_outcome_and_pnl_pct() {
+        let mut trade = closed_trade(crate::api::TradeSide::Long, Some(2.0), None, None);
+        trade.outcome = crate::api::TradeOutcome::Win;
+        trade.pnl_pct = 9.5;
+
+        let tooltip = format_trade_tooltip(&trade);
+
+        assert!(tooltip.contains("Win"), "tooltip was: {tooltip}");
+        assert!(tooltip.contains("+9.50%"), "tooltip was: {tooltip}");
+        assert!(tooltip.contains("LONG"), "tooltip was: {tooltip}");
+    }
+
+    #[test]
+    fn format_trade_tooltip_shows_negative_pnl_pct_without_plus_sign() {
+        let mut trade = closed_trade(crate::api::TradeSide::Short, None, None, None);
+        trade.outcome = crate::api::TradeOutcome::Loss;
+        trade.pnl_pct = -3.2;
+
+        let tooltip = format_trade_tooltip(&trade);
+
+        assert!(tooltip.contains("Loss"), "tooltip was: {tooltip}");
+        assert!(tooltip.contains("-3.20%"), "tooltip was: {tooltip}");
+        assert!(!tooltip.contains("+-"), "tooltip was: {tooltip}");
     }
 
     fn closed_trade_at(entry_time: &str, exit_time: &str) -> crate::api::ClosedTrade {

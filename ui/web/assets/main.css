@@ -727,6 +727,17 @@
     .sc-stats-row .stat-negative { color: var(--red); }
     .sc-stats-row .stat-neutral { color: var(--text); }
 
+    /* Hover tooltip for a closed trade's exit marker — positioned in JS
+       from the crosshair point (`subscribeCrosshairMove`), not tracked by
+       `repositionOverlays` since it only shows while actively hovering. */
+    .sc-trade-tooltip {
+      position: absolute; font-size: 11px; font-family: var(--mono);
+      color: var(--text-strong); background: var(--surface2);
+      border: 1px solid var(--border); padding: 4px 8px;
+      border-radius: 5px; pointer-events: none; white-space: nowrap;
+      z-index: 4;
+    }
+
     .chart-state {
       position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
       flex-direction: column; gap: 10px;

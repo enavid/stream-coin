@@ -86,6 +86,24 @@ impl CandleAggregator {
             }
         }
     }
+
+    /// Returns the in-progress candle without closing it, so callers can
+    /// broadcast the forming bar's live OHLC on every tick. `None` before
+    /// the first tick of a window has arrived.
+    pub fn current_candle(&self) -> Option<Candle> {
+        let state = self.current.as_ref()?;
+        Some(Candle {
+            exchange: self.exchange.clone(),
+            pair: self.pair.clone(),
+            interval: self.interval,
+            time: state.open_time,
+            open: state.open,
+            high: state.high,
+            low: state.low,
+            close: state.close,
+            volume: 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +208,37 @@ mod tests {
         assert!(
             new_window.is_some(),
             "10:05:00 must close the [10:00, 10:05) candle"
+        );
+    }
+
+    #[test]
+    fn current_candle_returns_none_before_first_tick() {
+        let agg = CandleAggregator::new("tabdeal".into(), "USDT/IRT".into(), Interval::OneMinute);
+        assert!(
+            agg.current_candle().is_none(),
+            "no tick has arrived yet, so there is no forming candle"
+        );
+    }
+
+    #[test]
+    fn current_candle_reflects_forming_bar_without_closing_it() {
+        let mut agg =
+            CandleAggregator::new("tabdeal".into(), "USDT/IRT".into(), Interval::OneMinute);
+        agg.push(&make_price(100, 100, "2026-06-20T10:00:10Z")); // mid 100
+        agg.push(&make_price(150, 150, "2026-06-20T10:00:20Z")); // mid 150 -> new high
+
+        let forming = agg
+            .current_candle()
+            .expect("a tick has arrived, so the candle is forming");
+        assert_eq!(forming.open, 100, "open is the first tick's mid");
+        assert_eq!(forming.high, 150, "high tracks the latest peak");
+        assert_eq!(forming.close, 150, "close tracks the latest mid");
+
+        // Calling current_candle() must not close the window.
+        let still_open = agg.push(&make_price(120, 120, "2026-06-20T10:00:30Z"));
+        assert!(
+            still_open.is_none(),
+            "current_candle() must be read-only and not advance the window"
         );
     }
 }
