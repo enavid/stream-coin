@@ -5,7 +5,9 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-use crate::backtest::entity::{BacktestResult, BacktestSignalRecord, TradeRecord};
+use crate::backtest::entity::{
+    pair_closed_trades, trade_stats, BacktestResult, BacktestSignalRecord, TradeRecord,
+};
 use crate::backtest::venue::{FillModel, PendingOrder, SimulatedVenue};
 use crate::candle::entity::CandlePayload;
 use crate::strategy::subprocess::build_launcher_script;
@@ -72,6 +74,9 @@ impl BacktestEngine {
                 max_drawdown_pct: 0.0,
                 trade_log: vec![],
                 signal_log: vec![],
+                closed_trades: vec![],
+                win_rate: 0.0,
+                avg_rr: None,
             });
         }
 
@@ -219,6 +224,8 @@ impl BacktestEngine {
         let candle_count = candles.len();
         let signal_count = signal_log.len();
         let (total_return_pct, max_drawdown_pct) = calculate_metrics(&trade_log);
+        let closed_trades = pair_closed_trades(&trade_log);
+        let (win_rate, avg_rr) = trade_stats(&closed_trades);
 
         tracing::info!(
             strategy_id = %self.strategy_id,
@@ -244,6 +251,9 @@ impl BacktestEngine {
             max_drawdown_pct,
             trade_log,
             signal_log,
+            closed_trades,
+            win_rate,
+            avg_rr,
         })
     }
 }
@@ -545,6 +555,25 @@ for line in sys.stdin:
             "no drawdown expected for a profit trade, got {}",
             result.max_drawdown_pct
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backtest_run_returns_closed_trades_matching_fill_count_divided_by_two() {
+        let candles = make_candles(&[(100_000, 100_000), (100_000, 90_000), (100_000, 110_000)]);
+        let engine = BacktestEngine::new(
+            "test-closed-trades".to_string(),
+            BUY_THEN_SELL.to_string(),
+            FillModel::LastClose,
+        );
+        let result = engine.run(&candles).await.unwrap();
+        assert_eq!(result.trade_log.len(), 2, "buy and sell must both fill");
+        assert_eq!(
+            result.closed_trades.len(),
+            result.trade_log.len() / 2,
+            "two fills (one buy, one sell) must pair into exactly one closed trade"
+        );
+        assert_eq!(result.closed_trades[0].entry_price, 90_000);
+        assert_eq!(result.closed_trades[0].exit_price, 110_000);
     }
 
     #[test]

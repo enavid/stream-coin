@@ -34,6 +34,9 @@ pub struct BacktestResult {
     pub max_drawdown_pct: f64,
     pub trade_log: Vec<TradeRecord>,
     pub signal_log: Vec<BacktestSignalRecord>,
+    pub closed_trades: Vec<ClosedTrade>,
+    pub win_rate: f64,
+    pub avg_rr: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -148,6 +151,272 @@ impl ClosedTrade {
             rr,
             outcome,
         }
+    }
+}
+
+/// Pair entry/exit fills into closed trades, per `strategy_id` independently
+/// (a single backtest run covers exactly one exchange/pair, so `strategy_id`
+/// alone is a sufficient key). The first fill for a strategy opens a
+/// position; the next *opposite-side* fill closes it. A same-side fill while
+/// already in a position is neither a new entry nor a close — it's ignored
+/// for pairing purposes, leaving the original entry in place.
+///
+/// SL/TP are always `None` here because nothing upstream produces them yet
+/// (`Signal.stop_loss`/`take_profit` are always `None` — see Stage 1).
+pub fn pair_closed_trades(trade_log: &[TradeRecord]) -> Vec<ClosedTrade> {
+    use std::collections::HashMap;
+
+    struct OpenEntry {
+        side: TradeSide,
+        price: u64,
+        quantity: u64,
+        time: DateTime<Utc>,
+    }
+
+    let mut open: HashMap<String, OpenEntry> = HashMap::new();
+    let mut closed = Vec::new();
+
+    for record in trade_log {
+        let side = match record.side.as_str() {
+            "buy" => TradeSide::Long,
+            "sell" => TradeSide::Short,
+            _ => continue,
+        };
+
+        match open.remove(&record.strategy_id) {
+            None => {
+                open.insert(
+                    record.strategy_id.clone(),
+                    OpenEntry {
+                        side,
+                        price: record.fill_price,
+                        quantity: record.quantity,
+                        time: record.candle_time,
+                    },
+                );
+            }
+            Some(entry) if entry.side == side => {
+                open.insert(record.strategy_id.clone(), entry);
+            }
+            Some(entry) => {
+                closed.push(ClosedTrade::close(
+                    record.strategy_id.clone(),
+                    entry.side,
+                    entry.price,
+                    record.fill_price,
+                    None,
+                    None,
+                    entry.quantity,
+                    entry.time,
+                    record.candle_time,
+                ));
+            }
+        }
+    }
+
+    closed
+}
+
+/// Win rate (0.0 when there are no closed trades) and the average
+/// risk/reward ratio across closed trades that have one (`None` when none
+/// of them do — e.g. because no signal carried a stop-loss).
+pub fn trade_stats(closed_trades: &[ClosedTrade]) -> (f64, Option<f64>) {
+    if closed_trades.is_empty() {
+        return (0.0, None);
+    }
+
+    let wins = closed_trades
+        .iter()
+        .filter(|t| t.outcome == TradeOutcome::Win)
+        .count();
+    let win_rate = wins as f64 / closed_trades.len() as f64;
+
+    let rrs: Vec<f64> = closed_trades.iter().filter_map(|t| t.rr).collect();
+    let avg_rr = if rrs.is_empty() {
+        None
+    } else {
+        Some(rrs.iter().sum::<f64>() / rrs.len() as f64)
+    };
+
+    (win_rate, avg_rr)
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::*;
+
+    fn t(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    fn fill(strategy_id: &str, side: &str, price: u64, time_secs: i64) -> TradeRecord {
+        TradeRecord {
+            order_id: format!("{strategy_id}-{side}-{time_secs}"),
+            side: side.to_string(),
+            quantity: 1,
+            fill_price: price,
+            strategy_id: strategy_id.to_string(),
+            candle_time: t(time_secs),
+        }
+    }
+
+    #[test]
+    fn pairing_opens_trade_on_first_fill_for_pair() {
+        let log = vec![fill("s1", "buy", 100_000, 0)];
+        let closed = pair_closed_trades(&log);
+        assert!(
+            closed.is_empty(),
+            "a single fill must not produce a closed trade"
+        );
+    }
+
+    #[test]
+    fn pairing_closes_trade_on_opposite_side_fill() {
+        let log = vec![
+            fill("s1", "buy", 100_000, 0),
+            fill("s1", "sell", 110_000, 60),
+        ];
+        let closed = pair_closed_trades(&log);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].side, TradeSide::Long);
+        assert_eq!(closed[0].entry_price, 100_000);
+        assert_eq!(closed[0].exit_price, 110_000);
+    }
+
+    #[test]
+    fn pairing_keeps_position_open_on_same_side_fill() {
+        let log = vec![
+            fill("s1", "buy", 100_000, 0),
+            fill("s1", "buy", 105_000, 60),
+            fill("s1", "sell", 110_000, 120),
+        ];
+        let closed = pair_closed_trades(&log);
+        assert_eq!(
+            closed.len(),
+            1,
+            "the duplicate same-side fill must not produce its own closed trade"
+        );
+        assert_eq!(
+            closed[0].entry_price, 100_000,
+            "the original entry must be preserved, not overwritten by the duplicate fill"
+        );
+    }
+
+    #[test]
+    fn pairing_handles_multiple_strategies_independently() {
+        let log = vec![
+            fill("s1", "buy", 100_000, 0),
+            fill("s2", "sell", 200_000, 0),
+            fill("s1", "sell", 110_000, 60),
+            fill("s2", "buy", 190_000, 60),
+        ];
+        let closed = pair_closed_trades(&log);
+        assert_eq!(closed.len(), 2);
+        let s1 = closed
+            .iter()
+            .find(|c| c.strategy_id == "s1")
+            .expect("s1 trade must be present");
+        let s2 = closed
+            .iter()
+            .find(|c| c.strategy_id == "s2")
+            .expect("s2 trade must be present");
+        assert_eq!(s1.side, TradeSide::Long);
+        assert_eq!(s2.side, TradeSide::Short);
+    }
+
+    #[test]
+    fn pairing_ignores_unpaired_trailing_fill() {
+        let log = vec![
+            fill("s1", "buy", 100_000, 0),
+            fill("s1", "buy", 105_000, 60),
+        ];
+        let closed = pair_closed_trades(&log);
+        assert!(
+            closed.is_empty(),
+            "two same-side fills with no opposite-side close must produce nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod trade_stats_tests {
+    use super::*;
+
+    fn winning_trade(strategy_id: &str) -> ClosedTrade {
+        ClosedTrade::close(
+            strategy_id.to_string(),
+            TradeSide::Long,
+            100_000,
+            110_000,
+            None,
+            None,
+            1,
+            DateTime::from_timestamp(0, 0).unwrap(),
+            DateTime::from_timestamp(60, 0).unwrap(),
+        )
+    }
+
+    fn losing_trade(strategy_id: &str) -> ClosedTrade {
+        ClosedTrade::close(
+            strategy_id.to_string(),
+            TradeSide::Long,
+            100_000,
+            90_000,
+            None,
+            None,
+            1,
+            DateTime::from_timestamp(0, 0).unwrap(),
+            DateTime::from_timestamp(60, 0).unwrap(),
+        )
+    }
+
+    fn trade_with_rr(strategy_id: &str, stop_loss: u64, rr_expected: f64) -> ClosedTrade {
+        let _ = rr_expected;
+        ClosedTrade::close(
+            strategy_id.to_string(),
+            TradeSide::Long,
+            100_000,
+            110_000,
+            Some(stop_loss),
+            None,
+            1,
+            DateTime::from_timestamp(0, 0).unwrap(),
+            DateTime::from_timestamp(60, 0).unwrap(),
+        )
+    }
+
+    #[test]
+    fn backtest_result_win_rate_counts_only_closed_trades() {
+        let trades = vec![winning_trade("s1"), winning_trade("s1"), losing_trade("s1")];
+        let (win_rate, _) = trade_stats(&trades);
+        assert!(
+            (win_rate - (2.0 / 3.0)).abs() < 1e-9,
+            "win rate must be wins / total closed trades, got {win_rate}"
+        );
+    }
+
+    #[test]
+    fn backtest_result_avg_rr_is_none_when_no_trade_has_stop_loss() {
+        let trades = vec![winning_trade("s1"), losing_trade("s1")];
+        let (_, avg_rr) = trade_stats(&trades);
+        assert!(avg_rr.is_none());
+    }
+
+    #[test]
+    fn backtest_result_avg_rr_averages_only_trades_with_rr() {
+        let trades = vec![
+            trade_with_rr("s1", 95_000, 2.0), // RR = 10_000/5_000 = 2.0
+            winning_trade("s1"),              // no stop_loss -> excluded
+        ];
+        let (_, avg_rr) = trade_stats(&trades);
+        assert_eq!(avg_rr, Some(2.0));
+    }
+
+    #[test]
+    fn trade_stats_empty_input_returns_zero_win_rate_and_no_avg_rr() {
+        let (win_rate, avg_rr) = trade_stats(&[]);
+        assert_eq!(win_rate, 0.0);
+        assert!(avg_rr.is_none());
     }
 }
 
