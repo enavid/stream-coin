@@ -195,3 +195,120 @@ pub fn IconMoon() -> Element {
         }
     }
 }
+
+/// Chart drawing-toolbar "no tool armed" state — a plain pointer arrow.
+#[component]
+pub fn IconCursor() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            path { d: "M5 3l5.5 16 2-6.5L19 10.5z", stroke_linejoin: "round" }
+        }
+    }
+}
+
+/// Chart drawing toolbar — trend line tool (two-click line segment).
+#[component]
+pub fn IconTrendLine() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            line { x1: "4", y1: "19", x2: "20", y2: "5" }
+            circle { cx: "4", cy: "19", r: "1.6", fill: "currentColor", stroke: "none" }
+            circle { cx: "20", cy: "5", r: "1.6", fill: "currentColor", stroke: "none" }
+        }
+    }
+}
+
+/// Chart drawing toolbar — horizontal price-line tool (one click). A solid
+/// line rather than dashed: at 16px a `stroke-dasharray` thin enough to
+/// read as "dashed" collapses into what looks like a row of dots instead
+/// of a line, losing the tool's affordance entirely.
+#[component]
+pub fn IconHorizontalLine() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            line { x1: "3", y1: "12", x2: "21", y2: "12" }
+            circle { cx: "12", cy: "12", r: "2", fill: "currentColor", stroke: "none" }
+        }
+    }
+}
+
+/// Chart drawing toolbar — clear all drawings.
+#[component]
+pub fn IconTrash() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            polyline { points: "4,7 20,7" }
+            path { d: "M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" }
+            line { x1: "9", y1: "3", x2: "15", y2: "3" }
+        }
+    }
+}
+
+/// Chart drawing toolbar — vertical time-marker line (one click).
+#[component]
+pub fn IconVerticalLine() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            line { x1: "12", y1: "3", x2: "12", y2: "21" }
+            circle { cx: "12", cy: "12", r: "2", fill: "currentColor", stroke: "none" }
+        }
+    }
+}
+
+/// Chart drawing toolbar — rectangle (two-click opposite corners).
+#[component]
+pub fn IconRectangle() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            rect { x: "4", y: "6", width: "16", height: "12", rx: "1" }
+        }
+    }
+}
+
+/// Chart drawing toolbar — Fibonacci retracement (two-click high/low).
+#[component]
+pub fn IconFibonacci() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.4",
+            line { x1: "3", y1: "5", x2: "21", y2: "5" }
+            line { x1: "3", y1: "10", x2: "21", y2: "10" }
+            line { x1: "3", y1: "15", x2: "21", y2: "15" }
+            line { x1: "3", y1: "20", x2: "21", y2: "20" }
+        }
+    }
+}
+
+/// Chart drawing toolbar — buy marker (arrow-up annotation).
+#[component]
+pub fn IconArrowUp() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            line { x1: "12", y1: "20", x2: "12", y2: "5" }
+            polyline { points: "6,11 12,5 18,11", stroke_linejoin: "round" }
+        }
+    }
+}
+
+/// Chart drawing toolbar — sell marker (arrow-down annotation).
+#[component]
+pub fn IconArrowDown() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            line { x1: "12", y1: "4", x2: "12", y2: "19" }
+            polyline { points: "6,13 12,19 18,13", stroke_linejoin: "round" }
+        }
+    }
+}
+
+/// Chart drawing toolbar — price-range / measure tool (two-click).
+#[component]
+pub fn IconRuler() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: STROKE,
+            line { x1: "4", y1: "19", x2: "19", y2: "4" }
+            line { x1: "7", y1: "16", x2: "9", y2: "14" }
+            line { x1: "11", y1: "12", x2: "13", y2: "10" }
+            line { x1: "15", y1: "8", x2: "17", y2: "6" }
+        }
+    }
+}

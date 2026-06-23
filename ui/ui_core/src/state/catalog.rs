@@ -35,6 +35,24 @@ impl ExchangeCatalog {
     pub fn pairs_for(&self, exchange: &str) -> &[PairResponse] {
         self.pairs.get(exchange).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    /// Flattens every exchange's pairs into `(exchange_name, "BASE/QUOTE")`
+    /// rows — the data source for the chart page's symbol search combobox,
+    /// which lets a user filter across every exchange at once instead of
+    /// picking an exchange first.
+    pub fn symbol_options(&self) -> Vec<(String, String)> {
+        self.exchanges
+            .iter()
+            .flat_map(|exchange| {
+                self.pairs_for(&exchange.name).iter().map(|pair| {
+                    (
+                        exchange.name.clone(),
+                        format!("{}/{}", pair.base, pair.quote),
+                    )
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -93,5 +111,26 @@ mod tests {
         catalog.set_pairs("tabdeal", vec![pair("BTC", "IRT"), pair("USDT", "IRT")]);
 
         assert_eq!(catalog.pairs_for("tabdeal").len(), 2);
+    }
+
+    #[test]
+    fn symbol_options_is_empty_when_no_exchanges() {
+        let catalog = ExchangeCatalog::new();
+        assert!(catalog.symbol_options().is_empty());
+    }
+
+    #[test]
+    fn symbol_options_flattens_pairs_across_all_exchanges() {
+        let mut catalog = ExchangeCatalog::new();
+        catalog.set_exchanges(vec![exchange("tabdeal"), exchange("hitobit")]);
+        catalog.set_pairs("tabdeal", vec![pair("USDT", "IRT"), pair("BTC", "IRT")]);
+        catalog.set_pairs("hitobit", vec![pair("USDT", "IRT")]);
+
+        let options = catalog.symbol_options();
+
+        assert_eq!(options.len(), 3);
+        assert!(options.contains(&("tabdeal".to_string(), "USDT/IRT".to_string())));
+        assert!(options.contains(&("tabdeal".to_string(), "BTC/IRT".to_string())));
+        assert!(options.contains(&("hitobit".to_string(), "USDT/IRT".to_string())));
     }
 }

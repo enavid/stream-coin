@@ -9,7 +9,11 @@ title = "stream-coin"
 
 [web.watcher]
 reload_html = true
-watch_path = ["src", "assets"]
+# `ui_core` is a sibling crate, not a subdirectory of this package, so it
+# wasn't watched by default — every `ui_core` edit silently failed to show
+# up in `dx serve` without a full manual restart, which bit verification
+# repeatedly this session. Watching it explicitly fixes that for good.
+watch_path = ["src", "assets", "../ui_core/src"]
 
 [web.resource]
 style = []

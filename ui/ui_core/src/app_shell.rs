@@ -215,7 +215,11 @@ pub fn AppShell(server_url: String) -> Element {
                 }
             }
 
-            main { class: "content",
+            main {
+                // The chart wants the entire content area edge-to-edge
+                // (no page title, no card padding) — every other page
+                // keeps the normal padded/title'd layout.
+                class: if current_route == Route::Chart { "content content-full-bleed" } else { "content" },
                 match current_route {
                     Route::Login => rsx! { Login { server_url: server_url.clone() } },
                     Route::Dashboard => rsx! { Dashboard { server_url: server_url.clone() } },
