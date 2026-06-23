@@ -144,12 +144,27 @@ const CHART_GLUE_JS: &str = r##"
         var x2 = entry.chart.timeScale().timeToCoordinate(d.t2);
         var y1 = entry.series.priceToCoordinate(d.p1);
         var y2 = entry.series.priceToCoordinate(d.p2);
-        if (x1 === null || x2 === null || y1 === null || y2 === null) { d.el.style.display = "none"; return; }
+        if (x1 === null || x2 === null || y1 === null || y2 === null) {
+          d.el.style.display = "none";
+          d.handle1.style.display = "none";
+          d.handle2.style.display = "none";
+          return;
+        }
         d.el.style.display = "block";
         d.el.style.left = Math.min(x1, x2) + "px";
         d.el.style.top = Math.min(y1, y2) + "px";
         d.el.style.width = Math.abs(x2 - x1) + "px";
         d.el.style.height = Math.abs(y2 - y1) + "px";
+        // Handles sit at the drawing's *stored* corners (t1,p1 / t2,p2),
+        // not at the box's min/max — that's what makes each handle resize
+        // the specific corner the user grabbed rather than always the
+        // top-left/bottom-right of the visual box.
+        d.handle1.style.display = entry.activeTool ? "none" : "block";
+        d.handle2.style.display = entry.activeTool ? "none" : "block";
+        d.handle1.style.left = x1 + "px";
+        d.handle1.style.top = y1 + "px";
+        d.handle2.style.left = x2 + "px";
+        d.handle2.style.top = y2 + "px";
       } else if (d.type === "fib") {
         var fx = entry.chart.timeScale().timeToCoordinate(d.t2);
         d.labels.forEach(function (lab, i) {
@@ -164,6 +179,110 @@ const CHART_GLUE_JS: &str = r##"
       // time) — not repositioned here. "priceline"/"lineseries"/"marker"
       // are native chart primitives that reposition themselves.
     });
+  }
+  // --- Drag-to-move for placed drawings (Cursor tool only) --------------
+  // Every drawing tool until now was "place once, never touch again" —
+  // traders expect to nudge a trend line or a position box after drawing
+  // it, same as every other charting tool. Hit-testing and movement happen
+  // in pixel space (via the same `timeToCoordinate`/`priceToCoordinate`
+  // calls `repositionOverlays` already uses), then the delta is converted
+  // back to time/price and applied to the drawing's stored coordinates —
+  // not to the pixel position directly, so the shape still tracks pan/zoom
+  // correctly afterward through the existing reposition/update paths.
+  var HIT_TOLERANCE_PX = 6;
+  function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+    var dx = x2 - x1, dy = y2 - y1;
+    var lenSq = dx * dx + dy * dy;
+    var t = lenSq === 0 ? 0 : ((px - x1) * dx + (py - y1) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    var nx = x1 + t * dx, ny = y1 + t * dy;
+    return Math.hypot(px - nx, py - ny);
+  }
+  // Returns the drawing under (x, y) in pixel space, or null. Checked in
+  // reverse placement order so the most recently drawn (topmost-looking)
+  // shape wins when two overlap.
+  function hitTestDrawing(entry, x, y) {
+    for (var i = entry.drawings.length - 1; i >= 0; i--) {
+      var d = entry.drawings[i];
+      var ts = entry.chart.timeScale();
+      if (d.type === "vline") {
+        var vx = ts.timeToCoordinate(d.time);
+        if (vx !== null && Math.abs(vx - x) <= HIT_TOLERANCE_PX) return d;
+      } else if (d.type === "priceline") {
+        var py = entry.series.priceToCoordinate(d.price);
+        if (py !== null && Math.abs(py - y) <= HIT_TOLERANCE_PX) return d;
+      } else if (d.type === "rect") {
+        var rx1 = ts.timeToCoordinate(d.t1), rx2 = ts.timeToCoordinate(d.t2);
+        var ry1 = entry.series.priceToCoordinate(d.p1), ry2 = entry.series.priceToCoordinate(d.p2);
+        if (rx1 === null || rx2 === null || ry1 === null || ry2 === null) continue;
+        if (x >= Math.min(rx1, rx2) && x <= Math.max(rx1, rx2) && y >= Math.min(ry1, ry2) && y <= Math.max(ry1, ry2)) return d;
+      } else if (d.type === "fib") {
+        var fx1 = ts.timeToCoordinate(d.t1), fx2 = ts.timeToCoordinate(d.t2);
+        if (fx1 === null || fx2 === null) continue;
+        var fys = d.levels.map(function (lv) { return entry.series.priceToCoordinate(lv); }).filter(function (v) { return v !== null; });
+        if (fys.length === 0) continue;
+        if (x >= Math.min(fx1, fx2) && x <= Math.max(fx1, fx2) && y >= Math.min.apply(null, fys) - HIT_TOLERANCE_PX && y <= Math.max.apply(null, fys) + HIT_TOLERANCE_PX) return d;
+      } else if (d.type === "lineseries" || d.type === "measure") {
+        var lx1 = ts.timeToCoordinate(d.t1), lx2 = ts.timeToCoordinate(d.t2);
+        var ly1 = entry.series.priceToCoordinate(d.v1), ly2 = entry.series.priceToCoordinate(d.v2);
+        if (lx1 === null || lx2 === null || ly1 === null || ly2 === null) continue;
+        if (pointToSegmentDistance(x, y, lx1, ly1, lx2, ly2) <= HIT_TOLERANCE_PX) return d;
+      }
+    }
+    return null;
+  }
+  // Resize handles only exist on "rect" drawings (the corner squares drawn
+  // in `repositionOverlays`) — checked separately and with priority over
+  // `hitTestDrawing` since a handle sits inside the rectangle's own
+  // bounding box. Returns `{ drawing, corner }` (1 = t1/p1, 2 = t2/p2) or
+  // `null`.
+  function hitTestRectHandle(entry, x, y) {
+    var ts = entry.chart.timeScale();
+    for (var i = entry.drawings.length - 1; i >= 0; i--) {
+      var d = entry.drawings[i];
+      if (d.type !== "rect") continue;
+      var x1 = ts.timeToCoordinate(d.t1), y1 = entry.series.priceToCoordinate(d.p1);
+      if (x1 !== null && y1 !== null && Math.hypot(x - x1, y - y1) <= HIT_TOLERANCE_PX + 4) {
+        return { drawing: d, corner: 1 };
+      }
+      var x2 = ts.timeToCoordinate(d.t2), y2 = entry.series.priceToCoordinate(d.p2);
+      if (x2 !== null && y2 !== null && Math.hypot(x - x2, y - y2) <= HIT_TOLERANCE_PX + 4) {
+        return { drawing: d, corner: 2 };
+      }
+    }
+    return null;
+  }
+  // Applies a (deltaTime, deltaPrice) shift to one drawing's stored
+  // coordinates and redraws it — the inverse of `hitTestDrawing`'s pixel
+  // read, one case per drawing type already handled there.
+  function moveDrawingBy(entry, d, deltaTime, deltaPrice) {
+    if (d.type === "vline") {
+      d.time = d.time + deltaTime;
+    } else if (d.type === "priceline") {
+      d.price = d.price + deltaPrice;
+      d.ref.applyOptions({ price: d.price });
+    } else if (d.type === "rect") {
+      d.t1 += deltaTime; d.t2 += deltaTime; d.p1 += deltaPrice; d.p2 += deltaPrice;
+    } else if (d.type === "fib") {
+      d.t1 += deltaTime; d.t2 += deltaTime;
+      d.levels = d.levels.map(function (lv) { return lv + deltaPrice; });
+      d.lines.forEach(function (line, i) {
+        line.setData([{ time: d.t1, value: d.levels[i] }, { time: d.t2, value: d.levels[i] }]);
+      });
+    } else if (d.type === "lineseries" || d.type === "measure") {
+      d.t1 += deltaTime; d.t2 += deltaTime; d.v1 += deltaPrice; d.v2 += deltaPrice;
+      d.ref.setData([{ time: d.t1, value: d.v1 }, { time: d.t2, value: d.v2 }]);
+      if (d.type === "measure" && d.el) {
+        var ts2 = entry.chart.timeScale();
+        var ex1 = ts2.timeToCoordinate(d.t1), ex2 = ts2.timeToCoordinate(d.t2);
+        var ey1 = entry.series.priceToCoordinate(d.v1), ey2 = entry.series.priceToCoordinate(d.v2);
+        if (ex1 !== null && ex2 !== null && ey1 !== null && ey2 !== null) {
+          d.el.style.left = ((ex1 + ex2) / 2) + "px";
+          d.el.style.top = ((ey1 + ey2) / 2 - 18) + "px";
+        }
+      }
+    }
+    repositionOverlays(entry.containerId);
   }
   window.scChartInit = function (containerId, legendId, theme) {
     var el = document.getElementById(containerId);
@@ -198,8 +317,18 @@ const CHART_GLUE_JS: &str = r##"
       borderDownColor: colors.down,
       wickUpColor: colors.up,
       wickDownColor: colors.down,
+      // The forming candle is now rebroadcast on every WS price tick (not
+      // just on close), so this series' built-in "current value" price
+      // line/axis-label — designed for a slow-moving last price — instead
+      // jumps continuously between the forming bar's high/low many times a
+      // second, reading as a second, jittery crosshair line. The header
+      // bar's live price/OHLC summary and the hover legend already show the
+      // same number without the jitter, so the canvas line is redundant.
+      priceLineVisible: false,
+      lastValueVisible: false,
     });
     var entry = {
+      containerId: containerId,
       chart: chart,
       series: series,
       colors: colors,
@@ -216,6 +345,11 @@ const CHART_GLUE_JS: &str = r##"
       markers: [],
       activeTool: null,
       pendingPoint: null,
+      // Set while the user is mid-drag of an existing drawing (Cursor tool
+      // only) — `drawing` is the hit-tested target, `lastTime`/`lastPrice`
+      // is the previous mousemove's position so each frame applies an
+      // incremental delta rather than re-deriving an absolute offset.
+      dragState: null,
       // Trade-overlay primitives (`scChartSetTrades`) — separate from
       // `drawings` since they're cleared independently on every backtest
       // re-run, not on every symbol/interval switch. `tradeDensity` is
@@ -293,7 +427,7 @@ const CHART_GLUE_JS: &str = r##"
           lineStyle: LightweightCharts.LineStyle.Dashed,
           axisLabelVisible: true,
         });
-        live.drawings.push({ type: "priceline", ref: line });
+        live.drawings.push({ type: "priceline", ref: line, price: price });
         return;
       }
 
@@ -345,10 +479,21 @@ const CHART_GLUE_JS: &str = r##"
       if (tool === "trend") {
         var trendSeries = chart.addLineSeries(staticLineOpts);
         trendSeries.setData([p1, p2]);
-        live.drawings.push({ type: "lineseries", ref: trendSeries });
+        live.drawings.push({
+          type: "lineseries", ref: trendSeries,
+          t1: p1.time, v1: p1.value, t2: p2.time, v2: p2.value,
+        });
       } else if (tool === "rect") {
         var rEl = makeOverlayDiv(el, "sc-rect");
-        live.drawings.push({ type: "rect", t1: p1.time, p1: p1.value, t2: p2.time, p2: p2.value, el: rEl });
+        var dividerEl = document.createElement("div");
+        dividerEl.className = "sc-rect-divider";
+        rEl.appendChild(dividerEl);
+        var handle1 = makeOverlayDiv(el, "sc-rect-handle");
+        var handle2 = makeOverlayDiv(el, "sc-rect-handle");
+        live.drawings.push({
+          type: "rect", t1: p1.time, p1: p1.value, t2: p2.time, p2: p2.value,
+          el: rEl, handle1: handle1, handle2: handle2,
+        });
         repositionOverlays(containerId);
       } else if (tool === "fib") {
         var ratios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
@@ -387,9 +532,78 @@ const CHART_GLUE_JS: &str = r##"
           labelEl.style.left = ((x1m + x2m) / 2) + "px";
           labelEl.style.top = ((y1m + y2m) / 2 - 18) + "px";
         }
-        live.drawings.push({ type: "measure", ref: measureSeries, el: labelEl });
+        live.drawings.push({
+          type: "measure", ref: measureSeries, el: labelEl,
+          t1: p1.time, v1: p1.value, t2: p2.time, v2: p2.value,
+        });
       }
     });
+    // Native DOM mouse events, not `subscribeClick` — dragging needs every
+    // intermediate mousemove, which the library's own click/crosshair
+    // subscriptions don't provide. Only takes effect in Cursor mode
+    // (`activeTool === null`); while a drawing tool is armed, clicks are
+    // already claimed by `subscribeClick` above for placing new shapes.
+    el.addEventListener("mousedown", function (ev) {
+      var live = window.scCharts[containerId];
+      if (!live || live.activeTool) return;
+      var rect = el.getBoundingClientRect();
+      var x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+      // Resize handles take priority over whole-shape dragging — a handle
+      // sits inside the rectangle's own bounding box, so without this
+      // check first, grabbing a corner would just move the whole shape.
+      var handleHit = hitTestRectHandle(live, x, y);
+      if (handleHit) {
+        live.dragState = { drawing: handleHit.drawing, corner: handleHit.corner };
+        live.chart.applyOptions({ handleScroll: false, handleScale: false });
+        el.style.cursor = "nwse-resize";
+        ev.preventDefault();
+        return;
+      }
+      var hit = hitTestDrawing(live, x, y);
+      if (!hit) return;
+      var time = live.chart.timeScale().coordinateToTime(x);
+      var price = live.series.coordinateToPrice(y);
+      if (time === null || price === null || price === undefined) return;
+      live.dragState = { drawing: hit, lastTime: time, lastPrice: price };
+      live.chart.applyOptions({ handleScroll: false, handleScale: false });
+      el.style.cursor = "move";
+      ev.preventDefault();
+    });
+    el.addEventListener("mousemove", function (ev) {
+      var live = window.scCharts[containerId];
+      if (!live || !live.dragState) return;
+      var rect = el.getBoundingClientRect();
+      var x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+      var time = live.chart.timeScale().coordinateToTime(x);
+      var price = live.series.coordinateToPrice(y);
+      if (time === null || price === null || price === undefined) return;
+      // Resize: the grabbed corner snaps exactly to the mouse (absolute),
+      // not delta-applied like a whole-shape move — that's what makes it
+      // stretch from that corner instead of translating the whole shape.
+      if (live.dragState.corner) {
+        var rd = live.dragState.drawing;
+        if (live.dragState.corner === 1) { rd.t1 = time; rd.p1 = price; }
+        else { rd.t2 = time; rd.p2 = price; }
+        repositionOverlays(containerId);
+        return;
+      }
+      var deltaTime = time - live.dragState.lastTime;
+      var deltaPrice = price - live.dragState.lastPrice;
+      if (deltaTime !== 0 || deltaPrice !== 0) {
+        moveDrawingBy(live, live.dragState.drawing, deltaTime, deltaPrice);
+        live.dragState.lastTime = time;
+        live.dragState.lastPrice = price;
+      }
+    });
+    function endDrag() {
+      var live = window.scCharts[containerId];
+      if (!live || !live.dragState) return;
+      live.dragState = null;
+      live.chart.applyOptions({ handleScroll: true, handleScale: true });
+      el.style.cursor = "default";
+    }
+    el.addEventListener("mouseup", endDrag);
+    el.addEventListener("mouseleave", endDrag);
     window.scCharts[containerId] = entry;
   };
   window.scChartSetData = function (containerId, candles) {
@@ -429,6 +643,10 @@ const CHART_GLUE_JS: &str = r##"
       entry.chart.applyOptions({ handleScroll: true, handleScale: true });
       if (el) el.style.cursor = "default";
     }
+    // Rectangle resize handles only make sense in Cursor mode — toggles
+    // their visibility immediately rather than waiting for the next pan/
+    // zoom/resize to call this incidentally.
+    repositionOverlays(containerId);
   };
   window.scChartClearDrawings = function (containerId) {
     var entry = window.scCharts[containerId];
@@ -436,7 +654,8 @@ const CHART_GLUE_JS: &str = r##"
     entry.drawings.forEach(function (d) {
       if (d.type === "priceline") entry.series.removePriceLine(d.ref);
       else if (d.type === "lineseries" || d.type === "measure") entry.chart.removeSeries(d.ref);
-      else if (d.type === "vline" || d.type === "rect") d.el.remove();
+      else if (d.type === "vline") d.el.remove();
+      else if (d.type === "rect") { d.el.remove(); d.handle1.remove(); d.handle2.remove(); }
       else if (d.type === "fib") {
         d.lines.forEach(function (l) { entry.chart.removeSeries(l); });
         d.labels.forEach(function (lab) { lab.remove(); });

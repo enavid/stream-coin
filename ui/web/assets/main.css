@@ -18,8 +18,10 @@
       --accent-shadow: rgba(99,102,241,.35);
       --green:     #10b981;
       --green-dim: rgba(16,185,129,.12);
+      --green-mid: rgba(16,185,129,.34);
       --red:       #f43f5e;
       --red-dim:   rgba(244,63,94,.12);
+      --red-mid:   rgba(244,63,94,.34);
       --yellow:    #f59e0b;
       --yellow-dim:rgba(245,158,11,.12);
       --purple:    #a855f7;
@@ -54,8 +56,10 @@
       --accent-shadow: rgba(79,70,229,.25);
       --green:     #059669;
       --green-dim: rgba(5,150,105,.12);
+      --green-mid: rgba(5,150,105,.30);
       --red:       #e11d48;
       --red-dim:   rgba(225,29,72,.12);
+      --red-mid:   rgba(225,29,72,.30);
       --yellow:    #b45309;
       --yellow-dim:rgba(180,83,9,.12);
       --purple:    #7c3aed;
@@ -689,9 +693,38 @@
       position: absolute; top: 0; bottom: 0; width: 1px;
       background: var(--accent); pointer-events: none; z-index: 2;
     }
+    /* Green-over-red vertical split (profit zone / risk zone), matching
+       TradingView's Long/Short Position tool — not a flat accent-colored
+       box — since this rectangle is how traders read risk:reward at a
+       glance, the same reason the existing exit markers color by outcome
+       instead of by tool identity. `-mid` (not `-dim`) opacity and a
+       colored border per half, plus a solid divider at the split, so the
+       zone reads as a deliberate colored region rather than a faint tint. */
     .sc-rect {
-      position: absolute; border: 1px dashed var(--accent);
-      background: var(--accent-glow); pointer-events: none; z-index: 2;
+      position: absolute;
+      border: 1px solid var(--border2);
+      border-top-color: var(--green); border-bottom-color: var(--red);
+      background: linear-gradient(to bottom, var(--green-mid) 50%, var(--red-mid) 50%);
+      box-shadow: inset 0 1px 0 0 var(--green), inset 0 -1px 0 0 var(--red);
+      pointer-events: none; z-index: 2;
+    }
+    /* Divider line at the exact 50% split, drawn as a separate child so its
+       position doesn't depend on the gradient's own (unitless) percentage
+       lining up pixel-perfect with the rectangle's actual midpoint. */
+    .sc-rect-divider {
+      position: absolute; left: 0; right: 0; top: 50%; height: 1px;
+      background: var(--text-strong); opacity: .5; pointer-events: none;
+    }
+    /* Corner resize handles — small squares, one per stored corner
+       (`t1,p1` / `t2,p2`), shown only while the Cursor tool is active so
+       they don't clutter the canvas while drawing or trade-overlay
+       rendering. `pointer-events: none` like every other overlay here:
+       hit-testing happens in JS against stored coordinates, not via real
+       DOM events on these divs. */
+    .sc-rect-handle {
+      position: absolute; width: 9px; height: 9px; margin: -5px;
+      background: var(--text-strong); border: 1px solid var(--accent);
+      border-radius: 2px; pointer-events: none; z-index: 3;
     }
     .sc-fib-label {
       position: absolute; font-size: 10px; font-family: var(--mono);
