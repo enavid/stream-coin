@@ -36,6 +36,21 @@ impl ExchangeRegistry {
         self.pairs.push(record);
     }
 
+    /// Inserts or updates a pair, keyed by `(exchange_name, base, quote, market_type)`.
+    /// Idempotent — used by the top-market seeder so re-running it doesn't
+    /// duplicate entries in the in-memory registry.
+    pub fn upsert_pair(&mut self, record: TradingPairRecord) {
+        match self.pairs.iter_mut().find(|p| {
+            p.exchange_name == record.exchange_name
+                && p.base == record.base
+                && p.quote == record.quote
+                && p.market_type == record.market_type
+        }) {
+            Some(existing) => *existing = record,
+            None => self.pairs.push(record),
+        }
+    }
+
     pub fn get_enabled_exchanges(&self) -> Vec<&ExchangeRecord> {
         self.exchanges.iter().filter(|e| e.enabled).collect()
     }
@@ -196,5 +211,55 @@ mod tests {
         let futures_pairs = registry.get_active_pairs("tabdeal", Some(&MarketType::Futures));
         assert_eq!(futures_pairs.len(), 1);
         assert_eq!(futures_pairs[0].base, "BTC");
+    }
+
+    fn pair(exchange: &str, base: &str, quote: &str, active: bool) -> TradingPairRecord {
+        TradingPairRecord {
+            exchange_name: exchange.to_string(),
+            base: base.to_string(),
+            quote: quote.to_string(),
+            market_type: MarketType::Spot,
+            active,
+        }
+    }
+
+    #[test]
+    fn upsert_pair_inserts_when_not_present() {
+        let mut registry = ExchangeRegistry::new();
+        registry.upsert_pair(pair("coinex", "BTC", "USDT", true));
+        assert_eq!(registry.get_active_pairs("coinex", None).len(), 1);
+    }
+
+    #[test]
+    fn upsert_pair_is_idempotent_on_duplicate_key() {
+        let mut registry = ExchangeRegistry::new();
+        registry.upsert_pair(pair("coinex", "BTC", "USDT", true));
+        registry.upsert_pair(pair("coinex", "BTC", "USDT", true));
+        assert_eq!(
+            registry.get_active_pairs("coinex", None).len(),
+            1,
+            "re-upserting the same key must not duplicate"
+        );
+    }
+
+    #[test]
+    fn upsert_pair_updates_active_flag_on_matching_key() {
+        let mut registry = ExchangeRegistry::new();
+        registry.upsert_pair(pair("coinex", "BTC", "USDT", false));
+        registry.upsert_pair(pair("coinex", "BTC", "USDT", true));
+
+        let pairs = registry.get_active_pairs("coinex", None);
+        assert_eq!(pairs.len(), 1);
+        assert!(pairs[0].active);
+    }
+
+    #[test]
+    fn upsert_pair_keeps_distinct_exchanges_separate() {
+        let mut registry = ExchangeRegistry::new();
+        registry.upsert_pair(pair("coinex", "BTC", "USDT", true));
+        registry.upsert_pair(pair("tabdeal", "BTC", "USDT", true));
+
+        assert_eq!(registry.get_active_pairs("coinex", None).len(), 1);
+        assert_eq!(registry.get_active_pairs("tabdeal", None).len(), 1);
     }
 }

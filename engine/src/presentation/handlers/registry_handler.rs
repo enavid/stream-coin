@@ -1,11 +1,13 @@
 use actix_web::{web, Responder};
 
+use crate::exchange::registry::TradingPairRecord;
 use crate::presentation::dto::exchange::{
     ExchangeListResponse, ExchangeNameRequest, ExchangeResponse, PairListQuery, PairListResponse,
-    PairResponse,
+    PairResponse, SeedTopPairsQuery, SeedTopPairsResponse,
 };
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::AppState;
+use crate::price::entity::MarketType;
 
 /// `GET /v1/exchanges` — returns all currently enabled exchanges.
 pub async fn list_exchanges(state: web::Data<AppState>) -> impl Responder {
@@ -128,6 +130,90 @@ pub async fn disable_exchange(
     success_response("Exchange disabled", serde_json::json!({"exchange": name}))
 }
 
+/// `POST /v1/admin/exchanges/coinex/seed-top-pairs?count=20` — fetches
+/// CoinEx's markets ranked by 24h quote volume (via `TopMarketSource`) and
+/// seeds the top `count` as active spot trading pairs, in both the in-memory
+/// registry and the persistent repository (if configured). A one-shot admin
+/// action, not a recurring job — re-running it with the same count is
+/// idempotent (`ExchangeRegistry::upsert_pair` / `ExchangeRepository::upsert_pair`).
+pub async fn seed_coinex_top_pairs(
+    state: web::Data<AppState>,
+    query: web::Query<SeedTopPairsQuery>,
+) -> impl Responder {
+    const EXCHANGE: &str = "coinex";
+    let count = query.resolved_count();
+
+    let Some(source) = state.top_market_sources.get(EXCHANGE) else {
+        return ApiError::service_unavailable("no top-market source configured for coinex")
+            .to_response();
+    };
+
+    tracing::info!(
+        exchange = EXCHANGE,
+        count,
+        "seeding top pairs by quote volume"
+    );
+
+    let markets = match source.fetch_top_markets(count).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(
+                exchange = EXCHANGE,
+                error = %e,
+                transient = e.is_transient(),
+                "top-pair seeding fetch failed"
+            );
+            return if e.is_transient() {
+                ApiError::service_unavailable(&format!("upstream exchange unavailable: {e}"))
+            } else {
+                ApiError::new(&format!("seeding rejected by exchange: {e}"), vec![])
+            }
+            .to_response();
+        }
+    };
+
+    let mut pairs_seeded = 0usize;
+    for market in &markets {
+        let pair = crate::exchange::coinex::market_to_pair(&market.market);
+        let record = TradingPairRecord {
+            exchange_name: EXCHANGE.to_string(),
+            base: pair.base,
+            quote: pair.quote,
+            market_type: MarketType::Spot,
+            active: true,
+        };
+
+        state
+            .exchange_registry
+            .lock()
+            .await
+            .upsert_pair(record.clone());
+
+        if let Some(repo) = &state.exchange_repository {
+            if let Err(e) = repo.upsert_pair(&record).await {
+                tracing::error!(
+                    exchange = EXCHANGE,
+                    base = %record.base,
+                    quote = %record.quote,
+                    error = %e,
+                    "failed to persist seeded pair to db"
+                );
+                continue;
+            }
+        }
+
+        pairs_seeded += 1;
+    }
+
+    tracing::info!(
+        exchange = EXCHANGE,
+        pairs_seeded,
+        "top-pair seeding complete"
+    );
+
+    success_response("Top pairs seeded", SeedTopPairsResponse { pairs_seeded })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -187,6 +273,7 @@ mod tests {
             python_strategy_repository: None,
             candle_repository: None,
             historical_sources: Arc::new(HashMap::new()),
+            top_market_sources: Arc::new(HashMap::new()),
             candle_history: AppState::new_candle_history(),
             exchange_repository,
             user_repository: None,
@@ -343,5 +430,217 @@ mod tests {
             exchanges[0].enabled,
             "enable must persist enabled=true to the repository"
         );
+    }
+
+    // --- seed_coinex_top_pairs ---
+
+    use crate::exchange::market_seed_port::{MarketSeederError, MarketVolume, TopMarketSource};
+
+    struct FakeTopMarketSource {
+        markets: Vec<MarketVolume>,
+    }
+
+    #[async_trait::async_trait]
+    impl TopMarketSource for FakeTopMarketSource {
+        fn exchange_id(&self) -> crate::exchange::entity::ExchangeId {
+            crate::exchange::entity::ExchangeId::new("coinex")
+        }
+
+        async fn fetch_top_markets(
+            &self,
+            count: usize,
+        ) -> Result<Vec<MarketVolume>, MarketSeederError> {
+            Ok(self.markets.iter().take(count).cloned().collect())
+        }
+    }
+
+    fn fake_markets(n: usize) -> Vec<MarketVolume> {
+        (0..n)
+            .map(|i| MarketVolume {
+                market: format!("COIN{i}USDT"),
+                quote_volume: (n - i) as u64 * 1000,
+                status: "online".to_string(),
+            })
+            .collect()
+    }
+
+    fn state_with_top_market_source(
+        registry: ExchangeRegistry,
+        exchange_repository: Option<Arc<dyn ExchangeRepository>>,
+        markets: Vec<MarketVolume>,
+    ) -> web::Data<AppState> {
+        let mut sources: HashMap<String, Arc<dyn TopMarketSource>> = HashMap::new();
+        sources.insert(
+            "coinex".to_string(),
+            Arc::new(FakeTopMarketSource { markets }) as Arc<dyn TopMarketSource>,
+        );
+
+        web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: Arc::new(Mutex::new(registry)),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            publisher: None,
+            broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
+            ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
+            signal_repository: None,
+            order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            order_manager: None,
+            python_strategy_repository: None,
+            candle_repository: None,
+            historical_sources: Arc::new(HashMap::new()),
+            top_market_sources: Arc::new(sources),
+            candle_history: AppState::new_candle_history(),
+            exchange_repository,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
+        })
+    }
+
+    fn coinex_exchange_repo() -> Arc<FakeExchangeRepository> {
+        Arc::new(FakeExchangeRepository::new_with(
+            vec![ExchangeRecord {
+                name: "coinex".to_string(),
+                display_name: "CoinEx".to_string(),
+                ws_url: "wss://socket.coinex.com/v2/spot".to_string(),
+                enabled: false,
+            }],
+            vec![],
+        ))
+    }
+
+    #[actix_web::test]
+    async fn seed_top_pairs_returns_503_when_no_source_configured() {
+        let state = state_with_registry(ExchangeRegistry::new());
+
+        let app = test::init_service(App::new().app_data(state).route(
+            "/admin/exchanges/coinex/seed-top-pairs",
+            web::post().to(seed_coinex_top_pairs),
+        ))
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/coinex/seed-top-pairs")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 503);
+    }
+
+    #[actix_web::test]
+    async fn seed_top_pairs_inserts_exactly_count_rows() {
+        let repo = coinex_exchange_repo();
+        let state = state_with_top_market_source(
+            ExchangeRegistry::new(),
+            Some(repo.clone() as Arc<dyn ExchangeRepository>),
+            fake_markets(25),
+        );
+
+        let app = test::init_service(App::new().app_data(state).route(
+            "/admin/exchanges/coinex/seed-top-pairs",
+            web::post().to(seed_coinex_top_pairs),
+        ))
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/coinex/seed-top-pairs?count=20")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        assert_eq!(body["data"]["pairs_seeded"], 20);
+
+        let (_, pairs) = repo.load_all().await.unwrap();
+        assert_eq!(pairs.len(), 20, "must persist exactly count rows");
+    }
+
+    #[actix_web::test]
+    async fn seed_top_pairs_is_idempotent_on_rerun() {
+        let repo = coinex_exchange_repo();
+        let registry = Arc::new(Mutex::new(ExchangeRegistry::new()));
+        let state = {
+            let mut sources: HashMap<String, Arc<dyn TopMarketSource>> = HashMap::new();
+            sources.insert(
+                "coinex".to_string(),
+                Arc::new(FakeTopMarketSource {
+                    markets: fake_markets(20),
+                }) as Arc<dyn TopMarketSource>,
+            );
+            web::Data::new(AppState {
+                redis: None,
+                exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+                exchange_registry: registry.clone(),
+                adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                publisher: None,
+                broadcaster: AppState::new_broadcaster(),
+                jwt_secret: None,
+                ticker_repository: None,
+                running_strategies: Arc::new(Mutex::new(HashMap::new())),
+                strategy_repository: None,
+                signal_repository: None,
+                order_adapters: Arc::new(RwLock::new(HashMap::new())),
+                order_manager: None,
+                python_strategy_repository: None,
+                candle_repository: None,
+                historical_sources: Arc::new(HashMap::new()),
+                top_market_sources: Arc::new(sources),
+                candle_history: AppState::new_candle_history(),
+                exchange_repository: Some(repo.clone() as Arc<dyn ExchangeRepository>),
+                user_repository: None,
+                credential_repository: None,
+                credential_cipher: None,
+            })
+        };
+
+        let app = test::init_service(App::new().app_data(state).route(
+            "/admin/exchanges/coinex/seed-top-pairs",
+            web::post().to(seed_coinex_top_pairs),
+        ))
+        .await;
+
+        for _ in 0..2 {
+            let req = test::TestRequest::post()
+                .uri("/admin/exchanges/coinex/seed-top-pairs?count=20")
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), 200);
+        }
+
+        let (_, pairs) = repo.load_all().await.unwrap();
+        assert_eq!(
+            pairs.len(),
+            20,
+            "re-running with the same count must not duplicate rows"
+        );
+        assert_eq!(
+            registry.lock().await.get_active_pairs("coinex", None).len(),
+            20,
+            "in-memory registry must also stay idempotent"
+        );
+    }
+
+    #[actix_web::test]
+    async fn seed_top_pairs_with_fewer_markets_than_count_seeds_all_available() {
+        let repo = coinex_exchange_repo();
+        let state = state_with_top_market_source(
+            ExchangeRegistry::new(),
+            Some(repo.clone() as Arc<dyn ExchangeRepository>),
+            fake_markets(5),
+        );
+
+        let app = test::init_service(App::new().app_data(state).route(
+            "/admin/exchanges/coinex/seed-top-pairs",
+            web::post().to(seed_coinex_top_pairs),
+        ))
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/coinex/seed-top-pairs?count=20")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        assert_eq!(body["data"]["pairs_seeded"], 5);
     }
 }

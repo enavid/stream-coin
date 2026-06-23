@@ -11,9 +11,10 @@ use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use stream_coin::exchange::coinex::{CoinexHistoricalAdapter, CoinexWsAdapter};
+use stream_coin::exchange::coinex::{CoinexHistoricalAdapter, CoinexMarketSeeder, CoinexWsAdapter};
 use stream_coin::exchange::historical_port::HistoricalCandleSource;
 use stream_coin::exchange::hitobit::HitobitWsAdapter;
+use stream_coin::exchange::market_seed_port::TopMarketSource;
 use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
@@ -119,6 +120,15 @@ async fn main() -> std::io::Result<()> {
         Arc::new(CoinexHistoricalAdapter::new()) as Arc<dyn HistoricalCandleSource>,
     );
     let historical_sources = Arc::new(historical_sources);
+
+    // Hard-coded registry of top-market-by-volume sources — same sparsity
+    // rationale as `historical_sources`.
+    let mut top_market_sources: HashMap<String, Arc<dyn TopMarketSource>> = HashMap::new();
+    top_market_sources.insert(
+        "coinex".to_string(),
+        Arc::new(CoinexMarketSeeder::new()) as Arc<dyn TopMarketSource>,
+    );
+    let top_market_sources = Arc::new(top_market_sources);
 
     let db_pool: Option<sqlx::PgPool> = match env::var("DATABASE_URL") {
         Ok(url) => match sqlx::PgPool::connect(&url).await {
@@ -381,6 +391,7 @@ async fn main() -> std::io::Result<()> {
         candle_repository,
         candle_history: AppState::new_candle_history(),
         historical_sources,
+        top_market_sources,
         exchange_repository,
         user_repository,
         credential_repository,

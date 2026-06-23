@@ -36,11 +36,11 @@ fn parse_kline_item(market: &str, interval: Interval, item: &Value) -> Result<Ca
     let time = DateTime::<Utc>::from_timestamp_millis(created_at_ms)
         .ok_or_else(|| format!("invalid created_at timestamp: {created_at_ms}"))?;
 
-    let open = parse_price_units(field_str(item, "open")?)?;
-    let high = parse_price_units(field_str(item, "high")?)?;
-    let low = parse_price_units(field_str(item, "low")?)?;
-    let close = parse_price_units(field_str(item, "close")?)?;
-    let volume = parse_price_units(field_str(item, "volume")?)?;
+    let open = super::parse_minor_units(field_str(item, "open")?)?;
+    let high = super::parse_minor_units(field_str(item, "high")?)?;
+    let low = super::parse_minor_units(field_str(item, "low")?)?;
+    let close = super::parse_minor_units(field_str(item, "close")?)?;
+    let volume = super::parse_minor_units(field_str(item, "volume")?)?;
 
     let pair = super::market_to_pair(market);
 
@@ -61,16 +61,6 @@ fn field_str<'a>(item: &'a Value, name: &str) -> Result<&'a str, String> {
     item[name]
         .as_str()
         .ok_or_else(|| format!("missing {name} field"))
-}
-
-fn parse_price_units(s: &str) -> Result<u64, String> {
-    if s.starts_with('-') {
-        return Err(format!("value must be non-negative: {s}"));
-    }
-    let integer_part = s.split_once('.').map_or(s, |(int, _)| int);
-    integer_part
-        .parse::<u64>()
-        .map_err(|_| format!("invalid numeric value: {s}"))
 }
 
 /// Parses a full `GET /spot/kline` response body (`{"code":0,"data":[...]}`)
@@ -99,16 +89,14 @@ fn parse_kline_page(
 /// Classifies an HTTP response status per the project's transient/permanent
 /// rule. Returns `None` for 2xx (success — caller proceeds to parse the body).
 fn classify_http_status(status: u16, body: &str) -> Option<HistoricalCandleSourceError> {
-    match status {
-        200..=299 => None,
-        500..=599 => Some(HistoricalCandleSourceError::ServerError {
-            status,
-            body: body.to_string(),
-        }),
-        _ => Some(HistoricalCandleSourceError::ClientError {
-            status,
-            body: body.to_string(),
-        }),
+    match super::classify_http_status(status, body) {
+        super::HttpStatusClass::Success => None,
+        super::HttpStatusClass::Transient { status, body } => {
+            Some(HistoricalCandleSourceError::ServerError { status, body })
+        }
+        super::HttpStatusClass::Permanent { status, body } => {
+            Some(HistoricalCandleSourceError::ClientError { status, body })
+        }
     }
 }
 

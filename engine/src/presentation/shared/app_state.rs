@@ -7,6 +7,7 @@ use tokio::task::AbortHandle;
 
 use crate::candle::entity::CandlePayload;
 use crate::exchange::historical_port::HistoricalCandleSource;
+use crate::exchange::market_seed_port::TopMarketSource;
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
 use crate::infrastructure::crypto::credential_cipher::CredentialCipher;
@@ -116,6 +117,10 @@ pub struct AppState {
     /// Hitobit do not), so an exchange simply has no entry here rather than an
     /// `Unsupported` stub implementation.
     pub historical_sources: Arc<HashMap<String, Arc<dyn HistoricalCandleSource>>>,
+    /// Hard-coded registry of top-market-by-volume sources, keyed by exchange
+    /// name. Same sparsity rationale as `historical_sources` — only exchanges
+    /// with a public ticker/volume endpoint get an entry.
+    pub top_market_sources: Arc<HashMap<String, Arc<dyn TopMarketSource>>>,
 }
 
 impl AppState {
@@ -205,6 +210,7 @@ mod tests {
             credential_cipher: None,
             candle_history: AppState::new_candle_history(),
             historical_sources: Arc::new(HashMap::new()),
+            top_market_sources: Arc::new(HashMap::new()),
         }
     }
 

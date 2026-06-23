@@ -247,6 +247,24 @@ impl ExchangeRepository for PostgresExchangeRepository {
             .map_err(|e| ExchangeRepositoryError::Database(e.to_string()))?;
         Ok(())
     }
+
+    async fn upsert_pair(&self, record: &TradingPairRecord) -> Result<(), ExchangeRepositoryError> {
+        sqlx::query(
+            "INSERT INTO trading_pairs (exchange_id, base, quote, market_type, active)
+             SELECT id, $2, $3, $4, $5 FROM exchanges WHERE name = $1
+             ON CONFLICT (exchange_id, base, quote, market_type)
+             DO UPDATE SET active = EXCLUDED.active",
+        )
+        .bind(&record.exchange_name)
+        .bind(&record.base)
+        .bind(&record.quote)
+        .bind(record.market_type.to_string())
+        .bind(record.active)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ExchangeRepositoryError::Database(e.to_string()))?;
+        Ok(())
+    }
 }
 
 pub struct PostgresUserRepository {
