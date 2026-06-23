@@ -216,6 +216,10 @@ const CHART_GLUE_JS: &str = r##"
       markers: [],
       activeTool: null,
       pendingPoint: null,
+      // Trade-overlay primitives (`scChartSetTrades`) — separate from
+      // `drawings` since they're cleared independently on every backtest
+      // re-run, not on every symbol/interval switch.
+      tradePrimitives: [],
     };
     if (window.ResizeObserver) {
       var ro = new ResizeObserver(function () {
@@ -365,6 +369,7 @@ const CHART_GLUE_JS: &str = r##"
     // coordinates, so clear them rather than leave stale lines floating
     // over an unrelated instrument's candles.
     window.scChartClearDrawings(containerId);
+    window.scChartClearTrades(containerId);
     entry.series.setData(candles.map(toPoint));
     entry.chart.timeScale().fitContent();
   };
@@ -412,6 +417,164 @@ const CHART_GLUE_JS: &str = r##"
     entry.markers = [];
     entry.series.setMarkers([]);
     entry.pendingPoint = null;
+  };
+  // --- Trade overlay (backtest closed trades) ---------------------------
+  // Canvas-based Series Primitives (`series.attachPrimitive`), not DOM
+  // overlays like the manual drawing tools above — TradingView's own
+  // plugin examples (rectangle-drawing-tool, vertical-line, tooltip) all
+  // use this technique, and it's the one that doesn't fall over at
+  // hundreds of trades the way hundreds of repositioned DOM nodes would.
+  function tradeTime(iso) {
+    return Math.floor(new Date(iso).getTime() / 1000);
+  }
+  function tradePriceExtent(trade) {
+    var vals = [trade.entry_price, trade.exit_price];
+    if (trade.stop_loss !== null && trade.stop_loss !== undefined) vals.push(trade.stop_loss);
+    if (trade.take_profit !== null && trade.take_profit !== undefined) vals.push(trade.take_profit);
+    return { min: Math.min.apply(null, vals), max: Math.max.apply(null, vals) };
+  }
+  function formatTradeLabel(trade) {
+    var parts = [trade.side === "long" ? "LONG" : "SHORT"];
+    if (trade.rr !== null && trade.rr !== undefined) parts.push("RR: " + trade.rr.toFixed(2));
+    parts.push("E: " + trade.entry_price);
+    if (trade.stop_loss !== null && trade.stop_loss !== undefined) parts.push("SL: " + trade.stop_loss);
+    if (trade.take_profit !== null && trade.take_profit !== undefined) parts.push("TP: " + trade.take_profit);
+    return parts.join(" | ");
+  }
+  // One primitive instance per trade rectangle. `attached`/`detached` are
+  // the standard `ISeriesPrimitive` lifecycle hooks this build exposes
+  // (confirmed via `attachPrimitive`/`detachPrimitive` in the vendored
+  // bundle) — they hand back the chart/series refs needed for coordinate
+  // conversion, since a primitive itself has no access to either.
+  function makeTradeRectanglePrimitive(trade, colors) {
+    var chartRef = null;
+    var seriesRef = null;
+    var label = formatTradeLabel(trade);
+    var sideColor = trade.side === "long" ? colors.up : colors.down;
+    var borderWidth = trade.rr !== null && trade.rr !== undefined && trade.rr > 3 ? 3 : 2;
+    return {
+      attached: function (p) { chartRef = p.chart; seriesRef = p.series; },
+      detached: function () { chartRef = null; seriesRef = null; },
+      updateAllViews: function () {},
+      paneViews: function () {
+        return [{
+          renderer: {
+            draw: function (target) {
+              target.useBitmapCoordinateSpace(function (scope) {
+                if (!chartRef || !seriesRef) return;
+                var x1 = chartRef.timeScale().timeToCoordinate(tradeTime(trade.entry_time));
+                var x2 = chartRef.timeScale().timeToCoordinate(tradeTime(trade.exit_time));
+                var extent = tradePriceExtent(trade);
+                var yTop = seriesRef.priceToCoordinate(extent.max);
+                var yBot = seriesRef.priceToCoordinate(extent.min);
+                if (x1 === null || x2 === null || yTop === null || yBot === null) return;
+                var ctx = scope.context;
+                var hr = scope.horizontalPixelRatio;
+                var vr = scope.verticalPixelRatio;
+                var left = Math.min(x1, x2) * hr;
+                var right = Math.max(x1, x2) * hr;
+                var top = yTop * vr;
+                var bottom = yBot * vr;
+                ctx.save();
+                ctx.globalAlpha = 0.2;
+                ctx.fillStyle = sideColor;
+                ctx.fillRect(left, top, right - left, bottom - top);
+                ctx.globalAlpha = 1;
+                ctx.lineWidth = borderWidth * hr;
+                ctx.strokeStyle = sideColor;
+                ctx.strokeRect(left, top, right - left, bottom - top);
+                ctx.fillStyle = colors.text;
+                ctx.font = (11 * vr) + "px sans-serif";
+                ctx.textBaseline = "top";
+                ctx.fillText(label, left + 4 * hr, top + 4 * vr);
+                ctx.restore();
+              });
+            },
+          },
+        }];
+      },
+      priceAxisViews: function () { return []; },
+      timeAxisViews: function () { return []; },
+    };
+  }
+  // Used 3x per trade (entry/SL/TP) — a short segment bounded to just the
+  // entry-time..exit-time range, same "short segment, not infinite line"
+  // approach already used for the manual Fibonacci tool above.
+  function makeTradeLinePrimitive(trade, price, color, dashed) {
+    var chartRef = null;
+    var seriesRef = null;
+    return {
+      attached: function (p) { chartRef = p.chart; seriesRef = p.series; },
+      detached: function () { chartRef = null; seriesRef = null; },
+      updateAllViews: function () {},
+      paneViews: function () {
+        return [{
+          renderer: {
+            draw: function (target) {
+              target.useBitmapCoordinateSpace(function (scope) {
+                if (!chartRef || !seriesRef || price === null || price === undefined) return;
+                var x1 = chartRef.timeScale().timeToCoordinate(tradeTime(trade.entry_time));
+                var x2 = chartRef.timeScale().timeToCoordinate(tradeTime(trade.exit_time));
+                var y = seriesRef.priceToCoordinate(price);
+                if (x1 === null || x2 === null || y === null) return;
+                var ctx = scope.context;
+                var hr = scope.horizontalPixelRatio;
+                var vr = scope.verticalPixelRatio;
+                ctx.save();
+                ctx.strokeStyle = color;
+                ctx.lineWidth = hr;
+                if (dashed) ctx.setLineDash([4 * hr, 4 * hr]);
+                ctx.beginPath();
+                ctx.moveTo(Math.min(x1, x2) * hr, y * vr);
+                ctx.lineTo(Math.max(x1, x2) * hr, y * vr);
+                ctx.stroke();
+                ctx.restore();
+              });
+            },
+          },
+        }];
+      },
+      priceAxisViews: function () { return []; },
+      timeAxisViews: function () { return []; },
+    };
+  }
+  // Single entry point: clears any previously-attached trade primitives,
+  // then attaches a rectangle + up to 3 lines (entry/SL/TP) per trade —
+  // mirrors the `scChartSetData`/`scChartClearDrawings` naming already
+  // used above.
+  window.scChartSetTrades = function (containerId, closedTrades) {
+    var entry = window.scCharts[containerId];
+    if (!entry) return;
+    window.scChartClearTrades(containerId);
+    var primitives = [];
+    closedTrades.forEach(function (trade) {
+      var rect = makeTradeRectanglePrimitive(trade, entry.colors);
+      entry.series.attachPrimitive(rect);
+      primitives.push(rect);
+
+      var sideColor = trade.side === "long" ? entry.colors.up : entry.colors.down;
+      var entryLine = makeTradeLinePrimitive(trade, trade.entry_price, sideColor, false);
+      entry.series.attachPrimitive(entryLine);
+      primitives.push(entryLine);
+
+      if (trade.stop_loss !== null && trade.stop_loss !== undefined) {
+        var slLine = makeTradeLinePrimitive(trade, trade.stop_loss, entry.colors.down, true);
+        entry.series.attachPrimitive(slLine);
+        primitives.push(slLine);
+      }
+      if (trade.take_profit !== null && trade.take_profit !== undefined) {
+        var tpLine = makeTradeLinePrimitive(trade, trade.take_profit, entry.colors.up, true);
+        entry.series.attachPrimitive(tpLine);
+        primitives.push(tpLine);
+      }
+    });
+    entry.tradePrimitives = primitives;
+  };
+  window.scChartClearTrades = function (containerId) {
+    var entry = window.scCharts[containerId];
+    if (!entry) return;
+    (entry.tradePrimitives || []).forEach(function (p) { entry.series.detachPrimitive(p); });
+    entry.tradePrimitives = [];
   };
   window.scChartSetTheme = function (containerId, theme) {
     var entry = window.scCharts[containerId];
@@ -842,6 +1005,31 @@ fn filter_symbols(options: &[(String, String)], query: &str) -> Vec<(String, Str
         .collect()
 }
 
+/// Builds the in-box text drawn on a `TradeRectanglePrimitive` (JS side,
+/// `scChartSetTrades`) — kept as a plain Rust function so it's unit
+/// testable, rather than living only inside the JS template string.
+/// Not yet called from non-test code: the chart page doesn't drive
+/// `scChartSetTrades` until it's wired up.
+#[allow(dead_code)]
+fn format_trade_label(trade: &crate::api::ClosedTrade) -> String {
+    let side = match trade.side {
+        crate::api::TradeSide::Long => "LONG",
+        crate::api::TradeSide::Short => "SHORT",
+    };
+    let mut parts = vec![side.to_string()];
+    if let Some(rr) = trade.rr {
+        parts.push(format!("RR: {rr:.2}"));
+    }
+    parts.push(format!("E: {}", trade.entry_price));
+    if let Some(sl) = trade.stop_loss {
+        parts.push(format!("SL: {sl}"));
+    }
+    if let Some(tp) = trade.take_profit {
+        parts.push(format!("TP: {tp}"));
+    }
+    parts.join(" | ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,5 +1063,54 @@ mod tests {
     #[test]
     fn filter_symbols_returns_empty_when_nothing_matches() {
         assert!(filter_symbols(&options(), "nonexistent").is_empty());
+    }
+
+    fn closed_trade(
+        side: crate::api::TradeSide,
+        rr: Option<f64>,
+        stop_loss: Option<u64>,
+        take_profit: Option<u64>,
+    ) -> crate::api::ClosedTrade {
+        crate::api::ClosedTrade {
+            strategy_id: "s1".to_string(),
+            side,
+            entry_price: 100_000,
+            exit_price: 110_000,
+            stop_loss,
+            take_profit,
+            quantity: 1,
+            entry_time: "2026-01-01T00:00:00Z".to_string(),
+            exit_time: "2026-01-01T00:01:00Z".to_string(),
+            pnl: 10_000,
+            pnl_pct: 10.0,
+            rr,
+            outcome: crate::api::TradeOutcome::Win,
+        }
+    }
+
+    #[test]
+    fn format_trade_label_includes_side_rr_entry_sl_tp() {
+        let trade = closed_trade(
+            crate::api::TradeSide::Long,
+            Some(2.0),
+            Some(95_000),
+            Some(110_000),
+        );
+        let label = format_trade_label(&trade);
+        assert!(label.contains("LONG"), "label was: {label}");
+        assert!(label.contains("RR: 2.00"), "label was: {label}");
+        assert!(label.contains("E: 100000"), "label was: {label}");
+        assert!(label.contains("SL: 95000"), "label was: {label}");
+        assert!(label.contains("TP: 110000"), "label was: {label}");
+    }
+
+    #[test]
+    fn format_trade_label_omits_rr_sl_tp_when_absent() {
+        let trade = closed_trade(crate::api::TradeSide::Short, None, None, None);
+        let label = format_trade_label(&trade);
+        assert!(label.contains("SHORT"), "label was: {label}");
+        assert!(!label.contains("RR:"), "label was: {label}");
+        assert!(!label.contains("SL:"), "label was: {label}");
+        assert!(!label.contains("TP:"), "label was: {label}");
     }
 }
