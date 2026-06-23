@@ -72,6 +72,8 @@ impl Strategy for PriceDeltaStrategy {
                 action: Action::Buy,
                 confidence: delta.min(1.0),
                 timestamp: candle.time,
+                stop_loss: None,
+                take_profit: None,
             })
         } else if delta < -self.threshold {
             Some(Signal {
@@ -81,6 +83,8 @@ impl Strategy for PriceDeltaStrategy {
                 action: Action::Sell,
                 confidence: (-delta).min(1.0),
                 timestamp: candle.time,
+                stop_loss: None,
+                take_profit: None,
             })
         } else {
             None
@@ -199,5 +203,16 @@ mod tests {
         assert_eq!(signal.strategy_id, "my-id");
         assert_eq!(signal.exchange, "tabdeal");
         assert_eq!(signal.pair, "USDT/IRT");
+    }
+
+    #[test]
+    fn price_delta_signal_has_no_stop_loss_or_take_profit_yet() {
+        let strategy = PriceDeltaStrategy::new("my-id", "tabdeal", "USDT/IRT", 2, 0.05);
+        strategy.on_candle(&make_candle("tabdeal", "USDT/IRT", 100_000));
+        let signal = strategy
+            .on_candle(&make_candle("tabdeal", "USDT/IRT", 110_000))
+            .unwrap();
+        assert!(signal.stop_loss.is_none());
+        assert!(signal.take_profit.is_none());
     }
 }

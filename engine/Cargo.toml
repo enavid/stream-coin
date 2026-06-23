@@ -41,6 +41,7 @@ base64 = "0.22"
 [dev-dependencies]
 actix-test = "0.1"
 actix-http = "3"
+proptest = "1"
 
 [package.metadata.deb]
 maintainer = "Navid Sadeghi <navidsadeghi0021@gmail.com>"

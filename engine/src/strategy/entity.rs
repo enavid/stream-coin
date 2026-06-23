@@ -25,4 +25,8 @@ pub struct Signal {
     pub action: Action,
     pub confidence: f64,
     pub timestamp: DateTime<Utc>,
+    /// No built-in strategy computes a stop-loss yet — always `None` today.
+    pub stop_loss: Option<u64>,
+    /// No built-in strategy computes a take-profit yet — always `None` today.
+    pub take_profit: Option<u64>,
 }

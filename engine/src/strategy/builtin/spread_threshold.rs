@@ -38,6 +38,8 @@ impl Strategy for SpreadThresholdStrategy {
                 action: Action::Buy,
                 confidence: 1.0,
                 timestamp: price.timestamp,
+                stop_loss: None,
+                take_profit: None,
             })
         } else {
             None
@@ -130,5 +132,16 @@ mod tests {
         assert_eq!(signal.pair, "USDT/IRT");
         assert_eq!(signal.action, Action::Buy);
         assert_eq!(signal.confidence, 1.0);
+    }
+
+    #[test]
+    fn spread_threshold_signal_has_no_stop_loss_or_take_profit_yet() {
+        let strategy = SpreadThresholdStrategy::new("my-id", "tabdeal", "USDT/IRT", 1_000);
+        let price = make_price(175_000, 177_500);
+        let signal = strategy
+            .on_price(&price)
+            .expect("spread > threshold must emit a signal");
+        assert!(signal.stop_loss.is_none());
+        assert!(signal.take_profit.is_none());
     }
 }
