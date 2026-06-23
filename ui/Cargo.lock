@@ -3086,6 +3086,7 @@ dependencies = [
  "futures-util",
  "gloo-net",
  "gloo-timers",
+ "js-sys",
  "ui_core",
  "wasm-bindgen",
  "web-sys",

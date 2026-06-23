@@ -15,8 +15,6 @@ struct NavItem {
     route: Route,
     label: &'static str,
     icon: fn() -> Element,
-    /// `None` means visible to every authenticated user.
-    requires: Option<&'static str>,
 }
 
 /// The day-to-day destinations a trader actually works from.
@@ -25,49 +23,45 @@ const PRIMARY_NAV_ITEMS: &[NavItem] = &[
         route: Route::Dashboard,
         label: "Dashboard",
         icon: || rsx! { IconDashboard {} },
-        requires: None,
     },
     NavItem {
         route: Route::Chart,
         label: "Chart",
         icon: || rsx! { IconChart {} },
-        requires: None,
     },
     NavItem {
         route: Route::Strategies,
         label: "Strategies",
         icon: || rsx! { IconStrategy {} },
-        requires: None,
     },
     NavItem {
         route: Route::Backtest,
         label: "Backtest",
         icon: || rsx! { IconBacktest {} },
-        requires: None,
     },
     NavItem {
         route: Route::Orders,
         label: "Orders",
         icon: || rsx! { IconOrders {} },
-        requires: None,
     },
 ];
 
 /// Account/admin utilities — not a daily destination, so every common
 /// sidebar pattern (Slack, Notion, Linear, Discord) pins these to the
 /// bottom, separated from the primary nav, instead of mixing them in.
+/// Permission gating comes from [`Route::required_permission`] — a single
+/// source of truth shared with the content guard below, instead of each
+/// `NavItem` carrying its own copy that could drift out of sync with it.
 const SECONDARY_NAV_ITEMS: &[NavItem] = &[
     NavItem {
         route: Route::Admin,
         label: "Users & Roles",
         icon: || rsx! { IconAdmin {} },
-        requires: Some("users.manage"),
     },
     NavItem {
         route: Route::Settings,
         label: "Settings",
         icon: || rsx! { IconSettings {} },
-        requires: Some("exchange_credentials.write"),
     },
 ];
 
@@ -100,6 +94,11 @@ pub fn AppShell(server_url: String) -> Element {
     use_effect(move || {
         let session = (state.session)();
         let api = api();
+        // Also re-runs when the WS transport resyncs after a reconnect
+        // (`AppState::resync_epoch`) — the exchange/pair catalog is the one
+        // piece of state every page reads, so it's worth refreshing on
+        // reconnect even though it changes rarely.
+        let _resync = (state.resync_epoch)();
         spawn(async move {
             let Some(session) = session else { return };
             let Ok(resp) = api.list_exchanges(&session.token).await else {
@@ -192,15 +191,15 @@ pub fn AppShell(server_url: String) -> Element {
 
             nav { class: if mobile_nav_open() { "sidebar open" } else { "sidebar" },
                 for item in PRIMARY_NAV_ITEMS.iter() {
-                    if item.requires.is_none_or(|p| session.has(p)) {
+                    if item.route.required_permission().is_none_or(|p| session.has(p)) {
                         {render_nav_item(item)}
                     }
                 }
                 div { class: "sidebar-bottom",
-                    if SECONDARY_NAV_ITEMS.iter().any(|item| item.requires.is_none_or(|p| session.has(p))) {
+                    if SECONDARY_NAV_ITEMS.iter().any(|item| item.route.required_permission().is_none_or(|p| session.has(p))) {
                         div { class: "nav-sep" }
                         for item in SECONDARY_NAV_ITEMS.iter() {
-                            if item.requires.is_none_or(|p| session.has(p)) {
+                            if item.route.required_permission().is_none_or(|p| session.has(p)) {
                                 {render_nav_item(item)}
                             }
                         }
@@ -220,15 +219,32 @@ pub fn AppShell(server_url: String) -> Element {
                 // (no page title, no card padding) — every other page
                 // keeps the normal padded/title'd layout.
                 class: if current_route == Route::Chart { "content content-full-bleed" } else { "content" },
-                match current_route {
-                    Route::Login => rsx! { Login { server_url: server_url.clone() } },
-                    Route::Dashboard => rsx! { Dashboard { server_url: server_url.clone() } },
-                    Route::Chart => rsx! { Chart { server_url: server_url.clone() } },
-                    Route::Strategies => rsx! { Strategies { server_url: server_url.clone() } },
-                    Route::Backtest => rsx! { Backtest { server_url: server_url.clone() } },
-                    Route::Orders => rsx! { Orders { server_url: server_url.clone() } },
-                    Route::Admin => rsx! { Admin { server_url: server_url.clone() } },
-                    Route::Settings => rsx! { Settings { server_url: server_url.clone() } },
+                // Hiding a nav link (above) only stops a user from
+                // *clicking* their way to a page they lack permission for —
+                // it does nothing to stop them typing the path directly
+                // into the URL bar, which `browser::restore_route` happily
+                // honors on the next page load. This is the actual content
+                // guard; the backend re-checks every API call regardless,
+                // but a "Viewer" should never even see the Admin page's
+                // shell render.
+                if current_route.required_permission().is_some_and(|p| !session.has(p)) {
+                    div { class: "page-head",
+                        div {
+                            div { class: "page-title", "Access denied" }
+                            div { class: "page-sub", "Your account doesn't have permission to view this page." }
+                        }
+                    }
+                } else {
+                    match current_route {
+                        Route::Login => rsx! { Login { server_url: server_url.clone() } },
+                        Route::Dashboard => rsx! { Dashboard { server_url: server_url.clone() } },
+                        Route::Chart => rsx! { Chart { server_url: server_url.clone() } },
+                        Route::Strategies => rsx! { Strategies { server_url: server_url.clone() } },
+                        Route::Backtest => rsx! { Backtest { server_url: server_url.clone() } },
+                        Route::Orders => rsx! { Orders { server_url: server_url.clone() } },
+                        Route::Admin => rsx! { Admin { server_url: server_url.clone() } },
+                        Route::Settings => rsx! { Settings { server_url: server_url.clone() } },
+                    }
                 }
             }
         }

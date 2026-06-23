@@ -45,6 +45,20 @@ impl Route {
             _ => Route::Dashboard,
         }
     }
+
+    /// The permission required to view this route's *content*, if any.
+    /// `app_shell.rs` is the single source of truth that reads this for
+    /// both the nav link visibility *and* the actual content guard —
+    /// hiding a nav link doesn't stop a user from typing the path directly
+    /// into the URL bar, so the content match must check this too, not
+    /// just the nav rendering.
+    pub fn required_permission(&self) -> Option<&'static str> {
+        match self {
+            Route::Admin => Some("users.manage"),
+            Route::Settings => Some("exchange_credentials.write"),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -76,5 +90,28 @@ mod tests {
     #[test]
     fn dashboard_path_is_root() {
         assert_eq!(Route::Dashboard.path(), "/");
+    }
+
+    #[test]
+    fn required_permission_is_some_for_admin_and_settings() {
+        assert_eq!(Route::Admin.required_permission(), Some("users.manage"));
+        assert_eq!(
+            Route::Settings.required_permission(),
+            Some("exchange_credentials.write")
+        );
+    }
+
+    #[test]
+    fn required_permission_is_none_for_routes_open_to_every_authenticated_user() {
+        for route in [
+            Route::Login,
+            Route::Dashboard,
+            Route::Chart,
+            Route::Strategies,
+            Route::Backtest,
+            Route::Orders,
+        ] {
+            assert_eq!(route.required_permission(), None);
+        }
     }
 }

@@ -16,6 +16,7 @@ pub mod domain;
 pub mod icons;
 pub mod pages;
 pub mod protocol;
+pub mod reconnect;
 pub mod router;
 pub mod state;
 pub mod theme;

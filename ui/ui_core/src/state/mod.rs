@@ -33,6 +33,13 @@ pub struct AppState {
     pub theme: Signal<Theme>,
     pub candles: Signal<CandleStore>,
     pub backtest: Signal<BacktestStore>,
+    /// Bumped by the platform's WS transport every time it reconnects
+    /// *after* a previous disconnect (not on the very first connect) —
+    /// per-page fetch effects that also read this re-run their REST fetch,
+    /// so a connection drop doesn't leave local state silently stale
+    /// forever. See `ROADMAP.md`'s API standard: "after reconnection, treat
+    /// local state as stale and reconcile via REST."
+    pub resync_epoch: Signal<u32>,
 }
 
 impl Default for AppState {
@@ -54,7 +61,15 @@ impl AppState {
             theme: Signal::new(Theme::default()),
             candles: Signal::new(CandleStore::new()),
             backtest: Signal::new(BacktestStore::new()),
+            resync_epoch: Signal::new(0),
         }
+    }
+
+    /// Call after a WS reconnect that follows a previous disconnect (not
+    /// the very first connect — pages already do a normal fetch on mount).
+    pub fn mark_resynced(&mut self) {
+        let next = (self.resync_epoch)() + 1;
+        self.resync_epoch.set(next);
     }
 
     pub fn apply_price(&mut self, msg: &PriceMessage) {

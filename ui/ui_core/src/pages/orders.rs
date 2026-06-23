@@ -29,9 +29,12 @@ pub fn Orders(server_url: String) -> Element {
         });
     };
 
-    use_future(move || {
+    // Re-runs on mount and whenever the WS transport resyncs after a
+    // reconnect (`AppState::resync_epoch`), so a connection drop doesn't
+    // leave the order list silently stale forever.
+    use_effect(move || {
+        let _resync = (state.resync_epoch)();
         seed();
-        async move {}
     });
 
     let mut exchange_choice = use_signal(String::new);

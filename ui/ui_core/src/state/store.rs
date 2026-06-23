@@ -343,6 +343,12 @@ impl CandleStore {
         let series = self.series.entry(key).or_default();
         match series.last_mut() {
             Some(last) if last.time == candle.time => *last = candle,
+            // A candle older than the series' last bar is a stale/reordered
+            // WS message (network reorder, or a forming-bar broadcast for a
+            // selection the user has since switched away from) — dropped
+            // rather than appended, which would otherwise corrupt the
+            // series' chronological order.
+            Some(last) if candle.time < last.time => {}
             _ => {
                 series.push(candle);
                 if series.len() > MAX_CANDLE_ROWS {
@@ -786,12 +792,35 @@ mod tests {
     fn candle_store_apply_caps_length() {
         let mut store = CandleStore::new();
         for i in 0..(MAX_CANDLE_ROWS + 5) {
-            store.apply(&candle_msg(&format!("t{i}"), i as u64));
+            // Zero-padded so the strings sort the same as the numbers they
+            // represent — this codebase's RFC3339 timestamps are always
+            // fixed-width for exactly this reason (see `visible_trades`'s
+            // doc comment in `pages/chart.rs`); a non-padded `"t{i}"` would
+            // make `"t10"` sort before `"t9"` and trip the new out-of-order
+            // rejection below.
+            store.apply(&candle_msg(&format!("t{i:04}"), i as u64));
         }
 
         let series = store.series_for("tabdeal:USDT/IRT:1m");
         assert_eq!(series.len(), MAX_CANDLE_ROWS);
         assert_eq!(series[0].close, 5, "oldest entries must be evicted");
+    }
+
+    #[test]
+    fn candle_store_apply_ignores_a_candle_older_than_the_last_bar() {
+        let mut store = CandleStore::new();
+        store.apply(&candle_msg("t1", 100));
+        store.apply(&candle_msg("t2", 200));
+        // A stale/reordered WS message for an already-passed bucket must
+        // not be appended after the newer bar — that would corrupt the
+        // series' chronological order (and break `lightweight-charts`,
+        // which requires strictly increasing `time` on `series.update()`).
+        store.apply(&candle_msg("t0", 999));
+
+        let series = store.series_for("tabdeal:USDT/IRT:1m");
+        assert_eq!(series.len(), 2, "the stale t0 candle must be dropped");
+        assert_eq!(series[0].time, "t1");
+        assert_eq!(series[1].time, "t2");
     }
 
     #[test]
