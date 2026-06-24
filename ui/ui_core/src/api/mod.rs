@@ -395,6 +395,89 @@ impl ApiClient {
         )
         .await
     }
+
+    /// `POST /v1/candles/backfill` — fetches historical klines from the
+    /// exchange's `HistoricalCandleSource` (Loop 6b) and persists them, so
+    /// a backtest over a range with gaps (see [`expected_candle_count`])
+    /// has real candles to run against.
+    pub async fn backfill_candles(
+        &self,
+        token: &str,
+        req: BackfillRequest,
+    ) -> Result<BackfillResponse, String> {
+        self.post_json("/candles/backfill", Some(token), &req).await
+    }
+}
+
+/// How many candles a `[from, to)` RFC3339 range *should* contain at the
+/// given interval, assuming no gaps — the baseline the backtest page
+/// compares `list_candles`' actual count against to decide whether to
+/// prompt for a backfill. `from`/`to` are parsed loosely (date-only or full
+/// RFC3339) rather than depending on `chrono`, matching this client's
+/// existing "no chrono dependency" rule.
+pub fn expected_candle_count(interval: &str, from: &str, to: &str) -> Option<u64> {
+    let interval_secs = match interval {
+        "1m" => 60,
+        "5m" => 5 * 60,
+        "15m" => 15 * 60,
+        "1h" => 60 * 60,
+        _ => return None,
+    };
+    let from_secs = parse_rfc3339_to_unix_secs(from)?;
+    let to_secs = parse_rfc3339_to_unix_secs(to)?;
+    if to_secs <= from_secs {
+        return None;
+    }
+    Some((to_secs - from_secs) as u64 / interval_secs)
+}
+
+/// Minimal RFC3339 -> unix-seconds parser covering exactly the two shapes
+/// this client produces: a bare date (`2026-05-01`) and a full timestamp
+/// (`2026-05-01T00:00:00Z`). Good enough for the gap-estimate above; not a
+/// general-purpose datetime parser.
+fn parse_rfc3339_to_unix_secs(value: &str) -> Option<i64> {
+    let mut sections = value.splitn(2, 'T');
+    let date_part = sections.next()?;
+    let time_part = sections.next();
+
+    let mut parts = date_part.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Days-since-epoch via a civil-to-days algorithm (Howard Hinnant's
+    // `days_from_civil`) — avoids pulling in chrono for a one-shot estimate.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+
+    let time_secs = match time_part {
+        Some(t) => {
+            let t = t.trim_end_matches('Z');
+            let mut hms = t.split(':');
+            let hour: i64 = hms.next()?.parse().ok()?;
+            let min: i64 = hms.next()?.parse().ok()?;
+            let sec: i64 = hms.next().unwrap_or("0").parse().ok()?;
+            hour * 3600 + min * 60 + sec
+        }
+        None => 0,
+    };
+
+    Some(days * 86_400 + time_secs)
+}
+
+/// `true` when `actual` falls short of `expected` by more than a single
+/// candle's worth of allowed jitter — the backtest page uses this to decide
+/// whether to show the "your range has gaps, backfill first?" prompt rather
+/// than firing it on every off-by-one near a range boundary.
+pub fn candle_count_is_below_expected(actual: usize, expected: u64) -> bool {
+    (actual as u64) + 1 < expected
 }
 
 /// A free function so the query string shape is testable without the network.
@@ -608,5 +691,55 @@ mod tests {
             ApiClient::unwrap_envelope(body),
             Err("Invalid credentials".to_string())
         );
+    }
+
+    #[test]
+    fn expected_candle_count_computes_one_minute_bars_over_one_hour() {
+        let count = expected_candle_count("1m", "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z");
+        assert_eq!(count, Some(60));
+    }
+
+    #[test]
+    fn expected_candle_count_computes_one_hour_bars_over_one_day() {
+        let count = expected_candle_count("1h", "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z");
+        assert_eq!(count, Some(24));
+    }
+
+    #[test]
+    fn expected_candle_count_accepts_date_only_inputs() {
+        let count = expected_candle_count("1h", "2026-05-01", "2026-05-02");
+        assert_eq!(count, Some(24));
+    }
+
+    #[test]
+    fn expected_candle_count_returns_none_for_unknown_interval() {
+        assert_eq!(
+            expected_candle_count("3m", "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z"),
+            None
+        );
+    }
+
+    #[test]
+    fn expected_candle_count_returns_none_when_to_is_not_after_from() {
+        assert_eq!(
+            expected_candle_count("1h", "2026-05-02T00:00:00Z", "2026-05-01T00:00:00Z"),
+            None
+        );
+    }
+
+    #[test]
+    fn candle_count_is_below_expected_flags_a_large_shortfall() {
+        assert!(candle_count_is_below_expected(10, 24));
+    }
+
+    #[test]
+    fn candle_count_is_below_expected_tolerates_off_by_one() {
+        assert!(!candle_count_is_below_expected(23, 24));
+        assert!(!candle_count_is_below_expected(24, 24));
+    }
+
+    #[test]
+    fn candle_count_is_below_expected_false_when_actual_meets_or_exceeds_expected() {
+        assert!(!candle_count_is_below_expected(30, 24));
     }
 }

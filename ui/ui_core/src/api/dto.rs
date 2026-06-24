@@ -22,7 +22,7 @@ pub struct TokenResponse {
 
 // --- strategies ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct StartStrategyRequest {
     pub strategy_id: String,
     pub strategy_type: String,
@@ -64,7 +64,7 @@ pub struct StrategyList {
 
 // --- backtest ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct BacktestRunRequest {
     pub strategy_id: String,
     pub exchange: String,
@@ -314,4 +314,21 @@ pub struct CandleItem {
     pub low: u64,
     pub close: u64,
     pub volume: u64,
+}
+
+/// Mirrors `engine`'s `BackfillRequest` (`engine/src/presentation/dto/
+/// candle.rs`). `from`/`to` stay RFC3339 strings, same "never depend on
+/// chrono in this client" rule as `BacktestRunRequest`.
+#[derive(Debug, Serialize)]
+pub struct BackfillRequest {
+    pub exchange: String,
+    pub pair: String,
+    pub interval: String,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct BackfillResponse {
+    pub candles_written: usize,
 }

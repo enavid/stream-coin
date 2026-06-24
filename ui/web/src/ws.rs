@@ -77,6 +77,7 @@ pub async fn connect_and_listen(api: ApiClient, mut state: AppState) {
                             Ok(WsEvent::Signal(signal)) => state.apply_signal(&signal),
                             Ok(WsEvent::OrderUpdate(order)) => state.apply_order_update(&order),
                             Ok(WsEvent::Candle(candle)) => state.apply_candle(&candle),
+                            Ok(WsEvent::ClosedTrade(trade)) => state.apply_closed_trade(&trade),
                             Err(e) => web_sys::console::error_1(
                                 &format!("ws: failed to parse message: {e}; raw: {text}").into(),
                             ),

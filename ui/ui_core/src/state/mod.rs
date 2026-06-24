@@ -109,6 +109,14 @@ impl AppState {
         self.candles.write().apply(msg);
     }
 
+    /// Routes a live strategy's `WsMessage::ClosedTrade` (Loop 6h) into the
+    /// same `BacktestStore` the chart's trade overlay already reads from —
+    /// the "Watch live" backtest toggle's whole point is reusing that
+    /// overlay rather than building a second one.
+    pub fn apply_closed_trade(&mut self, trade: &crate::api::ClosedTrade) {
+        self.backtest.write().push_closed_trade(trade.clone());
+    }
+
     /// Seeds a `(exchange, pair, interval)` series from `GET /v1/candles` —
     /// the chart page calls this on mount and on every selector change.
     pub fn seed_candles(&mut self, key: &str, items: &[CandleItem]) {

@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::api::ClosedTrade;
 use crate::domain::Ticker;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -110,6 +111,12 @@ pub enum WsEvent {
     Signal(SignalMessage),
     OrderUpdate(OrderUpdateMessage),
     Candle(CandleMessage),
+    /// Loop 6h's `LiveTradeTracker` output — a live strategy's
+    /// position close, same shape as a backtest's `ClosedTrade`. Lets the
+    /// "Watch live" backtest toggle (`pages/backtest.rs`) feed the chart's
+    /// existing trade overlay from a running strategy instead of a
+    /// finished historical run.
+    ClosedTrade(ClosedTrade),
 }
 
 impl WsEvent {
@@ -295,6 +302,30 @@ mod tests {
             }
             other => panic!("expected OrderUpdate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ws_event_parse_decodes_closed_trade() {
+        let json = r#"{"type":"closed_trade","strategy_id":"spread_threshold","side":"long","entry_price":58000,"exit_price":59000,"stop_loss":57000,"take_profit":60000,"quantity":1,"entry_time":"2026-06-21T00:00:00Z","exit_time":"2026-06-21T00:05:00Z","pnl":1000,"pnl_pct":1.72,"rr":1.0,"outcome":"win"}"#;
+        let event = WsEvent::parse(json).unwrap();
+        assert_eq!(
+            event,
+            WsEvent::ClosedTrade(crate::api::ClosedTrade {
+                strategy_id: "spread_threshold".to_string(),
+                side: crate::api::TradeSide::Long,
+                entry_price: 58000,
+                exit_price: 59000,
+                stop_loss: Some(57000),
+                take_profit: Some(60000),
+                quantity: 1,
+                entry_time: "2026-06-21T00:00:00Z".to_string(),
+                exit_time: "2026-06-21T00:05:00Z".to_string(),
+                pnl: 1000,
+                pnl_pct: 1.72,
+                rr: Some(1.0),
+                outcome: crate::api::TradeOutcome::Win,
+            })
+        );
     }
 
     #[test]

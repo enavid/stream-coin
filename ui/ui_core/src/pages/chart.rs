@@ -524,7 +524,7 @@ pub fn Chart(server_url: String) -> Element {
     drop(candles);
 
     let pb = (state.playback)();
-    let playback_active = state.backtest.read().result.is_some() && !is_empty;
+    let playback_active = playback_visible(state.backtest.read().result.is_some(), !is_empty);
     let cursor_index = pb.current_index(&candle_times).unwrap_or(0);
     let candle_count = candle_times.len();
 
@@ -812,6 +812,14 @@ fn should_apply_candle_response(requested_key: &str, current_key: &str) -> bool 
     requested_key == current_key
 }
 
+/// Whether the playback toolbar (play/pause/step/speed/scrub) should render —
+/// a backtest or "Watch live" session must actually be loaded, and there
+/// must be candles to scrub through, otherwise the controls would drive a
+/// cursor over an empty timeline.
+fn playback_visible(has_backtest_result: bool, has_candles: bool) -> bool {
+    has_backtest_result && has_candles
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,5 +871,15 @@ mod tests {
         assert!(filter_symbols(&options(), "nonexistent").is_empty());
     }
 
+    #[test]
+    fn playback_controls_hidden_without_an_active_backtest_session() {
+        assert!(!playback_visible(false, true), "no result loaded yet");
+        assert!(!playback_visible(true, false), "result loaded but no candles to scrub");
+        assert!(!playback_visible(false, false));
+    }
 
+    #[test]
+    fn playback_controls_visible_with_a_loaded_result_and_candles() {
+        assert!(playback_visible(true, true));
+    }
 }

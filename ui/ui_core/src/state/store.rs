@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::api::{BacktestResult, CandleItem, OrderItem};
+use crate::api::{BacktestResult, CandleItem, ClosedTrade, OrderItem};
 use crate::domain::{direction, extract_time, Direction, Ticker};
 use crate::protocol::{CandleMessage, OrderUpdateMessage, PriceMessage, SignalMessage};
 
@@ -384,11 +384,42 @@ impl BacktestStore {
     pub fn clear(&mut self) {
         self.result = None;
     }
+
+    /// Appends one trade close from a live strategy run (Loop 6h's
+    /// `LiveTradeTracker`, delivered over `WsMessage::ClosedTrade`) into
+    /// the chart's existing trade overlay. If no backtest has run yet,
+    /// builds a minimal result shell so the "Watch live" toggle can feed
+    /// the same `BacktestStore`/overlay code a historical run uses,
+    /// without fabricating return/drawdown numbers a live session hasn't
+    /// actually produced.
+    pub fn push_closed_trade(&mut self, trade: ClosedTrade) {
+        match &mut self.result {
+            Some(result) => result.closed_trades.push(trade),
+            None => {
+                self.result = Some(BacktestResult {
+                    strategy_id: trade.strategy_id.clone(),
+                    exchange: String::new(),
+                    pair: String::new(),
+                    interval: String::new(),
+                    candle_count: 0,
+                    signal_count: 0,
+                    total_return_pct: 0.0,
+                    max_drawdown_pct: 0.0,
+                    trade_log: vec![],
+                    signal_log: vec![],
+                    closed_trades: vec![trade],
+                    win_rate: 0.0,
+                    avg_rr: None,
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{TradeOutcome, TradeSide};
 
     fn msg(exchange: &str, pair: &str, bid: u64, ask: u64) -> PriceMessage {
         PriceMessage {
@@ -864,5 +895,61 @@ mod tests {
         store.clear();
 
         assert!(store.result.is_none());
+    }
+
+    fn closed_trade(strategy_id: &str, pnl: i64) -> ClosedTrade {
+        ClosedTrade {
+            strategy_id: strategy_id.to_string(),
+            side: TradeSide::Long,
+            entry_price: 58_000,
+            exit_price: 59_000,
+            stop_loss: Some(57_000),
+            take_profit: Some(60_000),
+            quantity: 1,
+            entry_time: "2026-06-21T00:00:00Z".to_string(),
+            exit_time: "2026-06-21T00:05:00Z".to_string(),
+            pnl,
+            pnl_pct: 1.72,
+            rr: Some(1.0),
+            outcome: TradeOutcome::Win,
+        }
+    }
+
+    #[test]
+    fn push_closed_trade_creates_a_live_session_shell_when_no_result_exists() {
+        let mut store = BacktestStore::new();
+
+        store.push_closed_trade(closed_trade("spread_threshold", 1000));
+
+        let result = store.result.expect("a result shell must exist after the first push");
+        assert_eq!(result.strategy_id, "spread_threshold");
+        assert_eq!(result.closed_trades.len(), 1);
+        assert_eq!(result.closed_trades[0].pnl, 1000);
+    }
+
+    #[test]
+    fn push_closed_trade_appends_to_an_existing_live_session() {
+        let mut store = BacktestStore::new();
+        store.push_closed_trade(closed_trade("spread_threshold", 1000));
+
+        store.push_closed_trade(closed_trade("spread_threshold", -200));
+
+        let result = store.result.unwrap();
+        assert_eq!(result.closed_trades.len(), 2);
+        assert_eq!(result.closed_trades[1].pnl, -200);
+    }
+
+    #[test]
+    fn push_closed_trade_appends_to_an_existing_historical_result_too() {
+        let mut store = BacktestStore::new();
+        store.set(backtest_result(0.5));
+
+        store.push_closed_trade(closed_trade("s1", 500));
+
+        let result = store.result.unwrap();
+        assert_eq!(result.closed_trades.len(), 1);
+        // a historical run's own summary stats are left untouched —
+        // only the trade list grows.
+        assert_eq!(result.win_rate, 0.5);
     }
 }
