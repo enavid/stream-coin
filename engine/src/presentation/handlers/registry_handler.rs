@@ -1,9 +1,10 @@
 use actix_web::{web, Responder};
 
 use crate::exchange::registry::TradingPairRecord;
+use crate::infrastructure::db::asset_repository::AssetRecord;
 use crate::presentation::dto::exchange::{
     ExchangeListResponse, ExchangeNameRequest, ExchangeResponse, PairListQuery, PairListResponse,
-    PairResponse, SeedTopPairsQuery, SeedTopPairsResponse,
+    PairResponse, SeedPairsQuery, SeedPairsResponse,
 };
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::AppState;
@@ -130,59 +131,67 @@ pub async fn disable_exchange(
     success_response("Exchange disabled", serde_json::json!({"exchange": name}))
 }
 
-/// `POST /v1/admin/exchanges/coinex/seed-top-pairs?count=20` — fetches
-/// CoinEx's markets ranked by 24h quote volume (via `TopMarketSource`) and
-/// seeds the top `count` as active spot trading pairs, in both the in-memory
-/// registry and the persistent repository (if configured). A one-shot admin
-/// action, not a recurring job — re-running it with the same count is
-/// idempotent (`ExchangeRegistry::upsert_pair` / `ExchangeRepository::upsert_pair`).
-pub async fn seed_coinex_top_pairs(
+/// Builds one `TradingPairRecord` per active asset (excluding assets that
+/// are themselves one of `quotes`) against every requested quote currency.
+/// Pure — no I/O — so it's unit-testable without a database or registry.
+pub fn build_pairs_from_assets(
+    assets: &[AssetRecord],
+    exchange: &str,
+    quotes: &[String],
+) -> Vec<TradingPairRecord> {
+    assets
+        .iter()
+        .filter(|a| a.active)
+        .filter(|a| !quotes.iter().any(|q| q == &a.symbol))
+        .flat_map(|asset| {
+            quotes.iter().map(move |quote| TradingPairRecord {
+                exchange_name: exchange.to_string(),
+                base: asset.symbol.clone(),
+                quote: quote.clone(),
+                market_type: MarketType::Spot,
+                active: true,
+            })
+        })
+        .collect()
+}
+
+/// `POST /v1/admin/exchanges/{name}/seed-from-assets?quotes=USDT,IRT` — seeds
+/// one trading pair per canonical asset (`assets` table, migration `0013`)
+/// against each requested quote currency, in both the in-memory registry and
+/// the persistent repository (if configured). Asset-driven and DB-only — no
+/// live network call to any exchange. A one-shot admin action, not a
+/// recurring job — re-running it with the same quotes is idempotent
+/// (`ExchangeRegistry::upsert_pair` / `ExchangeRepository::upsert_pair`).
+pub async fn seed_pairs_from_assets(
     state: web::Data<AppState>,
-    query: web::Query<SeedTopPairsQuery>,
+    path: web::Path<String>,
+    query: web::Query<SeedPairsQuery>,
 ) -> impl Responder {
-    const EXCHANGE: &str = "coinex";
-    let count = query.resolved_count();
+    let exchange = path.into_inner();
+    let quotes = query.resolved_quotes();
 
-    let Some(source) = state.top_market_sources.get(EXCHANGE) else {
-        return ApiError::service_unavailable("no top-market source configured for coinex")
-            .to_response();
+    {
+        let registry = state.exchange_registry.lock().await;
+        if registry.find_ws_url(&exchange).is_none() {
+            return ApiError::new("Exchange not found in registry", vec![]).to_response();
+        }
+    }
+
+    let Some(asset_repo) = &state.asset_repository else {
+        return ApiError::service_unavailable("no asset repository configured").to_response();
     };
-
-    tracing::info!(
-        exchange = EXCHANGE,
-        count,
-        "seeding top pairs by quote volume"
-    );
-
-    let markets = match source.fetch_top_markets(count).await {
-        Ok(m) => m,
+    let assets = match asset_repo.list_all().await {
+        Ok(a) => a,
         Err(e) => {
-            tracing::error!(
-                exchange = EXCHANGE,
-                error = %e,
-                transient = e.is_transient(),
-                "top-pair seeding fetch failed"
-            );
-            return if e.is_transient() {
-                ApiError::service_unavailable(&format!("upstream exchange unavailable: {e}"))
-            } else {
-                ApiError::new(&format!("seeding rejected by exchange: {e}"), vec![])
-            }
-            .to_response();
+            tracing::error!(error = %e, "failed to load assets for pair seeding");
+            return ApiError::service_unavailable("failed to load asset catalog").to_response();
         }
     };
 
-    let mut pairs_seeded = 0usize;
-    for market in &markets {
-        let pair = crate::exchange::coinex::market_to_pair(&market.market);
-        let record = TradingPairRecord {
-            exchange_name: EXCHANGE.to_string(),
-            base: pair.base,
-            quote: pair.quote,
-            market_type: MarketType::Spot,
-            active: true,
-        };
+    let records = build_pairs_from_assets(&assets, &exchange, &quotes);
 
+    let mut pairs_seeded = 0usize;
+    for record in &records {
         state
             .exchange_registry
             .lock()
@@ -190,9 +199,9 @@ pub async fn seed_coinex_top_pairs(
             .upsert_pair(record.clone());
 
         if let Some(repo) = &state.exchange_repository {
-            if let Err(e) = repo.upsert_pair(&record).await {
+            if let Err(e) = repo.upsert_pair(record).await {
                 tracing::error!(
-                    exchange = EXCHANGE,
+                    exchange = %exchange,
                     base = %record.base,
                     quote = %record.quote,
                     error = %e,
@@ -205,13 +214,9 @@ pub async fn seed_coinex_top_pairs(
         pairs_seeded += 1;
     }
 
-    tracing::info!(
-        exchange = EXCHANGE,
-        pairs_seeded,
-        "top-pair seeding complete"
-    );
+    tracing::info!(exchange = %exchange, pairs_seeded, "asset-driven pair seeding complete");
 
-    success_response("Top pairs seeded", SeedTopPairsResponse { pairs_seeded })
+    success_response("Pairs seeded", SeedPairsResponse { pairs_seeded })
 }
 
 #[cfg(test)]
@@ -273,9 +278,9 @@ mod tests {
             python_strategy_repository: None,
             candle_repository: None,
             historical_sources: Arc::new(HashMap::new()),
-            top_market_sources: Arc::new(HashMap::new()),
             candle_history: AppState::new_candle_history(),
             exchange_repository,
+            asset_repository: None,
             user_repository: None,
             credential_repository: None,
             credential_cipher: None,
@@ -432,49 +437,60 @@ mod tests {
         );
     }
 
-    // --- seed_coinex_top_pairs ---
+    // --- seed_pairs_from_assets ---
 
-    use crate::exchange::market_seed_port::{MarketSeederError, MarketVolume, TopMarketSource};
-
-    struct FakeTopMarketSource {
-        markets: Vec<MarketVolume>,
-    }
-
-    #[async_trait::async_trait]
-    impl TopMarketSource for FakeTopMarketSource {
-        fn exchange_id(&self) -> crate::exchange::entity::ExchangeId {
-            crate::exchange::entity::ExchangeId::new("coinex")
-        }
-
-        async fn fetch_top_markets(
-            &self,
-            count: usize,
-        ) -> Result<Vec<MarketVolume>, MarketSeederError> {
-            Ok(self.markets.iter().take(count).cloned().collect())
+    fn asset(symbol: &str, active: bool) -> AssetRecord {
+        AssetRecord {
+            id: 1,
+            symbol: symbol.to_string(),
+            display_name: symbol.to_string(),
+            decimals: 8,
+            icon_url: None,
+            active,
         }
     }
 
-    fn fake_markets(n: usize) -> Vec<MarketVolume> {
-        (0..n)
-            .map(|i| MarketVolume {
-                market: format!("COIN{i}USDT"),
-                quote_volume: (n - i) as u64 * 1000,
-                status: "online".to_string(),
-            })
-            .collect()
+    #[actix_web::test]
+    async fn build_pairs_from_assets_creates_one_pair_per_active_asset_per_quote() {
+        let assets = vec![asset("BTC", true), asset("ETH", true)];
+        let quotes = vec!["USDT".to_string(), "IRT".to_string()];
+
+        let pairs = build_pairs_from_assets(&assets, "coinex", &quotes);
+
+        assert_eq!(pairs.len(), 4, "2 assets x 2 quotes = 4 pairs");
+        assert!(pairs.iter().any(|p| p.base == "BTC" && p.quote == "USDT"));
+        assert!(pairs.iter().any(|p| p.base == "ETH" && p.quote == "IRT"));
     }
 
-    fn state_with_top_market_source(
+    #[actix_web::test]
+    async fn build_pairs_from_assets_skips_asset_equal_to_a_quote_currency() {
+        let assets = vec![asset("BTC", true), asset("USDT", true)];
+        let quotes = vec!["USDT".to_string()];
+
+        let pairs = build_pairs_from_assets(&assets, "coinex", &quotes);
+
+        assert_eq!(pairs.len(), 1, "USDT must not be paired against itself");
+        assert_eq!(pairs[0].base, "BTC");
+    }
+
+    #[actix_web::test]
+    async fn build_pairs_from_assets_excludes_inactive_assets() {
+        let assets = vec![asset("BTC", true), asset("DELISTED", false)];
+        let quotes = vec!["USDT".to_string()];
+
+        let pairs = build_pairs_from_assets(&assets, "coinex", &quotes);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].base, "BTC");
+    }
+
+    use crate::infrastructure::db::asset_repository::{AssetRepository, FakeAssetRepository};
+
+    fn state_with_assets(
         registry: ExchangeRegistry,
         exchange_repository: Option<Arc<dyn ExchangeRepository>>,
-        markets: Vec<MarketVolume>,
+        assets: Vec<AssetRecord>,
     ) -> web::Data<AppState> {
-        let mut sources: HashMap<String, Arc<dyn TopMarketSource>> = HashMap::new();
-        sources.insert(
-            "coinex".to_string(),
-            Arc::new(FakeTopMarketSource { markets }) as Arc<dyn TopMarketSource>,
-        );
-
         web::Data::new(AppState {
             redis: None,
             exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
@@ -493,9 +509,11 @@ mod tests {
             python_strategy_repository: None,
             candle_repository: None,
             historical_sources: Arc::new(HashMap::new()),
-            top_market_sources: Arc::new(sources),
             candle_history: AppState::new_candle_history(),
             exchange_repository,
+            asset_repository: Some(
+                Arc::new(FakeAssetRepository::new_with(assets)) as Arc<dyn AssetRepository>
+            ),
             user_repository: None,
             credential_repository: None,
             credential_cipher: None,
@@ -514,133 +532,133 @@ mod tests {
         ))
     }
 
+    fn coinex_registry() -> ExchangeRegistry {
+        let mut r = ExchangeRegistry::new();
+        r.add_exchange(ExchangeRecord {
+            name: "coinex".to_string(),
+            display_name: "CoinEx".to_string(),
+            ws_url: "wss://socket.coinex.com/v2/spot".to_string(),
+            enabled: false,
+        });
+        r
+    }
+
     #[actix_web::test]
-    async fn seed_top_pairs_returns_503_when_no_source_configured() {
-        let state = state_with_registry(ExchangeRegistry::new());
+    async fn seed_pairs_from_assets_returns_503_when_no_asset_repository_configured() {
+        let state = state_with_registry(coinex_registry());
 
         let app = test::init_service(App::new().app_data(state).route(
-            "/admin/exchanges/coinex/seed-top-pairs",
-            web::post().to(seed_coinex_top_pairs),
+            "/admin/exchanges/{name}/seed-from-assets",
+            web::post().to(seed_pairs_from_assets),
         ))
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/admin/exchanges/coinex/seed-top-pairs")
+            .uri("/admin/exchanges/coinex/seed-from-assets")
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 503);
     }
 
     #[actix_web::test]
-    async fn seed_top_pairs_inserts_exactly_count_rows() {
-        let repo = coinex_exchange_repo();
-        let state = state_with_top_market_source(
-            ExchangeRegistry::new(),
-            Some(repo.clone() as Arc<dyn ExchangeRepository>),
-            fake_markets(25),
-        );
+    async fn seed_pairs_from_assets_returns_400_for_unknown_exchange() {
+        let state = state_with_assets(ExchangeRegistry::new(), None, vec![asset("BTC", true)]);
 
         let app = test::init_service(App::new().app_data(state).route(
-            "/admin/exchanges/coinex/seed-top-pairs",
-            web::post().to(seed_coinex_top_pairs),
+            "/admin/exchanges/{name}/seed-from-assets",
+            web::post().to(seed_pairs_from_assets),
         ))
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/admin/exchanges/coinex/seed-top-pairs?count=20")
+            .uri("/admin/exchanges/definitely-not-real/seed-from-assets")
             .to_request();
-        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
-        assert_eq!(body["data"]["pairs_seeded"], 20);
-
-        let (_, pairs) = repo.load_all().await.unwrap();
-        assert_eq!(pairs.len(), 20, "must persist exactly count rows");
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
     }
 
     #[actix_web::test]
-    async fn seed_top_pairs_is_idempotent_on_rerun() {
+    async fn seed_pairs_from_assets_inserts_one_pair_per_active_asset() {
         let repo = coinex_exchange_repo();
-        let registry = Arc::new(Mutex::new(ExchangeRegistry::new()));
-        let state = {
-            let mut sources: HashMap<String, Arc<dyn TopMarketSource>> = HashMap::new();
-            sources.insert(
-                "coinex".to_string(),
-                Arc::new(FakeTopMarketSource {
-                    markets: fake_markets(20),
-                }) as Arc<dyn TopMarketSource>,
-            );
-            web::Data::new(AppState {
-                redis: None,
-                exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
-                exchange_registry: registry.clone(),
-                adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
-                clients: Arc::new(Mutex::new(HashMap::new())),
-                publisher: None,
-                broadcaster: AppState::new_broadcaster(),
-                jwt_secret: None,
-                ticker_repository: None,
-                running_strategies: Arc::new(Mutex::new(HashMap::new())),
-                strategy_repository: None,
-                signal_repository: None,
-                order_adapters: Arc::new(RwLock::new(HashMap::new())),
-                order_manager: None,
-                python_strategy_repository: None,
-                candle_repository: None,
-                historical_sources: Arc::new(HashMap::new()),
-                top_market_sources: Arc::new(sources),
-                candle_history: AppState::new_candle_history(),
-                exchange_repository: Some(repo.clone() as Arc<dyn ExchangeRepository>),
-                user_repository: None,
-                credential_repository: None,
-                credential_cipher: None,
-            })
-        };
+        let assets = vec![asset("BTC", true), asset("ETH", true), asset("USDT", true)];
+        let state = state_with_assets(
+            coinex_registry(),
+            Some(repo.clone() as Arc<dyn ExchangeRepository>),
+            assets,
+        );
 
         let app = test::init_service(App::new().app_data(state).route(
-            "/admin/exchanges/coinex/seed-top-pairs",
-            web::post().to(seed_coinex_top_pairs),
+            "/admin/exchanges/{name}/seed-from-assets",
+            web::post().to(seed_pairs_from_assets),
+        ))
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/coinex/seed-from-assets")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        assert_eq!(
+            body["data"]["pairs_seeded"], 2,
+            "BTC and ETH against USDT — USDT is excluded as its own quote"
+        );
+
+        let (_, pairs) = repo.load_all().await.unwrap();
+        assert_eq!(pairs.len(), 2, "must persist exactly the seeded pairs");
+    }
+
+    #[actix_web::test]
+    async fn seed_pairs_from_assets_is_idempotent_on_rerun() {
+        let repo = coinex_exchange_repo();
+        let registry = Arc::new(Mutex::new(coinex_registry()));
+        let assets = vec![asset("BTC", true), asset("ETH", true)];
+        let state = web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: registry.clone(),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            publisher: None,
+            broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
+            ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
+            signal_repository: None,
+            order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            order_manager: None,
+            python_strategy_repository: None,
+            candle_repository: None,
+            historical_sources: Arc::new(HashMap::new()),
+            candle_history: AppState::new_candle_history(),
+            exchange_repository: Some(repo.clone() as Arc<dyn ExchangeRepository>),
+            asset_repository: Some(
+                Arc::new(FakeAssetRepository::new_with(assets)) as Arc<dyn AssetRepository>
+            ),
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
+        });
+
+        let app = test::init_service(App::new().app_data(state).route(
+            "/admin/exchanges/{name}/seed-from-assets",
+            web::post().to(seed_pairs_from_assets),
         ))
         .await;
 
         for _ in 0..2 {
             let req = test::TestRequest::post()
-                .uri("/admin/exchanges/coinex/seed-top-pairs?count=20")
+                .uri("/admin/exchanges/coinex/seed-from-assets")
                 .to_request();
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), 200);
         }
 
         let (_, pairs) = repo.load_all().await.unwrap();
-        assert_eq!(
-            pairs.len(),
-            20,
-            "re-running with the same count must not duplicate rows"
-        );
+        assert_eq!(pairs.len(), 2, "re-running must not duplicate rows");
         assert_eq!(
             registry.lock().await.get_active_pairs("coinex", None).len(),
-            20,
+            2,
             "in-memory registry must also stay idempotent"
         );
-    }
-
-    #[actix_web::test]
-    async fn seed_top_pairs_with_fewer_markets_than_count_seeds_all_available() {
-        let repo = coinex_exchange_repo();
-        let state = state_with_top_market_source(
-            ExchangeRegistry::new(),
-            Some(repo.clone() as Arc<dyn ExchangeRepository>),
-            fake_markets(5),
-        );
-
-        let app = test::init_service(App::new().app_data(state).route(
-            "/admin/exchanges/coinex/seed-top-pairs",
-            web::post().to(seed_coinex_top_pairs),
-        ))
-        .await;
-
-        let req = test::TestRequest::post()
-            .uri("/admin/exchanges/coinex/seed-top-pairs?count=20")
-            .to_request();
-        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
-        assert_eq!(body["data"]["pairs_seeded"], 5);
     }
 }

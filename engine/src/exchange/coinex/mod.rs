@@ -1,9 +1,7 @@
 pub mod historical_adapter;
-pub mod market_seeder;
 pub mod ws_adapter;
 
 pub use historical_adapter::CoinexHistoricalAdapter;
-pub use market_seeder::CoinexMarketSeeder;
 pub use ws_adapter::CoinexWsAdapter;
 
 use crate::price::entity::TradingPair;

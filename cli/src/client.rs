@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::response::{
-    ApiError, ApiSuccess, BackfillData, SeedTopPairsData, TickerData, TickerListData,
+    ApiError, ApiSuccess, BackfillData, SeedPairsData, TickerData, TickerListData,
 };
 
 pub struct ApiClient {
@@ -44,9 +44,9 @@ impl ApiClient {
         format!("{}/v1/candles/backfill", self.base_url)
     }
 
-    pub fn exchange_seed_top_pairs_url(&self, exchange: &str, top: u32) -> String {
+    pub fn exchange_seed_from_assets_url(&self, exchange: &str, quotes: &str) -> String {
         format!(
-            "{}/v1/admin/exchanges/{exchange}/seed-top-pairs?count={top}",
+            "{}/v1/admin/exchanges/{exchange}/seed-from-assets?quotes={quotes}",
             self.base_url
         )
     }
@@ -119,14 +119,14 @@ impl ApiClient {
         parse_response(value)
     }
 
-    pub async fn exchange_seed_top_pairs(
+    pub async fn exchange_seed_from_assets(
         &self,
         exchange: &str,
-        top: u32,
-    ) -> Result<ApiSuccess<SeedTopPairsData>, ApiError> {
+        quotes: &str,
+    ) -> Result<ApiSuccess<SeedPairsData>, ApiError> {
         let value = self
             .post(
-                &self.exchange_seed_top_pairs_url(exchange, top),
+                &self.exchange_seed_from_assets_url(exchange, quotes),
                 Value::Null,
             )
             .await
@@ -241,11 +241,11 @@ mod tests {
     }
 
     #[test]
-    fn client_exchange_seed_top_pairs_url_includes_exchange_and_count() {
+    fn client_exchange_seed_from_assets_url_includes_exchange_and_quotes() {
         let client = make_client("http://localhost:8080");
         assert_eq!(
-            client.exchange_seed_top_pairs_url("coinex", 20),
-            "http://localhost:8080/v1/admin/exchanges/coinex/seed-top-pairs?count=20"
+            client.exchange_seed_from_assets_url("coinex", "USDT"),
+            "http://localhost:8080/v1/admin/exchanges/coinex/seed-from-assets?quotes=USDT"
         );
     }
 
@@ -320,13 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_seed_top_pairs_success_extracts_count() {
+    fn parse_response_seed_pairs_success_extracts_count() {
         let value = serde_json::json!({
             "success": true,
-            "message": "Top pairs seeded",
+            "message": "Pairs seeded",
             "data": { "pairs_seeded": 20 }
         });
-        let result: Result<ApiSuccess<SeedTopPairsData>, _> = parse_response(value);
+        let result: Result<ApiSuccess<SeedPairsData>, _> = parse_response(value);
         assert_eq!(result.unwrap().data.pairs_seeded, 20);
     }
 }

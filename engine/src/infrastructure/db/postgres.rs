@@ -6,6 +6,9 @@ use sqlx::Row;
 use crate::candle::entity::{Candle, CandlePayload};
 use crate::exchange::registry::{ExchangeRecord, TradingPairRecord};
 use crate::infrastructure::crypto::credential_cipher::EncryptedEnvelope;
+use crate::infrastructure::db::asset_repository::{
+    AssetRecord, AssetRepository, AssetRepositoryError,
+};
 use crate::infrastructure::db::candle_repository::{CandleRepository, CandleRepositoryError};
 use crate::infrastructure::db::credential_repository::{
     CredentialRepository, CredentialRepositoryError, CredentialSummary,
@@ -18,6 +21,65 @@ use crate::infrastructure::db::user_repository::{
     RoleRecord, UserRecord, UserRepository, UserRepositoryError,
 };
 use crate::price::entity::MarketType;
+
+/// Postgres-backed `AssetRepository`. Reads the canonical `assets` table
+/// (migration `0013`) — the single source of truth for coin symbol/display
+/// name/decimals that `trading_pairs.base_asset_id`/`quote_asset_id`
+/// (migration `0014`) reference.
+pub struct PostgresAssetRepository {
+    pool: PgPool,
+}
+
+impl PostgresAssetRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl AssetRepository for PostgresAssetRepository {
+    async fn list_all(&self) -> Result<Vec<AssetRecord>, AssetRepositoryError> {
+        let rows =
+            sqlx::query("SELECT id, symbol, display_name, decimals, icon_url, active FROM assets")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| AssetRepositoryError::Database(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| AssetRecord {
+                id: r.get("id"),
+                symbol: r.get("symbol"),
+                display_name: r.get("display_name"),
+                decimals: r.get("decimals"),
+                icon_url: r.get("icon_url"),
+                active: r.get("active"),
+            })
+            .collect())
+    }
+
+    async fn find_by_symbol(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<AssetRecord>, AssetRepositoryError> {
+        let row = sqlx::query(
+            "SELECT id, symbol, display_name, decimals, icon_url, active FROM assets WHERE symbol = $1",
+        )
+        .bind(symbol)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AssetRepositoryError::Database(e.to_string()))?;
+
+        Ok(row.map(|r| AssetRecord {
+            id: r.get("id"),
+            symbol: r.get("symbol"),
+            display_name: r.get("display_name"),
+            decimals: r.get("decimals"),
+            icon_url: r.get("icon_url"),
+            active: r.get("active"),
+        }))
+    }
+}
 
 /// TimescaleDB-backed `CandleRepository`. Reads/writes the `candles`
 /// hypertable, keyed by `(exchange, pair, interval, time)` per the unique
@@ -216,9 +278,12 @@ impl ExchangeRepository for PostgresExchangeRepository {
             .collect();
 
         let pair_rows = sqlx::query(
-            "SELECT e.name AS exchange_name, p.base, p.quote, p.market_type, p.active
+            "SELECT e.name AS exchange_name, base_asset.symbol AS base, quote_asset.symbol AS quote,
+                    p.market_type, p.active
              FROM trading_pairs p
-             JOIN exchanges e ON e.id = p.exchange_id",
+             JOIN exchanges e ON e.id = p.exchange_id
+             JOIN assets base_asset ON base_asset.id = p.base_asset_id
+             JOIN assets quote_asset ON quote_asset.id = p.quote_asset_id",
         )
         .fetch_all(&self.pool)
         .await
@@ -249,21 +314,38 @@ impl ExchangeRepository for PostgresExchangeRepository {
     }
 
     async fn upsert_pair(&self, record: &TradingPairRecord) -> Result<(), ExchangeRepositoryError> {
+        let base_asset_id = self.resolve_asset_id(&record.base).await?;
+        let quote_asset_id = self.resolve_asset_id(&record.quote).await?;
+
         sqlx::query(
-            "INSERT INTO trading_pairs (exchange_id, base, quote, market_type, active)
+            "INSERT INTO trading_pairs (exchange_id, base_asset_id, quote_asset_id, market_type, active)
              SELECT id, $2, $3, $4, $5 FROM exchanges WHERE name = $1
-             ON CONFLICT (exchange_id, base, quote, market_type)
+             ON CONFLICT (exchange_id, base_asset_id, quote_asset_id, market_type)
              DO UPDATE SET active = EXCLUDED.active",
         )
         .bind(&record.exchange_name)
-        .bind(&record.base)
-        .bind(&record.quote)
+        .bind(base_asset_id)
+        .bind(quote_asset_id)
         .bind(record.market_type.to_string())
         .bind(record.active)
         .execute(&self.pool)
         .await
         .map_err(|e| ExchangeRepositoryError::Database(e.to_string()))?;
         Ok(())
+    }
+}
+
+impl PostgresExchangeRepository {
+    /// Resolves a canonical asset symbol to its `assets.id`. Returns
+    /// `UnknownAsset` rather than silently inserting a NULL/invalid FK —
+    /// callers must seed the symbol into `assets` first.
+    async fn resolve_asset_id(&self, symbol: &str) -> Result<i32, ExchangeRepositoryError> {
+        sqlx::query_scalar::<_, i32>("SELECT id FROM assets WHERE symbol = $1")
+            .bind(symbol)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ExchangeRepositoryError::Database(e.to_string()))?
+            .ok_or_else(|| ExchangeRepositoryError::UnknownAsset(symbol.to_string()))
     }
 }
 

@@ -7,10 +7,10 @@ use tokio::task::AbortHandle;
 
 use crate::candle::entity::CandlePayload;
 use crate::exchange::historical_port::HistoricalCandleSource;
-use crate::exchange::market_seed_port::TopMarketSource;
 use crate::exchange::port::ExchangeAdapter;
 use crate::exchange::registry::ExchangeRegistry;
 use crate::infrastructure::crypto::credential_cipher::CredentialCipher;
+use crate::infrastructure::db::asset_repository::AssetRepository;
 use crate::infrastructure::db::candle_repository::CandleRepository;
 use crate::infrastructure::db::credential_repository::CredentialRepository;
 use crate::infrastructure::db::exchange_repository::ExchangeRepository;
@@ -100,6 +100,10 @@ pub struct AppState {
     /// `exchange_registry` is bootstrapped from hardcoded defaults and enable/disable
     /// changes do not survive a restart.
     pub exchange_repository: Option<Arc<dyn ExchangeRepository>>,
+    /// Canonical asset catalog (`assets` table, migration `0013`) — the source of
+    /// truth `trading_pairs` is seeded from. `None` = no DB; asset-driven pair
+    /// seeding is unavailable.
+    pub asset_repository: Option<Arc<dyn AssetRepository>>,
     /// Persistent store for users, roles, and permissions. `None` = no DB — login and
     /// user-management endpoints are unavailable.
     pub user_repository: Option<Arc<dyn UserRepository>>,
@@ -117,10 +121,6 @@ pub struct AppState {
     /// Hitobit do not), so an exchange simply has no entry here rather than an
     /// `Unsupported` stub implementation.
     pub historical_sources: Arc<HashMap<String, Arc<dyn HistoricalCandleSource>>>,
-    /// Hard-coded registry of top-market-by-volume sources, keyed by exchange
-    /// name. Same sparsity rationale as `historical_sources` — only exchanges
-    /// with a public ticker/volume endpoint get an entry.
-    pub top_market_sources: Arc<HashMap<String, Arc<dyn TopMarketSource>>>,
 }
 
 impl AppState {
@@ -205,12 +205,12 @@ mod tests {
             python_strategy_repository: None,
             candle_repository: None,
             exchange_repository: None,
+            asset_repository: None,
             user_repository: None,
             credential_repository: None,
             credential_cipher: None,
             candle_history: AppState::new_candle_history(),
             historical_sources: Arc::new(HashMap::new()),
-            top_market_sources: Arc::new(HashMap::new()),
         }
     }
 

@@ -100,12 +100,12 @@ enum CandleCommands {
 
 #[derive(Subcommand)]
 enum ExchangeCommands {
-    /// Seed the top N markets by 24h quote volume as active trading pairs
+    /// Seed trading pairs for an exchange from the canonical asset catalog
     Seed {
         exchange: String,
-        /// How many top markets to seed
-        #[arg(long = "top", default_value_t = 20)]
-        top: u32,
+        /// Comma-separated quote currencies to pair every asset against
+        #[arg(long = "quotes", default_value = "USDT")]
+        quotes: String,
     },
 }
 
@@ -154,8 +154,8 @@ async fn run() -> Result<(), String> {
         Commands::Exchange { command } => {
             let client = ApiClient::new(&config);
             match command {
-                ExchangeCommands::Seed { exchange, top } => {
-                    exchange::handle_seed(&client, &exchange, top).await
+                ExchangeCommands::Seed { exchange, quotes } => {
+                    exchange::handle_seed(&client, &exchange, &quotes).await
                 }
             }
         }

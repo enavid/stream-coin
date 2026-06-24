@@ -8,6 +8,12 @@ use crate::exchange::registry::{ExchangeRecord, TradingPairRecord};
 pub enum ExchangeRepositoryError {
     #[error("database error: {0}")]
     Database(String),
+
+    /// `upsert_pair`'s `base`/`quote` symbol has no matching row in the
+    /// canonical `assets` table (migration `0013`). Callers must seed the
+    /// asset first — pairs are never created for unknown symbols.
+    #[error("unknown asset symbol: {0}")]
+    UnknownAsset(String),
 }
 
 #[async_trait]
@@ -86,6 +92,13 @@ mod tests {
     use super::*;
     use crate::infrastructure::db::exchange_repository::FakeExchangeRepository;
     use crate::price::entity::MarketType;
+
+    #[test]
+    fn unknown_asset_error_message_includes_the_symbol() {
+        let err = ExchangeRepositoryError::UnknownAsset("DOGE".to_string());
+
+        assert_eq!(err.to_string(), "unknown asset symbol: DOGE");
+    }
 
     fn tabdeal(enabled: bool) -> ExchangeRecord {
         ExchangeRecord {

@@ -39,26 +39,28 @@ pub struct PairListQuery {
     pub market_type: Option<MarketType>,
 }
 
+/// Query for `POST /v1/admin/exchanges/{name}/seed-from-assets`. `quotes` is
+/// a comma-separated list of quote-currency symbols, e.g. `?quotes=USDT,IRT`.
 #[derive(Debug, Deserialize, ToSchema)]
-pub struct SeedTopPairsQuery {
-    pub count: Option<u32>,
+pub struct SeedPairsQuery {
+    pub quotes: Option<String>,
 }
 
-impl SeedTopPairsQuery {
-    /// Clamps the requested count into `1..=MAX_SEED_COUNT`, defaulting to
-    /// `DEFAULT_SEED_COUNT` when absent.
-    pub fn resolved_count(&self) -> usize {
-        self.count
-            .map(|c| (c as usize).clamp(1, MAX_SEED_COUNT))
-            .unwrap_or(DEFAULT_SEED_COUNT)
+impl SeedPairsQuery {
+    pub const DEFAULT_QUOTE: &'static str = "USDT";
+
+    /// Splits the comma-separated `quotes` param into a list, defaulting to
+    /// `[DEFAULT_QUOTE]` when absent or empty.
+    pub fn resolved_quotes(&self) -> Vec<String> {
+        match &self.quotes {
+            Some(s) if !s.trim().is_empty() => s.split(',').map(|q| q.trim().to_string()).collect(),
+            _ => vec![Self::DEFAULT_QUOTE.to_string()],
+        }
     }
 }
 
-pub const DEFAULT_SEED_COUNT: usize = 20;
-pub const MAX_SEED_COUNT: usize = 100;
-
 #[derive(Debug, Serialize, ToSchema)]
-pub struct SeedTopPairsResponse {
+pub struct SeedPairsResponse {
     pub pairs_seeded: usize,
 }
 
@@ -67,26 +69,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolved_count_defaults_to_twenty() {
-        let q = SeedTopPairsQuery { count: None };
-        assert_eq!(q.resolved_count(), 20);
+    fn resolved_quotes_defaults_to_usdt_when_absent() {
+        let q = SeedPairsQuery { quotes: None };
+        assert_eq!(q.resolved_quotes(), vec!["USDT".to_string()]);
     }
 
     #[test]
-    fn resolved_count_clamps_to_max() {
-        let q = SeedTopPairsQuery { count: Some(5_000) };
-        assert_eq!(q.resolved_count(), MAX_SEED_COUNT);
+    fn resolved_quotes_defaults_to_usdt_when_empty_string() {
+        let q = SeedPairsQuery {
+            quotes: Some("".to_string()),
+        };
+        assert_eq!(q.resolved_quotes(), vec!["USDT".to_string()]);
     }
 
     #[test]
-    fn resolved_count_clamps_to_one_when_zero() {
-        let q = SeedTopPairsQuery { count: Some(0) };
-        assert_eq!(q.resolved_count(), 1);
+    fn resolved_quotes_splits_comma_separated_list() {
+        let q = SeedPairsQuery {
+            quotes: Some("USDT,IRT".to_string()),
+        };
+        assert_eq!(
+            q.resolved_quotes(),
+            vec!["USDT".to_string(), "IRT".to_string()]
+        );
     }
 
     #[test]
-    fn resolved_count_passes_through_valid_value() {
-        let q = SeedTopPairsQuery { count: Some(10) };
-        assert_eq!(q.resolved_count(), 10);
+    fn resolved_quotes_trims_whitespace_around_each_symbol() {
+        let q = SeedPairsQuery {
+            quotes: Some(" USDT , IRT ".to_string()),
+        };
+        assert_eq!(
+            q.resolved_quotes(),
+            vec!["USDT".to_string(), "IRT".to_string()]
+        );
     }
 }

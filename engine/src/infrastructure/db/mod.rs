@@ -1,3 +1,4 @@
+pub mod asset_repository;
 pub mod candle_repository;
 pub mod credential_repository;
 pub mod exchange_repository;

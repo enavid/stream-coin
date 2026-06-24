@@ -31,8 +31,8 @@ pub fn registry_router(cfg: &mut web::ServiceConfig) {
                 web::post().to(registry_handler::disable_exchange),
             )
             .route(
-                "/coinex/seed-top-pairs",
-                web::post().to(registry_handler::seed_coinex_top_pairs),
+                "/{name}/seed-from-assets",
+                web::post().to(registry_handler::seed_pairs_from_assets),
             ),
     );
 }
