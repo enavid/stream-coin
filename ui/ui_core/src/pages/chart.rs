@@ -341,11 +341,40 @@ pub fn Chart(server_url: String) -> Element {
         });
     });
 
-    // Mirrors the most recent backtest result onto the chart whenever
-    // `BacktestStore` or the playback cursor changes — reads both *inside*
-    // the closure so Dioxus subscribes to both signals. Passes the current
-    // cursor_time to `scChartSetTrades` (null when empty = show all trades),
-    // so the chart only renders trades the cursor has reached during playback.
+    // Stats dashboard — mirrors the backtest result's summary stats onto
+    // the chart once per result change. Reads ONLY `state.backtest.result`,
+    // NOT the playback cursor, so Dioxus subscribes this effect to the
+    // result signal alone. During playback the cursor advances every
+    // `speed.interval_ms()` ms; stats don't depend on the cursor, so
+    // rebuilding the DOM stats table on every cursor advance would thrash
+    // the DOM at ~67 Hz at 10× speed for no gain.
+    use_effect(move || {
+        let result = state.backtest.read().result.clone();
+        if !chart_ready() {
+            return;
+        }
+        spawn(async move {
+            match result {
+                Some(result) => {
+                    if let Ok(stats_json) = serde_json::to_string(&format_stats_row(&result)) {
+                        eval_logged(&format!(
+                            "window.scChartSetStats('{CONTAINER_ID}', {stats_json})"
+                        ))
+                        .await;
+                    }
+                }
+                None => {
+                    eval_logged(&format!("window.scChartClearStats('{CONTAINER_ID}')")).await;
+                }
+            }
+        });
+    });
+
+    // Trade overlay — mirrors closed trades onto the chart. Reads BOTH
+    // `state.backtest.result` AND `state.playback.cursor_time` so that
+    // the cursor filters which trades appear during playback. Split from
+    // the stats effect above so the stats DOM is not rebuilt on every
+    // cursor tick — two signals, two effects.
     use_effect(move || {
         let result = state.backtest.read().result.clone();
         let cursor = (state.playback)().cursor_time.clone();
@@ -355,29 +384,20 @@ pub fn Chart(server_url: String) -> Element {
         spawn(async move {
             match result {
                 Some(result) => {
-                    let stats_row = format_stats_row(&result);
                     let cursor_json = if cursor.is_empty() {
                         "null".to_string()
                     } else {
                         serde_json::to_string(&cursor).unwrap_or_else(|_| "null".to_string())
                     };
-                    if let (Ok(trades_json), Ok(stats_json)) = (
-                        serde_json::to_string(&result.closed_trades),
-                        serde_json::to_string(&stats_row),
-                    ) {
+                    if let Ok(trades_json) = serde_json::to_string(&result.closed_trades) {
                         eval_logged(&format!(
-                            "window.scChartSetTrades('{CONTAINER_ID}', {trades_json}, {cursor_json}); \
-                             window.scChartSetStats('{CONTAINER_ID}', {stats_json})"
+                            "window.scChartSetTrades('{CONTAINER_ID}', {trades_json}, {cursor_json})"
                         ))
                         .await;
                     }
                 }
                 None => {
-                    eval_logged(&format!(
-                        "window.scChartClearTrades('{CONTAINER_ID}'); \
-                         window.scChartClearStats('{CONTAINER_ID}')"
-                    ))
-                    .await;
+                    eval_logged(&format!("window.scChartClearTrades('{CONTAINER_ID}')")).await;
                 }
             }
         });
