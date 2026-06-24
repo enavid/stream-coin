@@ -39,6 +39,11 @@ pub(super) fn format_trade_label(trade: &crate::api::ClosedTrade) -> String {
 /// visible-range approach `ROADMAP.md`'s Phase 7 research found in
 /// FreqUI/vectorbt for "too many trades to render legibly".
 ///
+/// When `cursor_time` is `Some`, additionally excludes trades whose
+/// `exit_time` is after the cursor (Loop 6i playback): a trade that hasn't
+/// been exited yet at the cursor position shouldn't appear as a closed trade
+/// in the overlay (the JS layer handles "open position" rendering separately).
+///
 /// Timestamps are compared as plain strings — RFC3339 with a fixed
 /// fractional-second precision and `Z` suffix (this codebase's convention,
 /// see `BacktestRunRequest::from`'s doc comment) sorts identically whether
@@ -48,11 +53,15 @@ pub(super) fn visible_trades<'a>(
     trades: &'a [crate::api::ClosedTrade],
     visible_from: &str,
     visible_to: &str,
+    cursor_time: Option<&str>,
     cap: usize,
 ) -> Vec<&'a crate::api::ClosedTrade> {
     let mut overlapping: Vec<&crate::api::ClosedTrade> = trades
         .iter()
         .filter(|t| t.entry_time.as_str() <= visible_to && t.exit_time.as_str() >= visible_from)
+        .filter(|t| {
+            cursor_time.is_none_or(|cursor| t.exit_time.as_str() <= cursor)
+        })
         .collect();
     overlapping.sort_by(|a, b| b.exit_time.cmp(&a.exit_time));
     overlapping.truncate(cap);
@@ -250,7 +259,8 @@ mod tests {
             closed_trade_at("2026-01-01T03:00:00Z", "2026-01-01T03:05:00Z"), // after range
         ];
 
-        let visible = visible_trades(&trades, "2026-01-01T00:30:00Z", "2026-01-01T02:00:00Z", 500);
+        let visible =
+            visible_trades(&trades, "2026-01-01T00:30:00Z", "2026-01-01T02:00:00Z", None, 500);
 
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].entry_time, "2026-01-01T01:00:00Z");
@@ -267,7 +277,8 @@ mod tests {
             })
             .collect();
 
-        let visible = visible_trades(&trades, "2026-01-01T00:00:00Z", "2026-01-03T00:00:00Z", 500);
+        let visible =
+            visible_trades(&trades, "2026-01-01T00:00:00Z", "2026-01-03T00:00:00Z", None, 500);
 
         assert_eq!(visible.len(), 500);
         assert!(
@@ -331,5 +342,68 @@ mod tests {
         assert_eq!(row.total_trades, 2);
         assert_eq!(row.total_pnl, 7_000);
         assert_eq!(row.total_pnl_class, "stat-positive");
+    }
+
+    #[test]
+    fn trades_visible_at_cursor_excludes_trades_not_yet_exited() {
+        let trades = vec![
+            // exited before the cursor — should appear
+            closed_trade_at("2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z"),
+            // exited after the cursor — should be hidden (not yet closed at cursor)
+            closed_trade_at("2026-01-01T00:02:00Z", "2026-01-01T00:05:00Z"),
+        ];
+        let cursor = "2026-01-01T00:03:00Z";
+
+        let visible = visible_trades(
+            &trades,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T01:00:00Z",
+            Some(cursor),
+            500,
+        );
+
+        assert_eq!(visible.len(), 1, "only the trade exited before the cursor should be visible");
+        assert_eq!(visible[0].exit_time, "2026-01-01T00:01:00Z");
+    }
+
+    #[test]
+    fn trades_visible_at_cursor_none_disables_cursor_filter() {
+        let trades = vec![
+            closed_trade_at("2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z"),
+            closed_trade_at("2026-01-01T00:02:00Z", "2026-01-01T00:05:00Z"),
+        ];
+
+        let visible = visible_trades(
+            &trades,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T01:00:00Z",
+            None,
+            500,
+        );
+
+        assert_eq!(visible.len(), 2, "without a cursor both trades must appear");
+    }
+
+    #[test]
+    fn trades_visible_at_cursor_includes_trade_exited_exactly_at_cursor() {
+        let trades = vec![
+            // exit_time == cursor_time (boundary: <= includes it)
+            closed_trade_at("2026-01-01T00:00:00Z", "2026-01-01T00:03:00Z"),
+        ];
+        let cursor = "2026-01-01T00:03:00Z";
+
+        let visible = visible_trades(
+            &trades,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T01:00:00Z",
+            Some(cursor),
+            500,
+        );
+
+        assert_eq!(
+            visible.len(),
+            1,
+            "a trade exited exactly at the cursor must be shown (exit_time <= cursor_time)"
+        );
     }
 }

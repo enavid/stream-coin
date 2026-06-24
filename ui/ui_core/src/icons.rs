@@ -312,3 +312,42 @@ pub fn IconRuler() -> Element {
         }
     }
 }
+
+#[component]
+pub fn IconPlay() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "currentColor", stroke: "none",
+            polygon { points: "6,4 20,12 6,20" }
+        }
+    }
+}
+
+#[component]
+pub fn IconPause() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "currentColor", stroke: "none",
+            rect { x: "5", y: "4", width: "4", height: "16", rx: "1" }
+            rect { x: "15", y: "4", width: "4", height: "16", rx: "1" }
+        }
+    }
+}
+
+#[component]
+pub fn IconStepBack() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "currentColor", stroke: "none",
+            rect { x: "4", y: "4", width: "3", height: "16", rx: "1" }
+            polygon { points: "18,4 8,12 18,20" }
+        }
+    }
+}
+
+#[component]
+pub fn IconStepForward() -> Element {
+    rsx! {
+        svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "currentColor", stroke: "none",
+            rect { x: "17", y: "4", width: "3", height: "16", rx: "1" }
+            polygon { points: "6,4 16,12 6,20" }
+        }
+    }
+}

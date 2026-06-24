@@ -682,6 +682,19 @@
     .draw-btn:hover { color: var(--text); background: var(--border2); }
     .draw-btn.active { background: var(--accent); color: #fff; }
     .draw-btn-sep { height: 1px; background: var(--border); margin: 2px 2px; }
+    .chart-playback-toolbar {
+      position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+      display: flex; flex-direction: row; align-items: center; gap: 2px;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 4px 8px; z-index: 3;
+    }
+    /* Speed-selector buttons in the playback toolbar are narrower than
+       the draw-tool buttons to keep the toolbar compact. */
+    .chart-playback-toolbar .draw-btn { width: auto; padding: 0 6px; font-size: 11px; }
+    .playback-scrub {
+      width: 160px; height: 4px; cursor: pointer;
+      accent-color: var(--accent);
+    }
 
     /* DOM-overlay drawing types lightweight-charts has no native primitive
        for (vertical line, rectangle, fib labels) — plain children of the

@@ -1,7 +1,9 @@
 mod catalog;
 mod store;
+pub mod playback;
 
 pub use catalog::ExchangeCatalog;
+pub use playback::{PlaybackSpeed, PlaybackState};
 pub use store::{
     BacktestStore, Candle, CandleStore, FeedRow, OrderRow, OrderStore, SignalRow, SignalStore,
     TickerStore, MAX_SIGNAL_ROWS,
@@ -33,6 +35,9 @@ pub struct AppState {
     pub theme: Signal<Theme>,
     pub candles: Signal<CandleStore>,
     pub backtest: Signal<BacktestStore>,
+    /// Chart playback cursor state (Loop 6i) — shared so the chart toolbar
+    /// and the timer effect both read and write the same signal.
+    pub playback: Signal<PlaybackState>,
     /// Bumped by the platform's WS transport every time it reconnects
     /// *after* a previous disconnect (not on the very first connect) —
     /// per-page fetch effects that also read this re-run their REST fetch,
@@ -61,6 +66,7 @@ impl AppState {
             theme: Signal::new(Theme::default()),
             candles: Signal::new(CandleStore::new()),
             backtest: Signal::new(BacktestStore::new()),
+            playback: Signal::new(PlaybackState::new()),
             resync_epoch: Signal::new(0),
         }
     }

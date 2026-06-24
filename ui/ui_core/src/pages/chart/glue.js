@@ -798,15 +798,18 @@
   // Recomputes which trades have primitives attached for the chart's
   // current visible range — a no-op below the density cap (every trade
   // just stays attached), only filters once the set is too large to draw
-  // all at once.
+  // all at once. Respects `entry.cursorTime` when set (playback mode).
   function refreshVisibleTrades(containerId) {
     var entry = window.scCharts[containerId];
     if (!entry || !entry.allTrades || entry.tradeDensity === "markers-only") return;
-    if (entry.allTrades.length <= TRADE_DENSITY_CAP) return;
+    var relevantTrades = entry.cursorTime
+      ? entry.allTrades.filter(function (t) { return t.entry_time <= entry.cursorTime; })
+      : entry.allTrades;
+    if (relevantTrades.length <= TRADE_DENSITY_CAP) return;
     var range = entry.chart.timeScale().getVisibleRange();
     if (!range) return;
     detachTradePrimitives(entry);
-    attachTradePrimitives(entry, visibleTradesJs(entry.allTrades, range.from, range.to, TRADE_DENSITY_CAP));
+    attachTradePrimitives(entry, visibleTradesJs(relevantTrades, range.from, range.to, TRADE_DENSITY_CAP));
   }
   // Detaches rectangle/line primitives only — leaves `allTrades`/
   // `tradeMarkers` untouched, since "Rectangles off" (the density toggle)
@@ -823,18 +826,40 @@
   // the user pans/zooms, via `refreshVisibleTrades` below. Exit markers are
   // built for every trade regardless of the cap — cheap, and meant to stay
   // visible even with "Rectangles" toggled off.
-  window.scChartSetTrades = function (containerId, closedTrades) {
+  //
+  // `cursorTime` (ISO string or null) — when set, only trades with
+  // `exit_time <= cursorTime` are rendered as closed trades (Loop 6i
+  // playback). Trades with `entry_time <= cursorTime < exit_time` (the
+  // "open at the cursor" case) are shown with a rectangle but no exit
+  // marker. `null` means "show all trades" (no playback active).
+  window.scChartSetTrades = function (containerId, closedTrades, cursorTime) {
     var entry = window.scCharts[containerId];
     if (!entry) return;
     window.scChartClearTrades(containerId);
     entry.allTrades = closedTrades;
-    entry.tradeMarkers = buildTradeMarkers(closedTrades, entry.colors);
+    entry.cursorTime = cursorTime || null;
+    // Split the trade list by cursor position: exited trades get the full
+    // treatment; entered-but-not-yet-exited trades get a rectangle only.
+    var exited = cursorTime
+      ? closedTrades.filter(function (t) { return t.exit_time <= cursorTime; })
+      : closedTrades;
+    var openAtCursor = cursorTime
+      ? closedTrades.filter(function (t) {
+          return t.entry_time <= cursorTime && t.exit_time > cursorTime;
+        })
+      : [];
+    entry.tradeMarkers = buildTradeMarkers(exited, entry.colors);
     refreshAllMarkers(containerId);
     if (entry.tradeDensity === "markers-only") return;
-    if (closedTrades.length <= TRADE_DENSITY_CAP) {
-      attachTradePrimitives(entry, closedTrades);
+    var tradesToDraw = exited.concat(openAtCursor);
+    if (tradesToDraw.length <= TRADE_DENSITY_CAP) {
+      attachTradePrimitives(entry, tradesToDraw);
     } else {
-      refreshVisibleTrades(containerId);
+      // For the density cap, prefer exited trades over open-at-cursor ones
+      // (exited is more informative), then pad with open-at-cursor.
+      var capped = exited.slice(0, TRADE_DENSITY_CAP)
+        .concat(openAtCursor.slice(0, Math.max(0, TRADE_DENSITY_CAP - exited.length)));
+      attachTradePrimitives(entry, capped);
     }
   };
   window.scChartClearTrades = function (containerId) {

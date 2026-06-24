@@ -15,10 +15,11 @@ use super::current_token;
 use crate::api::ApiClient;
 use crate::domain::format::format_price;
 use crate::icons::{
-    IconArrowDown, IconArrowUp, IconCursor, IconFibonacci, IconHorizontalLine, IconRectangle,
-    IconRuler, IconTrash, IconTrendLine, IconVerticalLine,
+    IconArrowDown, IconArrowUp, IconCursor, IconFibonacci, IconHorizontalLine, IconPause, IconPlay,
+    IconRectangle, IconRuler, IconStepBack, IconStepForward, IconTrash, IconTrendLine,
+    IconVerticalLine,
 };
-use crate::state::AppState;
+use crate::state::{AppState, PlaybackSpeed};
 use trade_format::format_stats_row;
 
 const CONTAINER_ID: &str = "sc-candlestick-chart";
@@ -305,6 +306,10 @@ pub fn Chart(server_url: String) -> Element {
         last_pushed_candle.set(None);
         load_error.set(None);
         loading.set(true);
+        // Symbol/interval change invalidates any in-progress playback —
+        // the new series has a different time range and the old cursor
+        // position is meaningless against it.
+        state.playback.set(crate::state::PlaybackState::new());
         spawn(async move {
             let result = api
                 .list_candles(&token, &exchange, &pair, &interval, HISTORY_LIMIT)
@@ -337,13 +342,13 @@ pub fn Chart(server_url: String) -> Element {
     });
 
     // Mirrors the most recent backtest result onto the chart whenever
-    // `BacktestStore` changes — reads it *inside* the closure (not a
-    // snapshot captured outside) so Dioxus actually subscribes this effect
-    // to it, the same reactivity rule the exchange/pair/interval memos
-    // above call out; getting this wrong is the exact bug that made
-    // timeframe switching silently do nothing earlier in this page's life.
+    // `BacktestStore` or the playback cursor changes — reads both *inside*
+    // the closure so Dioxus subscribes to both signals. Passes the current
+    // cursor_time to `scChartSetTrades` (null when empty = show all trades),
+    // so the chart only renders trades the cursor has reached during playback.
     use_effect(move || {
         let result = state.backtest.read().result.clone();
+        let cursor = (state.playback)().cursor_time.clone();
         if !chart_ready() {
             return;
         }
@@ -351,12 +356,17 @@ pub fn Chart(server_url: String) -> Element {
             match result {
                 Some(result) => {
                     let stats_row = format_stats_row(&result);
+                    let cursor_json = if cursor.is_empty() {
+                        "null".to_string()
+                    } else {
+                        serde_json::to_string(&cursor).unwrap_or_else(|_| "null".to_string())
+                    };
                     if let (Ok(trades_json), Ok(stats_json)) = (
                         serde_json::to_string(&result.closed_trades),
                         serde_json::to_string(&stats_row),
                     ) {
                         eval_logged(&format!(
-                            "window.scChartSetTrades('{CONTAINER_ID}', {trades_json}); \
+                            "window.scChartSetTrades('{CONTAINER_ID}', {trades_json}, {cursor_json}); \
                              window.scChartSetStats('{CONTAINER_ID}', {stats_json})"
                         ))
                         .await;
@@ -394,6 +404,61 @@ pub fn Chart(server_url: String) -> Element {
                 "window.scChartSetLiveOrderMarker('{CONTAINER_ID}', {json})"
             ))
             .await;
+        });
+    });
+
+    // Playback timer (Loop 6i) — drives the cursor forward one candle every
+    // `speed.interval_ms()` milliseconds while `playing` is `true`. Uses a
+    // JS `setTimeout` via `document::eval` (the same bridge this page already
+    // uses for everything) so no wasm-specific dependency is needed in
+    // `ui_core`. The effect re-runs on every cursor advance (because
+    // `state.playback` changed), creating a one-shot timer chain: the next
+    // advance schedules itself; pausing breaks the chain naturally without
+    // any teardown needed.
+    use_effect(move || {
+        let pb = (state.playback)();
+        if !pb.playing || !chart_ready() {
+            return;
+        }
+        let speed_ms = pb.speed.interval_ms();
+        let key = series_key();
+        let mut state = state;
+        spawn(async move {
+            let _ = document::eval(&format!(
+                "await new Promise(r => setTimeout(r, {speed_ms}))"
+            ))
+            .await;
+            let current_pb = (state.playback)();
+            if !current_pb.playing {
+                return;
+            }
+            let candle_times: Vec<String> = state
+                .candles
+                .read()
+                .series_for(&key)
+                .iter()
+                .map(|c| c.time.clone())
+                .collect();
+            let mut next_pb = current_pb.clone();
+            let still_going = next_pb.advance(&candle_times);
+            if !still_going {
+                next_pb.playing = false;
+            }
+            state.playback.set(next_pb.clone());
+            // Scroll the chart to keep the cursor candle visible
+            if !next_pb.cursor_time.is_empty() {
+                if let Ok(cursor_json) = serde_json::to_string(&next_pb.cursor_time) {
+                    let _ = document::eval(&format!(
+                        "(function() {{ \
+                           var e = window.scCharts['{CONTAINER_ID}']; \
+                           if (!e) return; \
+                           var x = e.chart.timeScale().timeToCoordinate(Math.floor(new Date({cursor_json}).getTime()/1000)); \
+                           if (x !== null) e.chart.timeScale().scrollToPosition(x, false); \
+                         }})()"
+                    ))
+                    .await;
+                }
+            }
         });
     });
 
@@ -435,7 +500,13 @@ pub fn Chart(server_url: String) -> Element {
         (last.clone(), change, pct)
     });
     let is_empty = series.is_empty();
+    let candle_times: Vec<String> = series.iter().map(|c| c.time.clone()).collect();
     drop(candles);
+
+    let pb = (state.playback)();
+    let playback_active = state.backtest.read().result.is_some() && !is_empty;
+    let cursor_index = pb.current_index(&candle_times).unwrap_or(0);
+    let candle_count = candle_times.len();
 
     rsx! {
         div { class: "chart-page-full",
@@ -574,6 +645,108 @@ pub fn Chart(server_url: String) -> Element {
                             });
                         },
                         IconRectangle {}
+                    }
+                }
+                }
+                // Playback toolbar — shown only when a backtest result is
+                // loaded and there are candles to scrub through.
+                if playback_active {
+                div { class: "chart-playback-toolbar",
+                    button {
+                        class: "draw-btn",
+                        title: "Step back one candle",
+                        r#type: "button",
+                        onclick: move |_| {
+                            let key = series_key();
+                            let times: Vec<String> = state.candles.read()
+                                .series_for(&key).iter().map(|c| c.time.clone()).collect();
+                            let mut state = state;
+                            let mut next = (state.playback)().clone();
+                            next.playing = false;
+                            next.retreat(&times);
+                            state.playback.set(next);
+                        },
+                        IconStepBack {}
+                    }
+                    button {
+                        class: "draw-btn",
+                        title: if pb.playing { "Pause" } else { "Play" },
+                        r#type: "button",
+                        onclick: move |_| {
+                            let key = series_key();
+                            let times: Vec<String> = state.candles.read()
+                                .series_for(&key).iter().map(|c| c.time.clone()).collect();
+                            let mut state = state;
+                            let mut next = (state.playback)().clone();
+                            if next.playing {
+                                next.playing = false;
+                            } else {
+                                // Advance to first candle on first play if
+                                // cursor is still at the initial position.
+                                if next.cursor_time.is_empty() {
+                                    next.advance(&times);
+                                }
+                                next.playing = true;
+                            }
+                            state.playback.set(next);
+                        },
+                        if pb.playing { IconPause {} } else { IconPlay {} }
+                    }
+                    button {
+                        class: "draw-btn",
+                        title: "Step forward one candle",
+                        r#type: "button",
+                        onclick: move |_| {
+                            let key = series_key();
+                            let times: Vec<String> = state.candles.read()
+                                .series_for(&key).iter().map(|c| c.time.clone()).collect();
+                            let mut state = state;
+                            let mut next = (state.playback)().clone();
+                            next.playing = false;
+                            let still_going = next.advance(&times);
+                            if !still_going {
+                                next.playing = false;
+                            }
+                            state.playback.set(next);
+                        },
+                        IconStepForward {}
+                    }
+                    div { class: "draw-btn-sep" }
+                    for speed in [PlaybackSpeed::OneX, PlaybackSpeed::TwoX, PlaybackSpeed::FiveX, PlaybackSpeed::TenX] {
+                        button {
+                            key: "{speed.label()}",
+                            class: if pb.speed == speed { "draw-btn active" } else { "draw-btn" },
+                            title: "{speed.label()} speed",
+                            r#type: "button",
+                            onclick: move |_| {
+                                let mut state = state;
+                                let mut next = (state.playback)().clone();
+                                next.speed = speed;
+                                state.playback.set(next);
+                            },
+                            "{speed.label()}"
+                        }
+                    }
+                    div { class: "draw-btn-sep" }
+                    input {
+                        class: "playback-scrub",
+                        r#type: "range",
+                        min: "0",
+                        max: "{candle_count.saturating_sub(1)}",
+                        value: "{cursor_index}",
+                        title: "Scrub timeline",
+                        oninput: move |e| {
+                            if let Ok(idx) = e.value().parse::<usize>() {
+                                let key = series_key();
+                                let times: Vec<String> = state.candles.read()
+                                    .series_for(&key).iter().map(|c| c.time.clone()).collect();
+                                let mut state = state;
+                                let mut next = (state.playback)().clone();
+                                next.playing = false;
+                                next.seek_to(&times, idx);
+                                state.playback.set(next);
+                            }
+                        },
                     }
                 }
                 }
