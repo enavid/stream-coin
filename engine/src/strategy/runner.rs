@@ -3,12 +3,14 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
 
+use crate::backtest::entity::ClosedTrade;
 use crate::candle::entity::{Candle, CandlePayload, Interval};
 use crate::exchange::entity::ExchangeId;
 use crate::infrastructure::db::signal_repository::{SignalRecord, SignalRepository};
 use crate::kafka::port::MessagePublisher;
 use crate::price::entity::{Price, TradingPair};
 use crate::strategy::entity::Signal;
+use crate::strategy::live_trade_tracker::LiveTradeTracker;
 use crate::strategy::port::Strategy;
 use crate::wire_message::{PricePayload, SignalPayload, WsMessage};
 
@@ -24,6 +26,21 @@ fn price_from_payload(p: &PricePayload) -> Price {
         bid: p.bid,
         ask: p.ask,
         timestamp: p.timestamp,
+    }
+}
+
+/// Broadcasts a `LiveTradeTracker`-produced trade close over the WS feed,
+/// the same way live order fills and signals already are. Not published to
+/// Kafka — unlike a `Signal`, a live-preview `ClosedTrade` is a UI-overlay
+/// derivative of signals already on the audit trail, not a new event to audit.
+fn broadcast_closed_trade(broadcaster: &broadcast::Sender<String>, closed: ClosedTrade) {
+    match serde_json::to_string(&WsMessage::ClosedTrade(closed)) {
+        Ok(json) => {
+            let _ = broadcaster.send(json);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize live closed trade");
+        }
     }
 }
 
@@ -56,6 +73,7 @@ pub fn spawn_strategy_runner(
     let mut rx = broadcaster.subscribe();
     let signals_topic =
         std::env::var("KAFKA_TOPIC_SIGNALS").unwrap_or_else(|_| "signals".to_string());
+    let tracker = LiveTradeTracker::new();
 
     let handle = tokio::spawn(async move {
         loop {
@@ -77,6 +95,18 @@ pub fn spawn_strategy_runner(
                 Err(_) => continue,
             };
 
+            // The reference price the strategy used to evaluate this tick —
+            // the same value its `RiskRewardConfig::compute` (if any) was
+            // given — doubles as the live-preview fill price for
+            // `LiveTradeTracker::on_signal` below.
+            let reference_price = match &msg {
+                WsMessage::PriceUpdate(p) => Some(p.ask),
+                WsMessage::Candle(c) => Some(c.close),
+                WsMessage::Signal(_) | WsMessage::OrderUpdate(_) | WsMessage::ClosedTrade(_) => {
+                    None
+                }
+            };
+
             let signal: Option<Signal> = match &msg {
                 WsMessage::PriceUpdate(p) => {
                     tracing::trace!(
@@ -94,12 +124,31 @@ pub fn spawn_strategy_runner(
                         strategy_id = %strategy.strategy_id(),
                         "dispatching candle to strategy"
                     );
+                    // Intrabar SL/TP check happens before the strategy even
+                    // sees this candle — mirrors the backtest venue's order
+                    // (Loop 6f): a position can be stopped out by a candle's
+                    // range before any new signal from that same candle.
+                    if let Some(closed) = tracker.check_intrabar_stop_loss_take_profit(
+                        strategy.strategy_id(),
+                        c.low,
+                        c.high,
+                        c.time,
+                    ) {
+                        broadcast_closed_trade(&broadcaster, closed);
+                    }
                     strategy.on_candle(&candle_from_payload(c))
                 }
-                WsMessage::Signal(_) | WsMessage::OrderUpdate(_) => None,
+                WsMessage::Signal(_) | WsMessage::OrderUpdate(_) | WsMessage::ClosedTrade(_) => {
+                    None
+                }
             };
 
             if let Some(sig) = signal {
+                if let Some(price) = reference_price {
+                    if let Some(closed) = tracker.on_signal(&sig, price, sig.timestamp) {
+                        broadcast_closed_trade(&broadcaster, closed);
+                    }
+                }
                 let signal_id = uuid::Uuid::new_v4().to_string();
 
                 tracing::info!(

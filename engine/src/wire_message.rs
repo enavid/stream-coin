@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::backtest::entity::ClosedTrade;
 use crate::candle::entity::CandlePayload;
 use crate::price::entity::Price;
 
@@ -11,6 +12,10 @@ pub enum WsMessage {
     Candle(CandlePayload),
     Signal(SignalPayload),
     OrderUpdate(OrderUpdatePayload),
+    /// A live-preview trade close (Loop 6h's `LiveTradeTracker`) or a
+    /// historical backtest's closed trade — same shape either way, so the
+    /// chart's trade overlay (Phase 7) renders both through one code path.
+    ClosedTrade(ClosedTrade),
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
@@ -258,6 +263,60 @@ mod tests {
         payload.stop_loss = Some(100_000);
         let json: Value = serde_json::to_value(&payload).unwrap();
         assert!(json["stop_loss"].is_number());
+    }
+
+    fn sample_closed_trade() -> ClosedTrade {
+        use crate::backtest::entity::TradeSide;
+        ClosedTrade::close(
+            "spread_threshold".to_string(),
+            TradeSide::Long,
+            100_000,
+            110_000,
+            Some(95_000),
+            Some(120_000),
+            1,
+            Utc::now(),
+            Utc::now(),
+        )
+    }
+
+    #[test]
+    fn closed_trade_message_serializes_with_type_closed_trade() {
+        let msg = WsMessage::ClosedTrade(sample_closed_trade());
+        let json: Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "closed_trade");
+    }
+
+    #[test]
+    fn closed_trade_message_fields_are_at_root_not_under_data_key() {
+        let msg = WsMessage::ClosedTrade(sample_closed_trade());
+        let json: Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["entry_price"], 100_000);
+        assert_eq!(json["exit_price"], 110_000);
+        assert!(
+            json["data"].is_null(),
+            "there must be no 'data' wrapper key"
+        );
+    }
+
+    #[test]
+    fn closed_trade_message_round_trips_serialize_deserialize() {
+        let msg = WsMessage::ClosedTrade(sample_closed_trade());
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn price_consumer_ignores_closed_trade_type_without_error() {
+        let msg = WsMessage::ClosedTrade(sample_closed_trade());
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        let is_price = matches!(parsed, WsMessage::PriceUpdate(_));
+        assert!(
+            !is_price,
+            "a closed_trade message must not match the price_update variant"
+        );
     }
 
     #[test]

@@ -81,7 +81,7 @@ impl TradeOutcome {
 /// A fully closed trade — one entry fill paired with its exit fill.
 /// Prices and quantity use the same scaled-`u64` convention as `Price`/
 /// `TradeRecord`; `pnl` is signed because a loss must be representable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClosedTrade {
     pub strategy_id: String,
     pub side: TradeSide,

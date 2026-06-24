@@ -226,6 +226,76 @@ async fn running_strategy_with_risk_reward_emits_signal_with_stop_loss_and_take_
 }
 
 #[actix_web::test]
+async fn ws_client_receives_closed_trade_event_for_live_strategy() {
+    use chrono::Utc;
+    use stream_coin::candle::entity::CandlePayload;
+
+    let state = build_state();
+    let broadcaster = state.broadcaster.clone();
+
+    let mut srv =
+        actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let mut conn = srv.ws_at("/v1/ws").await.unwrap();
+
+    // price_delta can emit both Buy and Sell, unlike spread_threshold (always
+    // Buy) — needed so the live preview actually has an opposite-side signal
+    // to close the position with.
+    let resp = srv
+        .post("/v1/strategies/start")
+        .send_json(&json!({
+            "strategy_id": "test-live-preview",
+            "strategy_type": "price_delta",
+            "exchange": "tabdeal",
+            "pair": "USDT/IRT",
+            "params": {"window": 2, "threshold": 0.05}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let candle_json = |close: u64, time_offset_secs: i64| -> String {
+        serde_json::to_string(&WsMessage::Candle(CandlePayload {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            interval: "1m".to_string(),
+            time: Utc::now() + chrono::Duration::seconds(time_offset_secs),
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 10,
+        }))
+        .unwrap()
+    };
+
+    // Window of 2: candle[0] seeds history; candle[1] (+10% move) emits Buy
+    // and opens the live position; candle[2] (-10% move from candle[1])
+    // emits Sell, which LiveTradeTracker pairs into a ClosedTrade.
+    broadcaster.send(candle_json(100_000, 0)).unwrap();
+    broadcaster.send(candle_json(110_000, 60)).unwrap();
+    broadcaster.send(candle_json(99_000, 120)).unwrap();
+
+    let deadline = Duration::from_millis(500);
+    loop {
+        match tokio::time::timeout(deadline, conn.next()).await {
+            Ok(Some(Ok(ws::Frame::Text(bytes)))) => {
+                let val: Value = serde_json::from_slice(&bytes).unwrap();
+                if val["type"] == "closed_trade" {
+                    assert_eq!(val["strategy_id"], "test-live-preview");
+                    assert_eq!(val["entry_price"], 110_000);
+                    assert_eq!(val["exit_price"], 99_000);
+                    assert!(val["pnl"].is_number());
+                    return;
+                }
+            }
+            Ok(Some(Ok(_))) => continue,
+            _ => panic!("WS client did not receive a closed_trade frame within the deadline"),
+        }
+    }
+}
+
+#[actix_web::test]
 async fn start_strategy_with_unknown_type_returns_error() {
     let state = build_state();
     let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
