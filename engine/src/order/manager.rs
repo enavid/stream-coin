@@ -278,8 +278,10 @@ impl OrderManager {
             );
         }
 
+        // `None` for filled_quantity: keep whatever the poller already recorded —
+        // a partial fill before the cancel is still real, held inventory.
         self.order_repository
-            .update_status(client_order_id, "cancelled", None, None)
+            .update_status(client_order_id, "cancelled", None, None, None)
             .await?;
 
         let mut cancelled = record;
@@ -459,7 +461,7 @@ impl OrderManager {
                         );
                         let _ = self
                             .order_repository
-                            .update_status(&req.client_order_id, "failed", None, None)
+                            .update_status(&req.client_order_id, "failed", None, None, None)
                             .await;
                         return Err(OrderManagerError::Adapter(e));
                     }
@@ -486,14 +488,14 @@ impl OrderManager {
                 );
                 let _ = self
                     .order_repository
-                    .update_status(&req.client_order_id, "failed", None, None)
+                    .update_status(&req.client_order_id, "failed", None, None, None)
                     .await;
                 return Err(OrderManagerError::Adapter(e));
             }
         };
 
         self.order_repository
-            .update_status(&req.client_order_id, "open", Some(&order_id.0), None)
+            .update_status(&req.client_order_id, "open", Some(&order_id.0), None, None)
             .await?;
 
         let mut placed = record.clone();
@@ -563,6 +565,7 @@ impl OrderManager {
             side: req.side.to_string(),
             order_type: req.order_type.to_string(),
             quantity: req.quantity,
+            filled_quantity: Decimal::ZERO,
             price: req.price,
             status: status.to_string(),
             exchange_order_id,
@@ -817,6 +820,7 @@ async fn poll_fill_status(ctx: FillPollContext) {
         let OrderStatusResult {
             status,
             fill_price: raw_fill_price,
+            filled_quantity,
         } = match adapter.get_order_status(&order_id).await {
             Ok(r) => r,
             Err(e) => {
@@ -839,13 +843,32 @@ async fn poll_fill_status(ctx: FillPollContext) {
         let fill_price = raw_fill_price.map(|p| p.to_string());
 
         if let Err(e) = repo
-            .update_status(&client_order_id, &status_str, Some(&order_id.0), None)
+            .update_status(
+                &client_order_id,
+                &status_str,
+                Some(&order_id.0),
+                None,
+                filled_quantity,
+            )
             .await
         {
             tracing::error!(
                 error = %e,
                 client_order_id = %client_order_id,
                 "failed to update order status in db"
+            );
+        }
+
+        if let Some(filled) = filled_quantity {
+            tracing::info!(
+                order_id = %order_id,
+                client_order_id = %client_order_id,
+                exchange = %exchange,
+                pair = %pair,
+                status = %status_str,
+                filled_quantity = %filled,
+                ordered_quantity = %quantity,
+                "fill poll recorded executed quantity"
             );
         }
 
@@ -1731,6 +1754,92 @@ mod tests {
         assert!(
             saw_filled_with_price,
             "must have received a filled OrderUpdate with fill_price"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn partial_fill_updates_filled_quantity() {
+        // M7: a partial fill reported by the poller must be persisted as the
+        // order's exact executed quantity, not left at zero.
+        let cfg = live_config();
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter.will_succeed_with("exch-pf").await;
+        adapter
+            .will_return_status(
+                OrderStatusResult::new(OrderStatus::PartiallyFilled)
+                    .with_filled_quantity(Decimal::new(40, 0)),
+            )
+            .await;
+        let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
+
+        manager
+            .place_order(order_req(OrderSide::Buy, 100))
+            .await
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let recs = repo.all_records().await;
+            if recs[0].filled_quantity == Decimal::new(40, 0) {
+                assert_eq!(recs[0].status, "partially_filled");
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!(
+                    "filled_quantity was never updated to 40 (got {})",
+                    recs[0].filled_quantity
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_after_partial_fill_keeps_filled_inventory_in_position() {
+        // M7 end-to-end: an order partially fills (poller records 40), then is
+        // cancelled. The 40 units already executed are still held — the net
+        // position must keep them instead of dropping to zero on cancel.
+        let cfg = live_config();
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter.will_succeed_with("exch-pf-cancel").await;
+        adapter
+            .will_return_status(
+                OrderStatusResult::new(OrderStatus::PartiallyFilled)
+                    .with_filled_quantity(Decimal::new(40, 0)),
+            )
+            .await;
+        let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
+
+        let req = order_req(OrderSide::Buy, 100);
+        let client_order_id = req.client_order_id.clone();
+        manager.place_order(req).await.unwrap();
+
+        // Wait for the poller to record the partial fill.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if repo.all_records().await[0].filled_quantity == Decimal::new(40, 0) {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("partial fill was never recorded");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        manager.cancel_order(&client_order_id).await.unwrap();
+
+        let recs = repo.all_records().await;
+        assert_eq!(recs[0].status, "cancelled");
+        assert_eq!(
+            recs[0].filled_quantity,
+            Decimal::new(40, 0),
+            "the partial fill must survive the cancel"
+        );
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert_eq!(
+            net,
+            Decimal::new(40, 0),
+            "cancelled-but-partially-filled inventory must remain in the position"
         );
     }
 

@@ -68,6 +68,11 @@ pub struct OrderStatusResult {
     /// Actual fill price returned by the exchange. `None` for non-filled statuses
     /// or when the exchange does not include price in the status response.
     pub fill_price: Option<Decimal>,
+    /// Cumulative base-currency quantity that has actually executed so far.
+    /// `None` when the exchange does not report it. Essential for partial fills:
+    /// a partially-filled order that is later cancelled still leaves exactly this
+    /// much real inventory held, which the position accounting must not lose.
+    pub filled_quantity: Option<Decimal>,
 }
 
 impl OrderStatusResult {
@@ -75,6 +80,7 @@ impl OrderStatusResult {
         Self {
             status,
             fill_price: None,
+            filled_quantity: None,
         }
     }
 
@@ -82,7 +88,14 @@ impl OrderStatusResult {
         Self {
             status: OrderStatus::Filled,
             fill_price: Some(fill_price),
+            filled_quantity: None,
         }
+    }
+
+    /// Builder: attach the cumulative executed quantity reported by the exchange.
+    pub fn with_filled_quantity(mut self, quantity: Decimal) -> Self {
+        self.filled_quantity = Some(quantity);
+        self
     }
 }
 
@@ -323,6 +336,15 @@ mod tests {
         let r = OrderStatusResult::new(OrderStatus::Open);
         assert_eq!(r.status, OrderStatus::Open);
         assert!(r.fill_price.is_none());
+        assert!(r.filled_quantity.is_none());
+    }
+
+    #[test]
+    fn order_status_result_with_filled_quantity_attaches_it() {
+        let r = OrderStatusResult::new(OrderStatus::PartiallyFilled)
+            .with_filled_quantity(Decimal::new(40, 0));
+        assert_eq!(r.status, OrderStatus::PartiallyFilled);
+        assert_eq!(r.filled_quantity, Some(Decimal::new(40, 0)));
     }
 
     #[test]

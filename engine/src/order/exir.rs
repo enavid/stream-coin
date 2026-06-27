@@ -166,9 +166,20 @@ impl ExirOrderAdapter {
                     .or_else(|| v["price"].as_str())
                     .and_then(|s| s.parse::<rust_decimal::Decimal>().ok())
                     .filter(|p| *p > rust_decimal::Decimal::ZERO);
+                // Exir reports the executed amount in `filled`, which may arrive as
+                // a JSON number or a string.
+                let filled_quantity = v["filled"]
+                    .as_str()
+                    .and_then(|s| s.parse::<rust_decimal::Decimal>().ok())
+                    .or_else(|| {
+                        v["filled"]
+                            .as_f64()
+                            .and_then(rust_decimal::Decimal::from_f64_retain)
+                    });
                 Ok(OrderStatusResult {
                     status: order_status,
                     fill_price,
+                    filled_quantity,
                 })
             }
             401 | 403 => Err(OrderAdapterError::AuthFailed),
@@ -502,6 +513,21 @@ mod tests {
             result.fill_price.is_some(),
             "filled_average_price must be parsed as fill_price"
         );
+    }
+
+    #[test]
+    fn adapter_status_partially_filled_extracts_filled_from_string() {
+        let body = r#"{"id":"abc","status":"partial","filled":"40"}"#;
+        let result = ExirOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.status, OrderStatus::PartiallyFilled);
+        assert_eq!(result.filled_quantity, Some(Decimal::new(40, 0)));
+    }
+
+    #[test]
+    fn adapter_status_partially_filled_extracts_filled_from_number() {
+        let body = r#"{"id":"abc","status":"partial","filled":40}"#;
+        let result = ExirOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.filled_quantity, Some(Decimal::new(40, 0)));
     }
 
     #[test]

@@ -12,6 +12,11 @@ pub struct OrderRecord {
     pub side: String,
     pub order_type: String,
     pub quantity: Decimal,
+    /// Cumulative base-currency quantity that has actually executed. `ZERO` for a
+    /// freshly placed order; updated by the fill poller as (partial) fills arrive.
+    /// Retained when an order ends so a partial-fill-then-cancel keeps its real
+    /// residual inventory in the position accounting.
+    pub filled_quantity: Decimal,
     pub price: Option<Decimal>,
     pub status: String,
     pub exchange_order_id: Option<String>,
@@ -34,25 +39,33 @@ pub trait OrderRepository: Send + Sync {
     /// Persists a new order record. Returns the assigned row `id`.
     async fn insert(&self, record: &OrderRecord) -> Result<i64, OrderRepositoryError>;
 
-    /// Updates the status (and optional exchange_order_id / fill_price) for an order
-    /// identified by `client_order_id`.
+    /// Updates the status (and optional exchange_order_id / fill_price /
+    /// filled_quantity) for an order identified by `client_order_id`.
+    ///
+    /// `filled_quantity`: `Some(q)` overwrites the cumulative executed quantity;
+    /// `None` leaves the stored value untouched — so cancelling an order preserves
+    /// whatever had already filled before the cancel.
     async fn update_status(
         &self,
         client_order_id: &str,
         status: &str,
         exchange_order_id: Option<&str>,
         fill_price: Option<Decimal>,
+        filled_quantity: Option<Decimal>,
     ) -> Result<(), OrderRepositoryError>;
 
     /// Returns the signed **net position** for the given exchange + pair: the sum
-    /// of buy quantities minus sell quantities over every order that still
-    /// represents real or pending exposure (`open`, `filled`, `partially_filled`).
-    /// `cancelled`, `failed`, and `dry_run` orders are excluded (no real exposure).
+    /// of buy quantities minus sell quantities over every order that carries real
+    /// or pending exposure. A positive value is net long, a negative value net short.
     ///
-    /// Used by the Order Manager to enforce position limits. A positive value is a
-    /// net long position, a negative value a net short. Partially-filled orders are
-    /// counted at full quantity (a conservative over-estimate that never lets the
-    /// cap be breached pending exact fill-quantity tracking).
+    /// Each order contributes (M7):
+    /// - `open` / `filled` / `partially_filled` → full `quantity` (the whole order
+    ///   is committed: the unfilled remainder can still execute, so the cap stays
+    ///   conservative).
+    /// - `cancelled` / `failed` → `filled_quantity` (the order is over, but whatever
+    ///   actually executed before it ended is still held inventory — counting this
+    ///   as zero would silently lose a partial-fill-then-cancel position).
+    /// - `dry_run` → nothing (no real exposure).
     async fn net_position(
         &self,
         exchange: &str,
@@ -115,6 +128,7 @@ impl OrderRepository for FakeOrderRepository {
         status: &str,
         exchange_order_id: Option<&str>,
         fill_price: Option<Decimal>,
+        filled_quantity: Option<Decimal>,
     ) -> Result<(), OrderRepositoryError> {
         let _ = fill_price;
         let mut recs = self.records.lock().await;
@@ -125,6 +139,9 @@ impl OrderRepository for FakeOrderRepository {
         record.status = status.to_string();
         if let Some(eid) = exchange_order_id {
             record.exchange_order_id = Some(eid.to_string());
+        }
+        if let Some(q) = filled_quantity {
+            record.filled_quantity = q;
         }
         record.updated_at = Utc::now();
         Ok(())
@@ -139,10 +156,16 @@ impl OrderRepository for FakeOrderRepository {
         let net = recs
             .iter()
             .filter(|r| r.exchange == exchange && r.pair == pair)
-            .filter(|r| matches!(r.status.as_str(), "open" | "filled" | "partially_filled"))
-            .fold(Decimal::ZERO, |acc, r| match r.side.as_str() {
-                "sell" => acc - r.quantity,
-                _ => acc + r.quantity,
+            .fold(Decimal::ZERO, |acc, r| {
+                let exposure = match r.status.as_str() {
+                    "open" | "filled" | "partially_filled" => r.quantity,
+                    "cancelled" | "failed" => r.filled_quantity,
+                    _ => Decimal::ZERO,
+                };
+                match r.side.as_str() {
+                    "sell" => acc - exposure,
+                    _ => acc + exposure,
+                }
             });
         Ok(net)
     }
@@ -200,6 +223,7 @@ mod tests {
             side: side.to_string(),
             order_type: "market".to_string(),
             quantity,
+            filled_quantity: Decimal::ZERO,
             price: None,
             status: status.to_string(),
             exchange_order_id: None,
@@ -231,7 +255,7 @@ mod tests {
         repo.insert(&make_record("uuid-1", "open", Decimal::new(100, 0)))
             .await
             .unwrap();
-        repo.update_status("uuid-1", "filled", Some("exch-001"), None)
+        repo.update_status("uuid-1", "filled", Some("exch-001"), None, None)
             .await
             .unwrap();
         let recs = repo.all_records().await;
@@ -243,7 +267,7 @@ mod tests {
     async fn fake_order_repository_update_status_unknown_id_returns_not_found() {
         let repo = FakeOrderRepository::new();
         let result = repo
-            .update_status("nonexistent", "filled", None, None)
+            .update_status("nonexistent", "filled", None, None, None)
             .await;
         assert!(matches!(result, Err(OrderRepositoryError::NotFound(_))));
     }
@@ -314,6 +338,119 @@ mod tests {
             net,
             Decimal::ZERO,
             "cancelled/failed/dry_run carry no real exposure"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_update_status_sets_filled_quantity_when_some() {
+        let repo = FakeOrderRepository::new();
+        repo.insert(&make_record("uuid-1", "open", Decimal::new(100, 0)))
+            .await
+            .unwrap();
+        repo.update_status(
+            "uuid-1",
+            "partially_filled",
+            None,
+            None,
+            Some(Decimal::new(40, 0)),
+        )
+        .await
+        .unwrap();
+        let recs = repo.all_records().await;
+        assert_eq!(recs[0].filled_quantity, Decimal::new(40, 0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_update_status_none_filled_quantity_preserves_existing() {
+        // A cancel passes None for filled_quantity — the partial fill recorded by
+        // the poller before the cancel must survive.
+        let repo = FakeOrderRepository::new();
+        repo.insert(&make_record("uuid-1", "open", Decimal::new(100, 0)))
+            .await
+            .unwrap();
+        repo.update_status(
+            "uuid-1",
+            "partially_filled",
+            None,
+            None,
+            Some(Decimal::new(40, 0)),
+        )
+        .await
+        .unwrap();
+        repo.update_status("uuid-1", "cancelled", None, None, None)
+            .await
+            .unwrap();
+        let recs = repo.all_records().await;
+        assert_eq!(recs[0].status, "cancelled");
+        assert_eq!(
+            recs[0].filled_quantity,
+            Decimal::new(40, 0),
+            "cancelling must not erase the quantity that already filled"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_net_position_counts_filled_inventory_of_cancelled_order() {
+        // M7: the headline money-safety bug. A buy that partially fills (40) and is
+        // then cancelled still leaves 40 units held — net_position must reflect
+        // that, not drop it to zero just because the order is `cancelled`.
+        let repo = FakeOrderRepository::new();
+        repo.insert(&make_record("uuid-1", "open", Decimal::new(100, 0)))
+            .await
+            .unwrap();
+        repo.update_status(
+            "uuid-1",
+            "partially_filled",
+            None,
+            None,
+            Some(Decimal::new(40, 0)),
+        )
+        .await
+        .unwrap();
+        repo.update_status("uuid-1", "cancelled", None, None, None)
+            .await
+            .unwrap();
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert_eq!(
+            net,
+            Decimal::new(40, 0),
+            "partial-fill-then-cancel inventory must remain in the net position"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_net_position_cancelled_with_no_fill_counts_zero() {
+        // Regression guard: a cancelled order that never filled carries no exposure.
+        let repo = FakeOrderRepository::new();
+        repo.insert(&make_record("uuid-1", "cancelled", Decimal::new(100, 0)))
+            .await
+            .unwrap();
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert_eq!(net, Decimal::ZERO);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_net_position_counts_partially_filled_at_full_quantity() {
+        // While still working, a partially-filled order counts at FULL quantity:
+        // the unfilled remainder can still execute, so the cap stays conservative.
+        let repo = FakeOrderRepository::new();
+        repo.insert(&make_record("uuid-1", "open", Decimal::new(100, 0)))
+            .await
+            .unwrap();
+        repo.update_status(
+            "uuid-1",
+            "partially_filled",
+            None,
+            None,
+            Some(Decimal::new(40, 0)),
+        )
+        .await
+        .unwrap();
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert_eq!(
+            net,
+            Decimal::new(100, 0),
+            "an active partial fill is still committed to its full quantity"
         );
     }
 

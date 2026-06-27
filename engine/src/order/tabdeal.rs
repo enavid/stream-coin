@@ -159,9 +159,13 @@ impl TabdealOrderAdapter {
                     .or_else(|| v["price"].as_str())
                     .and_then(|s| s.parse::<rust_decimal::Decimal>().ok())
                     .filter(|p| *p > rust_decimal::Decimal::ZERO);
+                let filled_quantity = v["executedQty"]
+                    .as_str()
+                    .and_then(|s| s.parse::<rust_decimal::Decimal>().ok());
                 Ok(OrderStatusResult {
                     status: order_status,
                     fill_price,
+                    filled_quantity,
                 })
             }
             401 | 403 => Err(OrderAdapterError::AuthFailed),
@@ -519,6 +523,22 @@ mod tests {
             result.fill_price.is_some(),
             "avgPrice must be parsed as fill_price"
         );
+    }
+
+    #[test]
+    fn adapter_status_partially_filled_extracts_executed_qty() {
+        let body =
+            r#"{"orderId":"1","status":"PARTIALLY_FILLED","executedQty":"40","avgPrice":"58000"}"#;
+        let result = TabdealOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert_eq!(result.status, OrderStatus::PartiallyFilled);
+        assert_eq!(result.filled_quantity, Some(Decimal::new(40, 0)));
+    }
+
+    #[test]
+    fn adapter_status_without_executed_qty_has_none_filled_quantity() {
+        let body = r#"{"orderId":"1","status":"NEW"}"#;
+        let result = TabdealOrderAdapter::parse_order_status_response(200, body).unwrap();
+        assert!(result.filled_quantity.is_none());
     }
 
     #[test]
