@@ -13,11 +13,12 @@ use crate::presentation::dto::ticker::{
 use crate::presentation::extractors::ValidatedJson;
 use crate::presentation::responses::{success_response, ApiError, FieldError};
 use crate::presentation::shared::app_state::AppState;
+use crate::presentation::shared::broadcast::BroadcastEnvelope;
 use crate::price::entity::Price;
 
 fn spawn_price_forwarder(
     mut rx: tokio::sync::mpsc::Receiver<Price>,
-    broadcaster: tokio::sync::broadcast::Sender<String>,
+    broadcaster: tokio::sync::broadcast::Sender<BroadcastEnvelope>,
     publisher: Option<Arc<dyn MessagePublisher>>,
     mut aggregators: Vec<CandleAggregator>,
     candle_history: crate::presentation::shared::app_state::CandleHistory,
@@ -48,7 +49,7 @@ fn spawn_price_forwarder(
                         continue;
                     }
                 };
-            let _ = broadcaster.send(payload.clone());
+            let _ = broadcaster.send(BroadcastEnvelope::public(payload.clone()));
             if let Some(ref pub_) = publisher {
                 let key = KafkaProducer::price_to_key(&price);
                 if let Err(e) = pub_.publish(&price_topic, &key, &payload).await {
@@ -103,7 +104,7 @@ fn spawn_price_forwarder(
                         }
                         match serde_json::to_string(&WsMessage::Candle(payload)) {
                             Ok(json) => {
-                                let _ = broadcaster.send(json);
+                                let _ = broadcaster.send(BroadcastEnvelope::public(json));
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, "failed to serialize candle");
@@ -120,7 +121,7 @@ fn spawn_price_forwarder(
                         if let Some(forming) = agg.current_candle() {
                             let payload = CandlePayload::from(&forming);
                             if let Ok(json) = serde_json::to_string(&WsMessage::Candle(payload)) {
-                                let _ = broadcaster.send(json);
+                                let _ = broadcaster.send(BroadcastEnvelope::public(json));
                             }
                         }
                     }
@@ -912,7 +913,7 @@ mod tests {
             received.is_ok(),
             "broadcaster must deliver the price even when Kafka publish fails"
         );
-        let payload = received.unwrap().unwrap();
+        let payload = received.unwrap().unwrap().payload;
         assert!(
             payload.contains("tabdeal"),
             "broadcast payload must contain the exchange name"
@@ -1168,8 +1169,9 @@ mod tests {
         let saw_candle = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match rx.recv().await {
-                    Ok(text) => {
-                        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                    Ok(envelope) => {
+                        let v: serde_json::Value =
+                            serde_json::from_str(&envelope.payload).unwrap_or_default();
                         if v["type"] == "candle" {
                             break true;
                         }

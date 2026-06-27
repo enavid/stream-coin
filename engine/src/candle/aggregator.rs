@@ -18,6 +18,17 @@ struct CandleState {
     close: u64,
 }
 
+/// Overflow-safe midpoint of two minor-unit prices (M1).
+///
+/// `(bid + ask) / 2` overflows `u64` once the sum exceeds `u64::MAX` — for prices
+/// near the top of the range this panics in debug and silently wraps in release,
+/// corrupting the candle. The bit-twiddling identity
+/// `(a & b) + ((a ^ b) >> 1)` computes `floor((a + b) / 2)` without ever forming
+/// the sum, so it never overflows.
+fn mid_price(bid: u64, ask: u64) -> u64 {
+    (bid & ask) + ((bid ^ ask) >> 1)
+}
+
 fn candle_open_time(t: DateTime<Utc>, interval: Interval) -> DateTime<Utc> {
     let secs = t.timestamp();
     let window = interval.as_secs() as i64;
@@ -39,7 +50,7 @@ impl CandleAggregator {
     /// falls outside the current window, otherwise returns `None`.
     pub fn push(&mut self, price: &Price) -> Option<Candle> {
         let open_time = candle_open_time(price.timestamp, self.interval);
-        let mid = (price.bid + price.ask) / 2;
+        let mid = mid_price(price.bid, price.ask);
 
         match &mut self.current {
             None => {
@@ -121,6 +132,41 @@ mod tests {
             ask,
             timestamp: ts.parse::<DateTime<Utc>>().unwrap(),
         }
+    }
+
+    #[test]
+    fn mid_price_matches_naive_average_for_small_values() {
+        assert_eq!(mid_price(100, 100), 100);
+        assert_eq!(mid_price(58_000, 58_100), 58_050);
+        assert_eq!(mid_price(0, 0), 0);
+        // floor behaviour for odd sums, identical to (a + b) / 2
+        assert_eq!(mid_price(100, 101), 100);
+        assert_eq!(mid_price(7, 2), 4);
+    }
+
+    #[test]
+    fn candle_mid_does_not_overflow_at_u64_max() {
+        // `(bid + ask) / 2` would overflow u64 here (panic in debug, wrap in
+        // release). The midpoint of u64::MAX with itself must be u64::MAX.
+        assert_eq!(mid_price(u64::MAX, u64::MAX), u64::MAX);
+        // A realistic near-max pair must not panic and must give the true floor.
+        let expected = (u128::from(u64::MAX) + u128::from(u64::MAX - 2)) / 2;
+        assert_eq!(u128::from(mid_price(u64::MAX, u64::MAX - 2)), expected);
+    }
+
+    #[test]
+    fn aggregator_push_at_u64_max_prices_does_not_panic() {
+        let mut agg =
+            CandleAggregator::new("tabdeal".into(), "USDT/IRT".into(), Interval::OneMinute);
+        // Before M1 this panicked on the `bid + ask` overflow.
+        let result = agg.push(&make_price(u64::MAX, u64::MAX, "2026-06-20T10:00:30Z"));
+        assert!(result.is_none(), "first tick opens a candle, closes none");
+        let forming = agg.current_candle().expect("a candle is forming");
+        assert_eq!(
+            forming.close,
+            u64::MAX,
+            "the mid of two u64::MAX prices is u64::MAX, computed without overflow"
+        );
     }
 
     #[test]

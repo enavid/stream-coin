@@ -42,7 +42,8 @@ fn parse_kline_item(market: &str, interval: Interval, item: &Value) -> Result<Ca
     let close = super::parse_minor_units(field_str(item, "close")?)?;
     let volume = super::parse_minor_units(field_str(item, "volume")?)?;
 
-    let pair = super::market_to_pair(market);
+    let pair = super::market_to_pair(market)
+        .ok_or_else(|| format!("unrecognized market quote suffix: {market}"))?;
 
     Ok(Candle {
         exchange: "coinex".to_string(),

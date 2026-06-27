@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
@@ -87,7 +86,7 @@ impl TabdealWsAdapter {
             pair: Self::parse_trading_pair(symbol),
             bid,
             ask,
-            timestamp: Utc::now(),
+            timestamp: crate::exchange::event_time_or_now(data["E"].as_i64(), "tabdeal"),
         })
     }
 
@@ -216,6 +215,15 @@ mod tests {
         let msg = depth_message("USDTIRT", "58000", "58100");
         let price = TabdealWsAdapter::parse_depth_message(&msg).unwrap();
         assert_eq!(price.ask, 58100);
+    }
+
+    #[test]
+    fn price_uses_exchange_event_time() {
+        // The fixture's `data.E` is the exchange event-time in epoch-millis; the
+        // price must carry it, not the engine's receive time (M2).
+        let msg = depth_message("USDTIRT", "58000", "58100");
+        let price = TabdealWsAdapter::parse_depth_message(&msg).unwrap();
+        assert_eq!(price.timestamp.timestamp_millis(), 1_657_530_675_579);
     }
 
     #[test]

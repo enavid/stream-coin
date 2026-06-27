@@ -14,12 +14,14 @@ use crate::infrastructure::db::order_repository::{
 };
 use crate::infrastructure::db::subscription_repository::SubscriptionRepository;
 use crate::order::circuit_breaker::{CircuitBreaker, CircuitBreakerError};
+use crate::order::circuit_breaker_store::CircuitBreakerStore;
 use crate::order::credential_resolver::{CredentialResolver, CredentialResolverError};
 use crate::order::entity::SafetyConfig;
 use crate::order::port::{
     OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderSide, OrderStatus,
     OrderStatusResult, OrderType,
 };
+use crate::presentation::shared::broadcast::BroadcastEnvelope;
 use crate::wire_message::{OrderUpdatePayload, SignalPayload, WsMessage};
 
 #[derive(Debug, Error)]
@@ -51,9 +53,12 @@ pub enum OrderManagerError {
 pub struct OrderManager {
     order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
     order_repository: Arc<dyn OrderRepository>,
-    broadcaster: broadcast::Sender<String>,
+    broadcaster: broadcast::Sender<BroadcastEnvelope>,
     pub safety_config: SafetyConfig,
     circuit_breaker: Arc<Mutex<CircuitBreaker>>,
+    /// Persists the circuit-breaker trip so it survives a restart and is shared
+    /// across instances (M9). `None` = in-memory only (no DB / test stubs).
+    circuit_breaker_store: Option<Arc<dyn CircuitBreakerStore>>,
     /// Interval between fill-status polls. Shorter in tests.
     fill_poll_interval: Duration,
     /// Tracks active fill-poller tasks by client_order_id so they can be aborted on cancel.
@@ -74,7 +79,7 @@ impl OrderManager {
     pub fn new(
         order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
         order_repository: Arc<dyn OrderRepository>,
-        broadcaster: broadcast::Sender<String>,
+        broadcaster: broadcast::Sender<BroadcastEnvelope>,
         safety_config: SafetyConfig,
     ) -> Self {
         Self::with_poll_interval(
@@ -89,7 +94,7 @@ impl OrderManager {
     pub fn with_poll_interval(
         order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
         order_repository: Arc<dyn OrderRepository>,
-        broadcaster: broadcast::Sender<String>,
+        broadcaster: broadcast::Sender<BroadcastEnvelope>,
         safety_config: SafetyConfig,
         fill_poll_interval: Duration,
     ) -> Self {
@@ -103,6 +108,7 @@ impl OrderManager {
             broadcaster,
             safety_config,
             circuit_breaker: Arc::new(Mutex::new(cb)),
+            circuit_breaker_store: None,
             fill_poll_interval,
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
             subscription_repository: None,
@@ -125,9 +131,58 @@ impl OrderManager {
         self
     }
 
+    /// Attaches a persistent circuit-breaker store so a trip survives restarts
+    /// and is shared across instances (M9). Call [`restore_circuit_breaker`] once
+    /// after construction to hydrate the in-memory breaker from it.
+    ///
+    /// [`restore_circuit_breaker`]: Self::restore_circuit_breaker
+    pub fn with_circuit_breaker_store(mut self, store: Arc<dyn CircuitBreakerStore>) -> Self {
+        self.circuit_breaker_store = Some(store);
+        self
+    }
+
+    /// Hydrates the in-memory breaker from persisted state at startup (M9). If a
+    /// previous run (or another instance) tripped the breaker, it comes back
+    /// tripped instead of silently re-arming.
+    pub async fn restore_circuit_breaker(&self) {
+        let Some(store) = &self.circuit_breaker_store else {
+            return;
+        };
+        match store.load_tripped().await {
+            Ok(tripped) => {
+                self.circuit_breaker.lock().await.restore_tripped(tripped);
+                if tripped {
+                    tracing::error!(
+                        "circuit breaker is TRIPPED from persisted state — order \
+                         placement halted until an admin reset"
+                    );
+                }
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                "failed to load persisted circuit breaker state — starting un-tripped"
+            ),
+        }
+    }
+
+    /// Best-effort persistence of the trip state; a store failure is logged but
+    /// never blocks order flow or the admin reset.
+    async fn persist_circuit_breaker_tripped(&self, tripped: bool) {
+        if let Some(store) = &self.circuit_breaker_store {
+            if let Err(e) = store.set_tripped(tripped).await {
+                tracing::error!(
+                    error = %e,
+                    tripped,
+                    "failed to persist circuit breaker state"
+                );
+            }
+        }
+    }
+
     /// Resets the circuit breaker. Admin-only endpoint calls this.
     pub async fn reset_circuit_breaker(&self) {
         self.circuit_breaker.lock().await.reset();
+        self.persist_circuit_breaker_tripped(false).await;
     }
 
     pub async fn circuit_breaker_is_tripped(&self) -> bool {
@@ -376,11 +431,22 @@ impl OrderManager {
 
             // Circuit breaker — only incremented after the position limit passes.
             {
-                let mut cb = self.circuit_breaker.lock().await;
-                cb.record_order()
-                    .map_err(|CircuitBreakerError::Tripped(_, _)| {
-                        OrderManagerError::CircuitBreakerTripped
-                    })?;
+                let (blocked, newly_tripped) = {
+                    let mut cb = self.circuit_breaker.lock().await;
+                    let was_tripped = cb.is_tripped();
+                    match cb.record_order() {
+                        Ok(()) => (false, false),
+                        Err(CircuitBreakerError::Tripped(_, _)) => (true, !was_tripped),
+                    }
+                };
+                // Persist a fresh trip outside the lock so the halt survives a
+                // restart / crash-loop and is visible to other instances (M9).
+                if newly_tripped {
+                    self.persist_circuit_breaker_tripped(true).await;
+                }
+                if blocked {
+                    return Err(OrderManagerError::CircuitBreakerTripped);
+                }
             }
 
             // Reserve the position by persisting the row while still holding the
@@ -530,6 +596,7 @@ impl OrderManager {
         let side = req.side.to_string();
         let quantity = req.quantity;
         let strategy_id = req.strategy_id.clone();
+        let user_id = placed.user_id;
         let repo = self.order_repository.clone();
         let broadcaster = self.broadcaster.clone();
         let poll_handles = self.poll_handles.clone();
@@ -544,6 +611,7 @@ impl OrderManager {
                 side,
                 quantity,
                 strategy_id,
+                user_id,
                 adapter,
                 repo,
                 broadcaster,
@@ -605,7 +673,11 @@ impl OrderManager {
         };
         match serde_json::to_string(&WsMessage::OrderUpdate(payload)) {
             Ok(json) => {
-                let _ = self.broadcaster.send(json);
+                // Route to the owning user only — order updates carry private
+                // trading activity and must not fan out to every WS client (C-WS).
+                let _ = self
+                    .broadcaster
+                    .send(BroadcastEnvelope::for_user(record.user_id, json));
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to serialize order update broadcast");
@@ -808,9 +880,11 @@ struct FillPollContext {
     side: String,
     quantity: Decimal,
     strategy_id: Option<String>,
+    /// Owning user — fill updates are routed privately to this user only (C-WS).
+    user_id: Option<i32>,
     adapter: Arc<dyn OrderAdapter>,
     repo: Arc<dyn OrderRepository>,
-    broadcaster: broadcast::Sender<String>,
+    broadcaster: broadcast::Sender<BroadcastEnvelope>,
     interval: Duration,
 }
 
@@ -823,6 +897,7 @@ async fn poll_fill_status(ctx: FillPollContext) {
         side,
         quantity,
         strategy_id,
+        user_id,
         adapter,
         repo,
         broadcaster,
@@ -903,7 +978,7 @@ async fn poll_fill_status(ctx: FillPollContext) {
         };
 
         if let Ok(json) = serde_json::to_string(&WsMessage::OrderUpdate(payload)) {
-            let _ = broadcaster.send(json);
+            let _ = broadcaster.send(BroadcastEnvelope::for_user(user_id, json));
         }
 
         if is_terminal {
@@ -925,12 +1000,12 @@ async fn poll_fill_status(ctx: FillPollContext) {
 /// without any Kafka round-trip.
 pub fn spawn_order_manager_listener(
     manager: Arc<OrderManager>,
-    broadcaster: broadcast::Sender<String>,
+    broadcaster: broadcast::Sender<BroadcastEnvelope>,
 ) -> AbortHandle {
     let mut rx = broadcaster.subscribe();
     let handle = tokio::spawn(async move {
         loop {
-            let text = match rx.recv().await {
+            let envelope = match rx.recv().await {
                 Ok(t) => t,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(
@@ -942,7 +1017,7 @@ pub fn spawn_order_manager_listener(
                 Err(_) => break,
             };
 
-            let msg: WsMessage = match serde_json::from_str(&text) {
+            let msg: WsMessage = match serde_json::from_str(&envelope.payload) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
@@ -998,7 +1073,7 @@ mod tests {
     fn build_manager(
         safety_config: SafetyConfig,
         adapter: FakeOrderAdapter,
-    ) -> (OrderManager, broadcast::Receiver<String>) {
+    ) -> (OrderManager, broadcast::Receiver<BroadcastEnvelope>) {
         let (broadcaster, rx) = broadcast::channel(32);
         let mut adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
         adapters.insert("tabdeal".to_string(), Arc::new(adapter));
@@ -1021,7 +1096,7 @@ mod tests {
     ) -> (
         Arc<OrderManager>,
         Arc<FakeOrderRepository>,
-        broadcast::Receiver<String>,
+        broadcast::Receiver<BroadcastEnvelope>,
     ) {
         let (broadcaster, rx) = broadcast::channel(32);
         let mut adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
@@ -1202,8 +1277,8 @@ mod tests {
             .await
             .unwrap();
 
-        let text = rx.try_recv().expect("order_update must be broadcast");
-        let msg: WsMessage = serde_json::from_str(&text).unwrap();
+        let env = rx.try_recv().expect("order_update must be broadcast");
+        let msg: WsMessage = serde_json::from_str(&env.payload).unwrap();
         assert!(matches!(msg, WsMessage::OrderUpdate(_)));
     }
 
@@ -1225,6 +1300,85 @@ mod tests {
         assert!(
             matches!(second, Err(OrderManagerError::CircuitBreakerTripped)),
             "second order (= threshold) must trip the circuit breaker"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn circuit_breaker_trip_survives_restart() {
+        use crate::order::circuit_breaker_store::{CircuitBreakerStore, FakeCircuitBreakerStore};
+
+        let store: Arc<dyn CircuitBreakerStore> = Arc::new(FakeCircuitBreakerStore::new());
+
+        // A persistent store shared across two manager instances models a
+        // restart: the second manager is a fresh process reading the same DB.
+        fn cb_config() -> SafetyConfig {
+            SafetyConfig {
+                dry_run: true,
+                circuit_breaker_max_orders: 2,
+                circuit_breaker_window_secs: 60,
+                ..SafetyConfig::default()
+            }
+        }
+        fn build_with_store(
+            cfg: SafetyConfig,
+            store: Arc<dyn CircuitBreakerStore>,
+        ) -> OrderManager {
+            let (broadcaster, _rx) = broadcast::channel(32);
+            let mut adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
+            adapters.insert(
+                "tabdeal".to_string(),
+                Arc::new(FakeOrderAdapter::new("tabdeal")),
+            );
+            OrderManager::with_poll_interval(
+                Arc::new(RwLock::new(adapters)),
+                Arc::new(FakeOrderRepository::new()),
+                broadcaster,
+                cfg,
+                Duration::from_millis(10),
+            )
+            .with_circuit_breaker_store(store)
+        }
+
+        // Instance 1 trips the breaker (threshold = 2).
+        let manager1 = build_with_store(cb_config(), store.clone());
+        manager1.restore_circuit_breaker().await; // starts un-tripped
+        manager1
+            .process_signal(&make_signal("buy", 0.9))
+            .await
+            .unwrap();
+        let tripped = manager1.process_signal(&make_signal("buy", 0.9)).await;
+        assert!(
+            matches!(tripped, Err(OrderManagerError::CircuitBreakerTripped)),
+            "second order must trip the breaker"
+        );
+        assert!(
+            store.load_tripped().await.unwrap(),
+            "the trip must be persisted to the shared store"
+        );
+
+        // Instance 2 = a restart. After hydrating from the same store it must
+        // come back TRIPPED and refuse orders, instead of re-arming.
+        let manager2 = build_with_store(cb_config(), store.clone());
+        assert!(
+            !manager2.circuit_breaker_is_tripped().await,
+            "before restore the fresh in-memory breaker is un-tripped"
+        );
+        manager2.restore_circuit_breaker().await;
+        assert!(
+            manager2.circuit_breaker_is_tripped().await,
+            "a persisted trip must survive the restart"
+        );
+        let after_restart = manager2.process_signal(&make_signal("buy", 0.9)).await;
+        assert!(
+            matches!(after_restart, Err(OrderManagerError::CircuitBreakerTripped)),
+            "a restarted instance must keep rejecting orders until an admin reset"
+        );
+
+        // An admin reset clears the persisted state so a later restart re-arms.
+        manager2.reset_circuit_breaker().await;
+        assert!(
+            !store.load_tripped().await.unwrap(),
+            "reset must clear the persisted trip"
         );
     }
 
@@ -1737,10 +1891,10 @@ mod tests {
 
         manager.place_order(None, req).await.unwrap();
 
-        let text = rx
+        let env = rx
             .try_recv()
             .expect("order_update must be broadcast after placement");
-        let msg: WsMessage = serde_json::from_str(&text).unwrap();
+        let msg: WsMessage = serde_json::from_str(&env.payload).unwrap();
         assert!(matches!(msg, WsMessage::OrderUpdate(_)));
         if let WsMessage::OrderUpdate(payload) = msg {
             assert_eq!(payload.status, "open");
@@ -1832,8 +1986,8 @@ mod tests {
 
         // Drain broadcast messages, find the "filled" update
         let mut saw_filled_with_price = false;
-        while let Ok(text) = rx.try_recv() {
-            if let Ok(WsMessage::OrderUpdate(p)) = serde_json::from_str::<WsMessage>(&text) {
+        while let Ok(env) = rx.try_recv() {
+            if let Ok(WsMessage::OrderUpdate(p)) = serde_json::from_str::<WsMessage>(&env.payload) {
                 if p.status == "filled" {
                     assert_ne!(
                         p.fill_price.as_deref(),
@@ -1977,7 +2131,7 @@ mod tests {
         safety_config: SafetyConfig,
         adapter: FakeOrderAdapter,
         sub_repo: Arc<FakeSubscriptionRepository>,
-    ) -> (OrderManager, broadcast::Receiver<String>) {
+    ) -> (OrderManager, broadcast::Receiver<BroadcastEnvelope>) {
         let (broadcaster, rx) = broadcast::channel(32);
         let mut adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
         adapters.insert("tabdeal".to_string(), Arc::new(adapter));

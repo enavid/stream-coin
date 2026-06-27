@@ -63,6 +63,19 @@ impl CircuitBreaker {
         Ok(())
     }
 
+    /// Hydrates the latched trip state from persistent storage at startup (M9).
+    /// When `tripped` is true the breaker blocks immediately — the rolling
+    /// window stays empty because a tripped breaker rejects regardless of count.
+    pub fn restore_tripped(&mut self, tripped: bool) {
+        self.tripped = tripped;
+        if tripped {
+            tracing::warn!(
+                "circuit breaker restored to TRIPPED from persisted state — \
+                 order placement halted until admin reset"
+            );
+        }
+    }
+
     /// Admin-only manual reset.
     pub fn reset(&mut self) {
         self.tripped = false;

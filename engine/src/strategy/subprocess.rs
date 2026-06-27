@@ -14,8 +14,10 @@ impl Drop for AbortOnDrop {
 }
 
 use crate::infrastructure::db::signal_repository::{SignalRecord, SignalRepository};
+use crate::presentation::shared::broadcast::BroadcastEnvelope;
 use crate::wire_message::{SignalPayload, WsMessage};
 
+#[derive(Clone)]
 pub struct SubprocessConfig {
     pub strategy_id: String,
     pub code: String,
@@ -28,14 +30,27 @@ pub struct SubprocessConfig {
 /// On Linux, a seccomp filter blocking socket/connect/bind is applied inside the
 /// Python process via ctypes before any user code runs.
 ///
-/// Aborting the returned handle kills the subprocess (via `kill_on_drop`).
+/// The subprocess runs under a restart supervisor (M10): if the Python process
+/// exits or crashes, it is restarted with exponential backoff instead of the
+/// strategy silently going dark. Aborting the returned handle stops supervision
+/// and kills the in-flight subprocess (via `kill_on_drop`).
 pub fn spawn_subprocess_runner(
     config: SubprocessConfig,
-    broadcaster: broadcast::Sender<String>,
+    broadcaster: broadcast::Sender<BroadcastEnvelope>,
     signal_repository: Option<Arc<dyn SignalRepository>>,
 ) -> AbortHandle {
-    let handle = tokio::spawn(run_subprocess(config, broadcaster, signal_repository));
-    handle.abort_handle()
+    let name = format!("python:{}", config.strategy_id);
+    crate::strategy::supervisor::spawn_supervised(
+        name,
+        crate::strategy::supervisor::BackoffPolicy::default(),
+        move || {
+            run_subprocess(
+                config.clone(),
+                broadcaster.clone(),
+                signal_repository.clone(),
+            )
+        },
+    )
 }
 
 /// Python seccomp preamble injected before user strategy code on Linux x86_64/aarch64.
@@ -135,7 +150,7 @@ pub(crate) fn build_launcher_script(strategy_id: &str, user_code: &str) -> Strin
 
 async fn run_subprocess(
     config: SubprocessConfig,
-    broadcaster: broadcast::Sender<String>,
+    broadcaster: broadcast::Sender<BroadcastEnvelope>,
     signal_repository: Option<Arc<dyn SignalRepository>>,
 ) {
     if !is_safe_strategy_id(&config.strategy_id) {
@@ -197,7 +212,7 @@ async fn run_subprocess(
     let mut stdin_writer = stdin;
     let stdin_task = tokio::spawn(async move {
         loop {
-            let text = match rx.recv().await {
+            let envelope = match rx.recv().await {
                 Ok(t) => t,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(
@@ -209,7 +224,7 @@ async fn run_subprocess(
                 Err(_) => break,
             };
 
-            let msg: WsMessage = match serde_json::from_str(&text) {
+            let msg: WsMessage = match serde_json::from_str(&envelope.payload) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
@@ -277,7 +292,7 @@ async fn run_subprocess(
 
             match serde_json::to_string(&WsMessage::Signal(payload.clone())) {
                 Ok(json) => {
-                    let _ = broadcaster_clone.send(json.clone());
+                    let _ = broadcaster_clone.send(BroadcastEnvelope::public(json));
                     // Kafka publish is handled by the order manager listener consuming the broadcaster
                     let _ = signals_topic.as_str(); // referenced to avoid unused warning
                 }
@@ -417,13 +432,15 @@ for line in sys.stdin:
 
         // Allow subprocess to start before sending the candle
         tokio::time::sleep(Duration::from_millis(400)).await;
-        tx.send(make_candle_msg()).unwrap();
+        tx.send(BroadcastEnvelope::public(make_candle_msg()))
+            .unwrap();
 
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 match rx.recv().await {
-                    Ok(text) => {
-                        if let Ok(WsMessage::Signal(sig)) = serde_json::from_str::<WsMessage>(&text)
+                    Ok(env) => {
+                        if let Ok(WsMessage::Signal(sig)) =
+                            serde_json::from_str::<WsMessage>(&env.payload)
                         {
                             return sig;
                         }
@@ -500,13 +517,15 @@ for line in sys.stdin:
         );
 
         tokio::time::sleep(Duration::from_millis(400)).await;
-        tx.send(make_candle_msg()).unwrap();
+        tx.send(BroadcastEnvelope::public(make_candle_msg()))
+            .unwrap();
 
         let action = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 match rx.recv().await {
-                    Ok(text) => {
-                        if let Ok(WsMessage::Signal(sig)) = serde_json::from_str::<WsMessage>(&text)
+                    Ok(env) => {
+                        if let Ok(WsMessage::Signal(sig)) =
+                            serde_json::from_str::<WsMessage>(&env.payload)
                         {
                             return sig.action;
                         }
@@ -528,7 +547,7 @@ for line in sys.stdin:
 
     #[tokio::test(flavor = "current_thread")]
     async fn subprocess_killed_on_stop() {
-        let (tx, _) = broadcast::channel::<String>(16);
+        let (tx, _) = broadcast::channel::<BroadcastEnvelope>(16);
 
         let handle = spawn_subprocess_runner(
             SubprocessConfig {
@@ -567,7 +586,7 @@ for line in sys.stdin:
         use rust_decimal::Decimal;
         use std::collections::HashMap;
 
-        let (tx, _) = broadcast::channel::<String>(32);
+        let (tx, _) = broadcast::channel::<BroadcastEnvelope>(32);
 
         // Order manager in dry_run so no real exchange calls are made
         let cfg = SafetyConfig {
@@ -600,7 +619,8 @@ for line in sys.stdin:
 
         // Wait for subprocess to start
         tokio::time::sleep(Duration::from_millis(400)).await;
-        tx.send(make_candle_msg()).unwrap();
+        tx.send(BroadcastEnvelope::public(make_candle_msg()))
+            .unwrap();
 
         // Wait for the order to be persisted
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -656,8 +676,9 @@ print(json.dumps({
         let action = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 match rx.recv().await {
-                    Ok(text) => {
-                        if let Ok(WsMessage::Signal(sig)) = serde_json::from_str::<WsMessage>(&text)
+                    Ok(env) => {
+                        if let Ok(WsMessage::Signal(sig)) =
+                            serde_json::from_str::<WsMessage>(&env.payload)
                         {
                             return sig.action;
                         }

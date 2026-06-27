@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
@@ -76,12 +75,18 @@ impl CoinexWsAdapter {
             .ok_or_else(|| "invalid ask price".to_string())
             .and_then(Self::parse_price_units)?;
 
+        let pair = super::market_to_pair(market)
+            .ok_or_else(|| format!("unrecognized market quote suffix, dropping: {market}"))?;
+
         Ok(Price {
             exchange: ExchangeId::new("coinex"),
-            pair: super::market_to_pair(market),
+            pair,
             bid,
             ask,
-            timestamp: Utc::now(),
+            timestamp: crate::exchange::event_time_or_now(
+                data["depth"]["updated_at"].as_i64(),
+                "coinex",
+            ),
         })
     }
 
@@ -230,6 +235,14 @@ mod tests {
         let msg = depth_update("BTCUSDT", "30000.00", "30001.00");
         let price = CoinexWsAdapter::parse_depth_message(&msg).unwrap();
         assert_eq!(price.exchange.to_string(), "coinex");
+    }
+
+    #[test]
+    fn price_uses_exchange_event_time() {
+        // CoinEx carries the event-time as `depth.updated_at` in epoch-millis (M2).
+        let msg = depth_update("BTCUSDT", "30000.00", "30001.00");
+        let price = CoinexWsAdapter::parse_depth_message(&msg).unwrap();
+        assert_eq!(price.timestamp.timestamp_millis(), 1_657_530_675_579);
     }
 
     #[test]

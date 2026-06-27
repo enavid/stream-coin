@@ -17,6 +17,9 @@ use crate::infrastructure::db::exchange_repository::{ExchangeRepository, Exchang
 use crate::infrastructure::db::order_repository::{
     OrderRecord, OrderRepository, OrderRepositoryError,
 };
+use crate::infrastructure::db::python_strategy_repository::{
+    PythonStrategyRecord, PythonStrategyRepository, PythonStrategyRepositoryError,
+};
 use crate::infrastructure::db::subscription_repository::{
     SubscriptionRecord, SubscriptionRepository, SubscriptionRepositoryError,
 };
@@ -26,6 +29,7 @@ use crate::infrastructure::db::ticker_repository::{
 use crate::infrastructure::db::user_repository::{
     RoleRecord, UserRecord, UserRepository, UserRepositoryError,
 };
+use crate::order::circuit_breaker_store::{CircuitBreakerStore, CircuitBreakerStoreError};
 use crate::price::entity::MarketType;
 
 /// Postgres-backed `AssetRepository`. Reads the canonical `assets` table
@@ -712,11 +716,41 @@ impl PostgresSubscriptionRepository {
 }
 
 /// Parses an `Option<String>` (read from a NUMERIC column via `::text` cast) into
-/// `Option<Decimal>`.  An unparseable string is treated as `None` rather than
-/// propagating an error — the value is a user-supplied override, not a financial
-/// transaction amount.
-fn parse_decimal(s: Option<String>) -> Option<rust_decimal::Decimal> {
-    s.and_then(|v| v.parse().ok())
+/// `Option<Decimal>`.
+///
+/// A SQL `NULL` (`None`) means "no value" and yields `Ok(None)`. A **non-null but
+/// unparseable** string is an error (M6): the previous behaviour silently mapped
+/// corruption to `None`, and for a column like `max_position_size` that `None`
+/// reads as "no position cap" — silently removing a risk limit. We surface the
+/// corruption instead so the caller fails closed rather than trading uncapped.
+fn parse_decimal(s: Option<String>) -> Result<Option<rust_decimal::Decimal>, String> {
+    match s {
+        None => Ok(None),
+        Some(v) => v
+            .parse()
+            .map(Some)
+            .map_err(|e| format!("unparseable decimal {v:?}: {e}")),
+    }
+}
+
+/// Builds a [`SubscriptionRecord`] from a row, failing closed if a NUMERIC
+/// override (notably `max_position_size`, a risk limit) is corrupt rather than
+/// silently dropping it (M6).
+fn subscription_from_row(
+    r: &sqlx::postgres::PgRow,
+) -> Result<SubscriptionRecord, SubscriptionRepositoryError> {
+    let max_position_size = parse_decimal(r.get("max_position_size")).map_err(|e| {
+        SubscriptionRepositoryError::Database(format!("corrupt max_position_size: {e}"))
+    })?;
+    Ok(SubscriptionRecord {
+        id: r.get("id"),
+        user_id: r.get("user_id"),
+        strategy_id: r.get("strategy_id"),
+        active: r.get("active"),
+        max_position_size,
+        confidence_threshold: r.get("confidence_threshold"),
+        created_at: r.get("created_at"),
+    })
 }
 
 #[async_trait]
@@ -755,15 +789,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             }
         })?;
 
-        Ok(SubscriptionRecord {
-            id: row.get("id"),
-            user_id: row.get("user_id"),
-            strategy_id: row.get("strategy_id"),
-            active: row.get("active"),
-            max_position_size: parse_decimal(row.get("max_position_size")),
-            confidence_threshold: row.get("confidence_threshold"),
-            created_at: row.get("created_at"),
-        })
+        subscription_from_row(&row)
     }
 
     async fn get(
@@ -782,15 +808,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .await
         .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
 
-        Ok(row.map(|r| SubscriptionRecord {
-            id: r.get("id"),
-            user_id: r.get("user_id"),
-            strategy_id: r.get("strategy_id"),
-            active: r.get("active"),
-            max_position_size: parse_decimal(r.get("max_position_size")),
-            confidence_threshold: r.get("confidence_threshold"),
-            created_at: r.get("created_at"),
-        }))
+        row.map(|r| subscription_from_row(&r)).transpose()
     }
 
     async fn list_for_user(
@@ -810,18 +828,9 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .await
         .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| SubscriptionRecord {
-                id: r.get("id"),
-                user_id: r.get("user_id"),
-                strategy_id: r.get("strategy_id"),
-                active: r.get("active"),
-                max_position_size: parse_decimal(r.get("max_position_size")),
-                confidence_threshold: r.get("confidence_threshold"),
-                created_at: r.get("created_at"),
-            })
-            .collect())
+        rows.iter()
+            .map(subscription_from_row)
+            .collect::<Result<Vec<_>, _>>()
     }
 
     async fn list_active_for_strategy(
@@ -842,18 +851,9 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .await
         .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| SubscriptionRecord {
-                id: r.get("id"),
-                user_id: r.get("user_id"),
-                strategy_id: r.get("strategy_id"),
-                active: r.get("active"),
-                max_position_size: parse_decimal(r.get("max_position_size")),
-                confidence_threshold: r.get("confidence_threshold"),
-                created_at: r.get("created_at"),
-            })
-            .collect())
+        rows.iter()
+            .map(subscription_from_row)
+            .collect::<Result<Vec<_>, _>>()
     }
 
     async fn update(
@@ -881,15 +881,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?
         .ok_or(SubscriptionRepositoryError::NotFound(id))?;
 
-        Ok(SubscriptionRecord {
-            id: row.get("id"),
-            user_id: row.get("user_id"),
-            strategy_id: row.get("strategy_id"),
-            active: row.get("active"),
-            max_position_size: parse_decimal(row.get("max_position_size")),
-            confidence_threshold: row.get("confidence_threshold"),
-            created_at: row.get("created_at"),
-        })
+        subscription_from_row(&row)
     }
 
     async fn delete(&self, id: i64) -> Result<(), SubscriptionRepositoryError> {
@@ -949,7 +941,8 @@ impl PostgresOrderRepository {
             order_type: row.get("order_type"),
             quantity: parse_required("quantity")?,
             filled_quantity: parse_required("filled_quantity")?,
-            price: parse_decimal(row.get::<Option<String>, _>("price")),
+            price: parse_decimal(row.get::<Option<String>, _>("price"))
+                .map_err(|e| OrderRepositoryError::Database(format!("unparseable price: {e}")))?,
             status: row.get("status"),
             exchange_order_id: row.get("exchange_order_id"),
             client_order_id: row.get("client_order_id"),
@@ -1096,5 +1089,178 @@ impl OrderRepository for PostgresOrderRepository {
             .await
             .map_err(|e| OrderRepositoryError::Database(e.to_string()))?;
         rows.iter().map(Self::row_to_record).collect()
+    }
+}
+
+/// Postgres-backed `PythonStrategyRepository` (M12). Persists deployed Python
+/// strategy code in the `python_strategies` table (migration `0006`) so
+/// `/v1/backtest/run` and the live subprocess runners can resolve a strategy by
+/// id. Without this wiring `python_strategy_repository` was `None` in
+/// production, permanently 400ing every backtest request.
+pub struct PostgresPythonStrategyRepository {
+    pool: PgPool,
+}
+
+impl PostgresPythonStrategyRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    fn row_to_record(
+        row: &sqlx::postgres::PgRow,
+    ) -> Result<PythonStrategyRecord, PythonStrategyRepositoryError> {
+        Ok(PythonStrategyRecord {
+            strategy_id: row.get("strategy_id"),
+            name: row.get("name"),
+            code: row.get("code"),
+            params_json: row.get("params_json"),
+            created_at: row.get("created_at"),
+        })
+    }
+}
+
+#[async_trait]
+impl PythonStrategyRepository for PostgresPythonStrategyRepository {
+    async fn save(
+        &self,
+        record: &PythonStrategyRecord,
+    ) -> Result<(), PythonStrategyRepositoryError> {
+        // Idempotent upsert keyed by strategy_id: redeploying the same id
+        // replaces the code/name/params rather than violating the UNIQUE
+        // constraint, mirroring the in-memory Fake's retain-then-push.
+        sqlx::query(
+            "INSERT INTO python_strategies (strategy_id, name, code, params_json, created_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (strategy_id) DO UPDATE
+             SET name = EXCLUDED.name,
+                 code = EXCLUDED.code,
+                 params_json = EXCLUDED.params_json",
+        )
+        .bind(&record.strategy_id)
+        .bind(&record.name)
+        .bind(&record.code)
+        .bind(&record.params_json)
+        .bind(record.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| PythonStrategyRepositoryError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get(
+        &self,
+        strategy_id: &str,
+    ) -> Result<PythonStrategyRecord, PythonStrategyRepositoryError> {
+        let row = sqlx::query(
+            "SELECT strategy_id, name, code, params_json, created_at
+             FROM   python_strategies
+             WHERE  strategy_id = $1",
+        )
+        .bind(strategy_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| PythonStrategyRepositoryError::Database(e.to_string()))?
+        .ok_or_else(|| PythonStrategyRepositoryError::NotFound(strategy_id.to_string()))?;
+
+        Self::row_to_record(&row)
+    }
+
+    async fn list_active(
+        &self,
+    ) -> Result<Vec<PythonStrategyRecord>, PythonStrategyRepositoryError> {
+        let rows = sqlx::query(
+            "SELECT strategy_id, name, code, params_json, created_at
+             FROM   python_strategies
+             ORDER  BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| PythonStrategyRepositoryError::Database(e.to_string()))?;
+
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn remove(&self, strategy_id: &str) -> Result<(), PythonStrategyRepositoryError> {
+        sqlx::query("DELETE FROM python_strategies WHERE strategy_id = $1")
+            .bind(strategy_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PythonStrategyRepositoryError::Database(e.to_string()))?;
+        Ok(())
+    }
+}
+
+/// Postgres-backed `CircuitBreakerStore` (M9). Persists the latched trip bit in
+/// the single-row `circuit_breaker_state` table (migration `0019`) so a trip
+/// survives a restart and is shared across instances.
+pub struct PostgresCircuitBreakerStore {
+    pool: PgPool,
+}
+
+impl PostgresCircuitBreakerStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl CircuitBreakerStore for PostgresCircuitBreakerStore {
+    async fn load_tripped(&self) -> Result<bool, CircuitBreakerStoreError> {
+        // No row yet (fresh deploy) reads as "not tripped".
+        let row = sqlx::query("SELECT tripped FROM circuit_breaker_state WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| CircuitBreakerStoreError::Database(e.to_string()))?;
+        Ok(row.map(|r| r.get::<bool, _>("tripped")).unwrap_or(false))
+    }
+
+    async fn set_tripped(&self, tripped: bool) -> Result<(), CircuitBreakerStoreError> {
+        sqlx::query(
+            "INSERT INTO circuit_breaker_state (id, tripped, updated_at)
+             VALUES (1, $1, now())
+             ON CONFLICT (id) DO UPDATE
+             SET tripped = EXCLUDED.tripped, updated_at = now()",
+        )
+        .bind(tripped)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| CircuitBreakerStoreError::Database(e.to_string()))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_decimal;
+    use rust_decimal::Decimal;
+
+    #[test]
+    fn parse_decimal_null_is_none() {
+        assert_eq!(parse_decimal(None), Ok(None));
+    }
+
+    #[test]
+    fn parse_decimal_valid_value_round_trips() {
+        assert_eq!(
+            parse_decimal(Some("1000.50".to_string())),
+            Ok(Some(Decimal::new(100050, 2)))
+        );
+    }
+
+    #[test]
+    fn corrupt_max_position_size_errors_not_silently_none() {
+        // The bug: a non-null but unparseable risk limit became `None`, which
+        // the order manager reads as "no position cap". It must error instead so
+        // the caller fails closed rather than trading uncapped.
+        let result = parse_decimal(Some("not-a-number".to_string()));
+        assert!(
+            result.is_err(),
+            "a corrupt NUMERIC must be an error, never a silent None that removes the cap"
+        );
+    }
+
+    #[test]
+    fn parse_decimal_empty_string_errors() {
+        assert!(parse_decimal(Some(String::new())).is_err());
     }
 }

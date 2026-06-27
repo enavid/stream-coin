@@ -1,18 +1,28 @@
-use actix_web::{web, Error, HttpRequest, HttpResponse};
+use actix_web::{web, Error, HttpMessage, HttpRequest, HttpResponse};
 use actix_ws::Message;
 use futures_util::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::presentation::middlewares::jwt::AuthContext;
 use crate::presentation::shared::app_state::AppState;
 
-/// Upgrades the connection to a WebSocket. Forwards every message published
-/// on `AppState::broadcaster` to this client, while answering pings and the
-/// close handshake from the client's incoming stream.
+/// Upgrades the connection to a WebSocket. Forwards messages published on
+/// `AppState::broadcaster` to this client, filtered by audience so that
+/// per-user order updates only reach their owner (C-WS), while answering pings
+/// and the close handshake from the client's incoming stream.
+///
+/// The `jwt_middleware` has already validated the connection's token (passed in
+/// the query string for WS) and inserted an [`AuthContext`]; we read the
+/// authenticated `user_id` here to scope private envelopes. A connection
+/// without an `AuthContext` (auth-disabled dev mode inserts a wildcard context;
+/// a genuinely anonymous socket has none) receives public market data only.
 pub async fn ws_index(
     req: HttpRequest,
     body: web::Payload,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, Error> {
+    let session_user = req.extensions().get::<AuthContext>().map(|ctx| ctx.user_id);
+
     let (response, mut session, mut msg_stream) = actix_ws::handle(&req, body)?;
     let mut rx = state.broadcaster.subscribe();
 
@@ -32,8 +42,11 @@ pub async fn ws_index(
                 }
                 update = rx.recv() => {
                     match update {
-                        Ok(text) => {
-                            if session.text(text).await.is_err() {
+                        Ok(envelope) => {
+                            if !envelope.audience.should_deliver_to(session_user) {
+                                continue;
+                            }
+                            if session.text(envelope.payload).await.is_err() {
                                 break;
                             }
                         }
@@ -63,8 +76,13 @@ mod tests {
     use super::*;
     use crate::exchange::registry::ExchangeRegistry;
     use crate::presentation::shared::app_state::{AdapterFactory, AppState};
+    use crate::presentation::shared::broadcast::{Audience, BroadcastEnvelope};
 
     fn build_state() -> web::Data<AppState> {
+        build_state_with_secret(None)
+    }
+
+    fn build_state_with_secret(jwt_secret: Option<&str>) -> web::Data<AppState> {
         web::Data::new(AppState {
             redis: None,
             exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
@@ -73,7 +91,7 @@ mod tests {
             clients: Arc::new(Mutex::new(HashMap::new())),
             publisher: None,
             broadcaster: AppState::new_broadcaster(),
-            jwt_secret: None,
+            jwt_secret: jwt_secret.map(|s| Arc::new(s.to_string())),
             ticker_repository: None,
             running_strategies: Arc::new(Mutex::new(HashMap::new())),
             strategy_repository: None,
@@ -122,7 +140,9 @@ mod tests {
         let mut conn = srv.ws_at("/ws").await.unwrap();
 
         broadcaster
-            .send(r#"{"exchange":"tabdeal","pair":"USDT/IRT"}"#.to_string())
+            .send(BroadcastEnvelope::public(
+                r#"{"exchange":"tabdeal","pair":"USDT/IRT"}"#.to_string(),
+            ))
             .unwrap();
 
         let item = conn.next().await.unwrap().unwrap();
@@ -148,7 +168,9 @@ mod tests {
         let mut conn_a = srv.ws_at("/ws").await.unwrap();
         let mut conn_b = srv.ws_at("/ws").await.unwrap();
 
-        broadcaster.send("hello".to_string()).unwrap();
+        broadcaster
+            .send(BroadcastEnvelope::public("hello".to_string()))
+            .unwrap();
 
         let item_a = conn_a.next().await.unwrap().unwrap();
         let item_b = conn_b.next().await.unwrap().unwrap();
@@ -175,14 +197,16 @@ mod tests {
         // so the ws_handler task cannot drain the channel first.
         // This forces RecvError::Lagged when the task eventually runs.
         for i in 0..300u32 {
-            let _ = broadcaster.send(format!("{i}"));
+            let _ = broadcaster.send(BroadcastEnvelope::public(format!("{i}")));
         }
 
         // Yield to let the spawned ws_handler task run and hit Lagged.
         tokio::task::yield_now().await;
 
         // A message sent AFTER the lag must still reach the client.
-        broadcaster.send("sentinel".to_string()).unwrap();
+        broadcaster
+            .send(BroadcastEnvelope::public("sentinel".to_string()))
+            .unwrap();
 
         let deadline = Duration::from_millis(500);
         loop {
@@ -221,7 +245,7 @@ mod tests {
             take_profit: None,
         };
         let json = serde_json::to_string(&WsMessage::Signal(payload)).unwrap();
-        broadcaster.send(json).unwrap();
+        broadcaster.send(BroadcastEnvelope::public(json)).unwrap();
 
         let item = conn.next().await.unwrap().unwrap();
         if let ws::Frame::Text(bytes) = item {
@@ -232,6 +256,62 @@ mod tests {
         } else {
             panic!("expected a text frame carrying the signal JSON");
         }
+    }
+
+    #[actix_web::test]
+    async fn ws_only_delivers_own_user_order_updates() {
+        use crate::presentation::middlewares::jwt::{jwt_middleware, mint_token};
+        use actix_web::middleware::from_fn;
+
+        // Two authenticated sockets, users 1 and 2, behind the real JWT middleware
+        // (which reads the token from the query string for /v1/ws and inserts the
+        // AuthContext the handler scopes private envelopes by).
+        let secret = "ws-routing-secret";
+        let token1 = mint_token("1", secret, 3600);
+        let token2 = mint_token("2", secret, 3600);
+
+        let state = build_state_with_secret(Some(secret));
+        let broadcaster = state.broadcaster.clone();
+
+        let mut srv = actix_test::start(move || {
+            App::new().app_data(state.clone()).service(
+                web::scope("/v1")
+                    .wrap(from_fn(jwt_middleware))
+                    .route("/ws", web::get().to(ws_index)),
+            )
+        });
+
+        let mut conn1 = srv.ws_at(&format!("/v1/ws?token={token1}")).await.unwrap();
+        let mut conn2 = srv.ws_at(&format!("/v1/ws?token={token2}")).await.unwrap();
+
+        // A private order update addressed to user 1, then a public marker to all.
+        broadcaster
+            .send(BroadcastEnvelope {
+                audience: Audience::User(1),
+                payload: "ORDER_FOR_USER_1".to_string(),
+            })
+            .unwrap();
+        broadcaster
+            .send(BroadcastEnvelope::public("PUBLIC_MARKER".to_string()))
+            .unwrap();
+
+        // User 1 receives their own order update first, then the public marker.
+        let first_1 = conn1.next().await.unwrap().unwrap();
+        assert_eq!(
+            first_1,
+            ws::Frame::Text(Bytes::from_static(b"ORDER_FOR_USER_1")),
+            "the owning user must receive their own order update"
+        );
+
+        // User 2 must NOT receive user 1's order update: the first (and only)
+        // frame they see is the public marker. If routing leaked, the order
+        // update would arrive here instead.
+        let first_2 = conn2.next().await.unwrap().unwrap();
+        assert_eq!(
+            first_2,
+            ws::Frame::Text(Bytes::from_static(b"PUBLIC_MARKER")),
+            "another user must never receive a different user's order update"
+        );
     }
 
     #[actix_web::test]

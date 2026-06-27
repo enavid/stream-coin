@@ -21,6 +21,7 @@ use stream_coin::order::port::OrderAdapter;
 use stream_coin::presentation::handlers::strategy_handler::restore_strategies;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
+use stream_coin::presentation::shared::broadcast::BroadcastEnvelope;
 use stream_coin::wire_message::WsMessage;
 
 fn build_state() -> actix_web::web::Data<AppState> {
@@ -140,7 +141,9 @@ async fn running_strategy_emits_signal_on_price_tick() {
         timestamp: Utc::now(),
     }))
     .unwrap();
-    broadcaster.send(price_json).unwrap();
+    broadcaster
+        .send(BroadcastEnvelope::public(price_json))
+        .unwrap();
 
     // Drain messages until we see a signal (or timeout)
     let deadline = Duration::from_millis(500);
@@ -197,7 +200,9 @@ async fn running_strategy_with_risk_reward_emits_signal_with_stop_loss_and_take_
         timestamp: Utc::now(),
     }))
     .unwrap();
-    broadcaster.send(price_json).unwrap();
+    broadcaster
+        .send(BroadcastEnvelope::public(price_json))
+        .unwrap();
 
     let deadline = Duration::from_millis(500);
     loop {
@@ -274,9 +279,15 @@ async fn ws_client_receives_closed_trade_event_for_live_strategy() {
     // Window of 2: candle[0] seeds history; candle[1] (+10% move) emits Buy
     // and opens the live position; candle[2] (-10% move from candle[1])
     // emits Sell, which LiveTradeTracker pairs into a ClosedTrade.
-    broadcaster.send(candle_json(100_000, 0)).unwrap();
-    broadcaster.send(candle_json(110_000, 60)).unwrap();
-    broadcaster.send(candle_json(99_000, 120)).unwrap();
+    broadcaster
+        .send(BroadcastEnvelope::public(candle_json(100_000, 0)))
+        .unwrap();
+    broadcaster
+        .send(BroadcastEnvelope::public(candle_json(110_000, 60)))
+        .unwrap();
+    broadcaster
+        .send(BroadcastEnvelope::public(candle_json(99_000, 120)))
+        .unwrap();
 
     let deadline = Duration::from_millis(500);
     loop {
@@ -644,7 +655,9 @@ for line in sys.stdin:
         volume: 100,
     });
     broadcaster
-        .send(serde_json::to_string(&candle).unwrap())
+        .send(BroadcastEnvelope::public(
+            serde_json::to_string(&candle).unwrap(),
+        ))
         .unwrap();
 
     // Wait for an OrderUpdate on the WS feed (dry-run mode)

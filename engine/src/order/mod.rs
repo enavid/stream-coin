@@ -1,4 +1,5 @@
 pub mod circuit_breaker;
+pub mod circuit_breaker_store;
 pub mod credential_resolver;
 pub mod entity;
 pub mod exir;

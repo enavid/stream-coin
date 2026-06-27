@@ -328,6 +328,9 @@ fn calculate_metrics(trade_log: &[TradeRecord]) -> (f64, f64) {
     let mut position: i64 = 0;
     let mut peak_total: f64 = INITIAL_CAPITAL as f64;
     let mut max_drawdown_pct: f64 = 0.0;
+    // Mark-to-market equity after the last processed fill. Seeded to the
+    // starting capital so an empty/no-op log reports a 0% return.
+    let mut final_equity: f64 = INITIAL_CAPITAL as f64;
 
     for trade in trade_log {
         let value = (trade.fill_price as i64) * (trade.quantity as i64);
@@ -344,6 +347,7 @@ fn calculate_metrics(trade_log: &[TradeRecord]) -> (f64, f64) {
         }
         let total = cash + position * (trade.fill_price as i64);
         let total_f = total as f64;
+        final_equity = total_f;
         if total_f > peak_total {
             peak_total = total_f;
         }
@@ -355,7 +359,11 @@ fn calculate_metrics(trade_log: &[TradeRecord]) -> (f64, f64) {
         }
     }
 
-    let total_return_pct = (cash as f64 - INITIAL_CAPITAL as f64) / INITIAL_CAPITAL as f64 * 100.0;
+    // Mark any open position to market (the last fill price) rather than
+    // counting only realized cash (M5). Using realized cash alone reports a
+    // still-open long as a loss equal to the capital deployed, even though the
+    // inventory is still held and worth roughly what was paid.
+    let total_return_pct = (final_equity - INITIAL_CAPITAL as f64) / INITIAL_CAPITAL as f64 * 100.0;
     (total_return_pct, max_drawdown_pct)
 }
 
@@ -782,6 +790,63 @@ for line in sys.stdin:
         let (ret, dd) = calculate_metrics(&trades);
         assert!(ret > 0.0, "buy low sell high must be a profit");
         assert!(dd < 1e-9, "no drawdown expected for immediate profit");
+    }
+
+    #[test]
+    fn backtest_return_marks_open_position_to_market() {
+        // A single buy that is never sold leaves an open position. Counting only
+        // realized cash would report this as a ~9% loss (the capital deployed),
+        // even though the inventory is still held at the price paid. Marking the
+        // open position to market makes the return ~0%.
+        let trades = vec![TradeRecord {
+            order_id: "1".to_string(),
+            side: "buy".to_string(),
+            quantity: 1,
+            fill_price: 90_000,
+            strategy_id: "s".to_string(),
+            candle_time: Utc::now(),
+            stop_loss: None,
+            take_profit: None,
+        }];
+        let (ret, _dd) = calculate_metrics(&trades);
+        assert!(
+            ret.abs() < 1e-9,
+            "an open position bought at market must not show a loss; got {ret}%"
+        );
+    }
+
+    #[test]
+    fn backtest_return_open_position_reflects_unrealized_gain() {
+        // Buy at 90k, price rises to 110k by the last fill but is never sold:
+        // the unrealized gain must show as a positive return, not zero.
+        let trades = vec![
+            TradeRecord {
+                order_id: "1".to_string(),
+                side: "buy".to_string(),
+                quantity: 1,
+                fill_price: 90_000,
+                strategy_id: "s".to_string(),
+                candle_time: Utc::now(),
+                stop_loss: None,
+                take_profit: None,
+            },
+            // A later same-side fill at a higher price marks the position up.
+            TradeRecord {
+                order_id: "2".to_string(),
+                side: "buy".to_string(),
+                quantity: 0,
+                fill_price: 110_000,
+                strategy_id: "s".to_string(),
+                candle_time: Utc::now(),
+                stop_loss: None,
+                take_profit: None,
+            },
+        ];
+        let (ret, _dd) = calculate_metrics(&trades);
+        assert!(
+            ret > 0.0,
+            "an open long marked up to a higher market price must show a gain; got {ret}%"
+        );
     }
 
     #[test]

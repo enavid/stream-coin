@@ -25,10 +25,12 @@ use stream_coin::infrastructure::db::credential_repository::CredentialRepository
 use stream_coin::infrastructure::db::exchange_repository::ExchangeRepository;
 use stream_coin::infrastructure::db::order_repository::{FakeOrderRepository, OrderRepository};
 use stream_coin::infrastructure::db::postgres::{
-    PostgresAssetRepository, PostgresCandleRepository, PostgresCredentialRepository,
-    PostgresExchangeRepository, PostgresOrderRepository, PostgresSubscriptionRepository,
-    PostgresTickerRepository, PostgresUserRepository,
+    PostgresAssetRepository, PostgresCandleRepository, PostgresCircuitBreakerStore,
+    PostgresCredentialRepository, PostgresExchangeRepository, PostgresOrderRepository,
+    PostgresPythonStrategyRepository, PostgresSubscriptionRepository, PostgresTickerRepository,
+    PostgresUserRepository,
 };
+use stream_coin::infrastructure::db::python_strategy_repository::PythonStrategyRepository;
 use stream_coin::infrastructure::db::subscription_repository::SubscriptionRepository;
 use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
 use stream_coin::infrastructure::db::user_repository::{seed_admin_if_empty, UserRepository};
@@ -178,6 +180,12 @@ async fn main() -> std::io::Result<()> {
     let subscription_repository: Option<Arc<dyn SubscriptionRepository>> =
         db_pool.clone().map(|pool| {
             Arc::new(PostgresSubscriptionRepository::new(pool)) as Arc<dyn SubscriptionRepository>
+        });
+
+    let python_strategy_repository: Option<Arc<dyn PythonStrategyRepository>> =
+        db_pool.clone().map(|pool| {
+            Arc::new(PostgresPythonStrategyRepository::new(pool))
+                as Arc<dyn PythonStrategyRepository>
         });
 
     let credential_cipher = match CredentialCipher::from_env() {
@@ -478,7 +486,16 @@ async fn main() -> std::io::Result<()> {
         order_manager_builder = order_manager_builder.with_credential_resolver(resolver);
         tracing::info!("order manager: per-user credential resolver attached");
     }
+    // Persist the circuit-breaker trip when a DB is configured (M9) so a halt
+    // survives a restart / crash-loop instead of silently re-arming.
+    if let Some(pool) = db_pool.clone() {
+        order_manager_builder = order_manager_builder
+            .with_circuit_breaker_store(Arc::new(PostgresCircuitBreakerStore::new(pool)));
+        tracing::info!("order manager: circuit breaker state persisted to Postgres");
+    }
     let order_manager = Arc::new(order_manager_builder);
+    // Hydrate the breaker from persisted state before serving any orders.
+    order_manager.restore_circuit_breaker().await;
     let _listener_handle =
         spawn_order_manager_listener(Arc::clone(&order_manager), broadcaster.clone());
 
@@ -497,7 +514,7 @@ async fn main() -> std::io::Result<()> {
         signal_repository: None,
         order_adapters,
         order_manager: Some(order_manager),
-        python_strategy_repository: None,
+        python_strategy_repository,
         candle_repository,
         candle_history: AppState::new_candle_history(),
         historical_sources,

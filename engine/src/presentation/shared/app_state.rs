@@ -23,6 +23,7 @@ use crate::infrastructure::db::user_repository::UserRepository;
 use crate::kafka::port::MessagePublisher;
 use crate::order::manager::OrderManager;
 use crate::order::port::OrderAdapter;
+use crate::presentation::shared::broadcast::BroadcastEnvelope;
 
 pub type ClientKey = String;
 pub type ClientMap = Arc<Mutex<HashMap<ClientKey, AbortHandle>>>;
@@ -72,8 +73,11 @@ pub struct AppState {
     pub clients: ClientMap,
     /// Kafka publisher; `None` when `KAFKA_URL` is unset or the broker is unreachable.
     pub publisher: Option<Arc<dyn MessagePublisher>>,
-    /// Broadcast channel that fans out every serialized price tick to all WS sessions.
-    pub broadcaster: broadcast::Sender<String>,
+    /// Broadcast channel that fans out every serialized message to WS sessions.
+    /// Each item is a [`BroadcastEnvelope`] carrying an [`Audience`] so the WS
+    /// handler can route private (per-user) order updates to their owner only,
+    /// while public market data reaches everyone.
+    pub broadcaster: broadcast::Sender<BroadcastEnvelope>,
     /// HS256 secret for JWT validation. `None` = auth disabled (development mode).
     pub jwt_secret: Option<Arc<String>>,
     /// Persistent store for active ticker subscriptions. `None` = in-memory only (no DB).
@@ -130,8 +134,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Creates the broadcast sender used to fan out price ticks to WS clients.
-    pub fn new_broadcaster() -> broadcast::Sender<String> {
+    /// Creates the broadcast sender used to fan out messages to WS clients.
+    pub fn new_broadcaster() -> broadcast::Sender<BroadcastEnvelope> {
         broadcast::channel(BROADCAST_CAPACITY).0
     }
 
