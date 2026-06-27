@@ -7,5 +7,6 @@ pub mod postgres;
 pub mod python_strategy_repository;
 pub mod signal_repository;
 pub mod strategy_repository;
+pub mod subscription_repository;
 pub mod ticker_repository;
 pub mod user_repository;

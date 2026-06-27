@@ -6,6 +6,7 @@ mod health_router;
 mod order_router;
 mod registry_router;
 mod strategy_router;
+mod subscription_router;
 mod user_router;
 
 use actix_web::middleware::from_fn;
@@ -23,6 +24,7 @@ pub fn init_routes(cfg: &mut web::ServiceConfig) {
             .configure(exchange_routers::exchange_router)
             .configure(registry_router::registry_router)
             .configure(strategy_router::strategy_router)
+            .configure(subscription_router::subscription_router)
             .configure(order_router::order_router)
             .configure(backtest_router::backtest_router)
             .configure(candle_router::candle_router)

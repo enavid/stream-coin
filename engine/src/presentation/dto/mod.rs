@@ -6,5 +6,6 @@ pub mod exchange;
 pub mod health;
 pub mod order;
 pub mod strategy;
+pub mod subscription;
 pub mod ticker;
 pub mod user;

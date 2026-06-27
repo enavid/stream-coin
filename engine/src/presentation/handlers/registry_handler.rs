@@ -281,6 +281,7 @@ mod tests {
             candle_history: AppState::new_candle_history(),
             exchange_repository,
             asset_repository: None,
+            subscription_repository: None,
             user_repository: None,
             credential_repository: None,
             credential_cipher: None,
@@ -514,6 +515,7 @@ mod tests {
             asset_repository: Some(
                 Arc::new(FakeAssetRepository::new_with(assets)) as Arc<dyn AssetRepository>
             ),
+            subscription_repository: None,
             user_repository: None,
             credential_repository: None,
             credential_cipher: None,
@@ -634,6 +636,7 @@ mod tests {
             asset_repository: Some(
                 Arc::new(FakeAssetRepository::new_with(assets)) as Arc<dyn AssetRepository>
             ),
+            subscription_repository: None,
             user_repository: None,
             credential_repository: None,
             credential_cipher: None,

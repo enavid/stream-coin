@@ -58,6 +58,7 @@ fn build_state_with_order_manager(
         candle_history: AppState::new_candle_history(),
         exchange_repository: None,
         asset_repository: None,
+        subscription_repository: None,
         user_repository: None,
         credential_repository: None,
         credential_cipher: None,

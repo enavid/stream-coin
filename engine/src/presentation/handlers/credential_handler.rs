@@ -154,6 +154,7 @@ mod tests {
             candle_history: AppState::new_candle_history(),
             exchange_repository: None,
             asset_repository: None,
+            subscription_repository: None,
             user_repository: None,
             credential_repository: credential_repository.map(|r| r as Arc<_>),
             credential_cipher,

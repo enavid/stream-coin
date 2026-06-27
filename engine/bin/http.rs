@@ -26,8 +26,10 @@ use stream_coin::infrastructure::db::exchange_repository::ExchangeRepository;
 use stream_coin::infrastructure::db::order_repository::FakeOrderRepository;
 use stream_coin::infrastructure::db::postgres::{
     PostgresAssetRepository, PostgresCandleRepository, PostgresCredentialRepository,
-    PostgresExchangeRepository, PostgresTickerRepository, PostgresUserRepository,
+    PostgresExchangeRepository, PostgresSubscriptionRepository, PostgresTickerRepository,
+    PostgresUserRepository,
 };
+use stream_coin::infrastructure::db::subscription_repository::SubscriptionRepository;
 use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
 use stream_coin::infrastructure::db::user_repository::{seed_admin_if_empty, UserRepository};
 use stream_coin::kafka::port::MessagePublisher;
@@ -168,6 +170,11 @@ async fn main() -> std::io::Result<()> {
     let candle_repository: Option<Arc<dyn CandleRepository>> = db_pool
         .clone()
         .map(|pool| Arc::new(PostgresCandleRepository::new(pool)) as Arc<dyn CandleRepository>);
+
+    let subscription_repository: Option<Arc<dyn SubscriptionRepository>> =
+        db_pool.clone().map(|pool| {
+            Arc::new(PostgresSubscriptionRepository::new(pool)) as Arc<dyn SubscriptionRepository>
+        });
 
     let credential_cipher = match CredentialCipher::from_env() {
         Some(c) => {
@@ -358,12 +365,17 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    let order_manager = Arc::new(OrderManager::new(
+    let mut order_manager_builder = OrderManager::new(
         order_adapters.clone(),
         order_repository,
         broadcaster.clone(),
         safety_config,
-    ));
+    );
+    if let Some(sub_repo) = subscription_repository.clone() {
+        order_manager_builder = order_manager_builder.with_subscription_repository(sub_repo);
+        tracing::info!("order manager: subscription fanout enabled");
+    }
+    let order_manager = Arc::new(order_manager_builder);
     let _listener_handle =
         spawn_order_manager_listener(Arc::clone(&order_manager), broadcaster.clone());
 
@@ -391,6 +403,7 @@ async fn main() -> std::io::Result<()> {
         user_repository,
         credential_repository,
         credential_cipher,
+        subscription_repository,
     });
 
     restore_tickers(&app_state).await;

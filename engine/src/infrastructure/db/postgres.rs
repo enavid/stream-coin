@@ -14,6 +14,9 @@ use crate::infrastructure::db::credential_repository::{
     CredentialRepository, CredentialRepositoryError, CredentialSummary,
 };
 use crate::infrastructure::db::exchange_repository::{ExchangeRepository, ExchangeRepositoryError};
+use crate::infrastructure::db::subscription_repository::{
+    SubscriptionRecord, SubscriptionRepository, SubscriptionRepositoryError,
+};
 use crate::infrastructure::db::ticker_repository::{
     RepositoryError, TickerRepository, TickerSubscription,
 };
@@ -689,6 +692,209 @@ impl CredentialRepository for PostgresCredentialRepository {
         .execute(&self.pool)
         .await
         .map_err(|e| CredentialRepositoryError::Database(e.to_string()))?;
+        Ok(())
+    }
+}
+
+/// Postgres-backed `SubscriptionRepository`.
+/// Reads and writes the `strategy_subscriptions` table (migration `0015`).
+pub struct PostgresSubscriptionRepository {
+    pool: PgPool,
+}
+
+impl PostgresSubscriptionRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+/// Parses an `Option<String>` (read from a NUMERIC column via `::text` cast) into
+/// `Option<Decimal>`.  An unparseable string is treated as `None` rather than
+/// propagating an error — the value is a user-supplied override, not a financial
+/// transaction amount.
+fn parse_decimal(s: Option<String>) -> Option<rust_decimal::Decimal> {
+    s.and_then(|v| v.parse().ok())
+}
+
+#[async_trait]
+impl SubscriptionRepository for PostgresSubscriptionRepository {
+    async fn create(
+        &self,
+        user_id: i32,
+        strategy_id: &str,
+        max_position_size: Option<rust_decimal::Decimal>,
+        confidence_threshold: Option<f64>,
+    ) -> Result<SubscriptionRecord, SubscriptionRepositoryError> {
+        let mps = max_position_size.map(|d| d.to_string());
+        let row = sqlx::query(
+            "INSERT INTO strategy_subscriptions
+                 (user_id, strategy_id, max_position_size, confidence_threshold)
+             VALUES ($1, $2, $3::numeric, $4)
+             RETURNING id, user_id, strategy_id, active,
+                       max_position_size::text AS max_position_size,
+                       confidence_threshold, created_at",
+        )
+        .bind(user_id)
+        .bind(strategy_id)
+        .bind(mps)
+        .bind(confidence_threshold)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("unique") || msg.contains("duplicate") {
+                SubscriptionRepositoryError::AlreadySubscribed {
+                    user_id,
+                    strategy_id: strategy_id.to_string(),
+                }
+            } else {
+                SubscriptionRepositoryError::Database(msg)
+            }
+        })?;
+
+        Ok(SubscriptionRecord {
+            id: row.get("id"),
+            user_id: row.get("user_id"),
+            strategy_id: row.get("strategy_id"),
+            active: row.get("active"),
+            max_position_size: parse_decimal(row.get("max_position_size")),
+            confidence_threshold: row.get("confidence_threshold"),
+            created_at: row.get("created_at"),
+        })
+    }
+
+    async fn get(
+        &self,
+        id: i64,
+    ) -> Result<Option<SubscriptionRecord>, SubscriptionRepositoryError> {
+        let row = sqlx::query(
+            "SELECT id, user_id, strategy_id, active,
+                    max_position_size::text AS max_position_size,
+                    confidence_threshold, created_at
+             FROM   strategy_subscriptions
+             WHERE  id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
+
+        Ok(row.map(|r| SubscriptionRecord {
+            id: r.get("id"),
+            user_id: r.get("user_id"),
+            strategy_id: r.get("strategy_id"),
+            active: r.get("active"),
+            max_position_size: parse_decimal(r.get("max_position_size")),
+            confidence_threshold: r.get("confidence_threshold"),
+            created_at: r.get("created_at"),
+        }))
+    }
+
+    async fn list_for_user(
+        &self,
+        user_id: i32,
+    ) -> Result<Vec<SubscriptionRecord>, SubscriptionRepositoryError> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, strategy_id, active,
+                    max_position_size::text AS max_position_size,
+                    confidence_threshold, created_at
+             FROM   strategy_subscriptions
+             WHERE  user_id = $1
+             ORDER  BY created_at ASC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| SubscriptionRecord {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                strategy_id: r.get("strategy_id"),
+                active: r.get("active"),
+                max_position_size: parse_decimal(r.get("max_position_size")),
+                confidence_threshold: r.get("confidence_threshold"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    async fn list_active_for_strategy(
+        &self,
+        strategy_id: &str,
+    ) -> Result<Vec<SubscriptionRecord>, SubscriptionRepositoryError> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, strategy_id, active,
+                    max_position_size::text AS max_position_size,
+                    confidence_threshold, created_at
+             FROM   strategy_subscriptions
+             WHERE  strategy_id = $1
+               AND  active = true
+             ORDER  BY created_at ASC",
+        )
+        .bind(strategy_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| SubscriptionRecord {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                strategy_id: r.get("strategy_id"),
+                active: r.get("active"),
+                max_position_size: parse_decimal(r.get("max_position_size")),
+                confidence_threshold: r.get("confidence_threshold"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    async fn update(
+        &self,
+        id: i64,
+        active: bool,
+        max_position_size: Option<rust_decimal::Decimal>,
+        confidence_threshold: Option<f64>,
+    ) -> Result<SubscriptionRecord, SubscriptionRepositoryError> {
+        let mps = max_position_size.map(|d| d.to_string());
+        let row = sqlx::query(
+            "UPDATE strategy_subscriptions
+             SET    active = $2, max_position_size = $3::numeric, confidence_threshold = $4
+             WHERE  id = $1
+             RETURNING id, user_id, strategy_id, active,
+                       max_position_size::text AS max_position_size,
+                       confidence_threshold, created_at",
+        )
+        .bind(id)
+        .bind(active)
+        .bind(mps)
+        .bind(confidence_threshold)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?
+        .ok_or(SubscriptionRepositoryError::NotFound(id))?;
+
+        Ok(SubscriptionRecord {
+            id: row.get("id"),
+            user_id: row.get("user_id"),
+            strategy_id: row.get("strategy_id"),
+            active: row.get("active"),
+            max_position_size: parse_decimal(row.get("max_position_size")),
+            confidence_threshold: row.get("confidence_threshold"),
+            created_at: row.get("created_at"),
+        })
+    }
+
+    async fn delete(&self, id: i64) -> Result<(), SubscriptionRepositoryError> {
+        sqlx::query("DELETE FROM strategy_subscriptions WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
         Ok(())
     }
 }

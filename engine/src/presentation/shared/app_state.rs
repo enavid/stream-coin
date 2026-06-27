@@ -17,6 +17,7 @@ use crate::infrastructure::db::exchange_repository::ExchangeRepository;
 use crate::infrastructure::db::python_strategy_repository::PythonStrategyRepository;
 use crate::infrastructure::db::signal_repository::SignalRepository;
 use crate::infrastructure::db::strategy_repository::StrategyRepository;
+use crate::infrastructure::db::subscription_repository::SubscriptionRepository;
 use crate::infrastructure::db::ticker_repository::TickerRepository;
 use crate::infrastructure::db::user_repository::UserRepository;
 use crate::kafka::port::MessagePublisher;
@@ -104,6 +105,11 @@ pub struct AppState {
     /// truth `trading_pairs` is seeded from. `None` = no DB; asset-driven pair
     /// seeding is unavailable.
     pub asset_repository: Option<Arc<dyn AssetRepository>>,
+    /// Per-user strategy subscriptions (`strategy_subscriptions` table, migration `0015`).
+    /// When present, `OrderManager::fan_out_signal_to_subscriptions` uses it to dispatch
+    /// orders to every active subscriber on each inbound signal.  `None` = no DB;
+    /// subscription endpoints return 503 and fanout is skipped.
+    pub subscription_repository: Option<Arc<dyn SubscriptionRepository>>,
     /// Persistent store for users, roles, and permissions. `None` = no DB — login and
     /// user-management endpoints are unavailable.
     pub user_repository: Option<Arc<dyn UserRepository>>,
@@ -206,6 +212,7 @@ mod tests {
             candle_repository: None,
             exchange_repository: None,
             asset_repository: None,
+            subscription_repository: None,
             user_repository: None,
             credential_repository: None,
             credential_cipher: None,

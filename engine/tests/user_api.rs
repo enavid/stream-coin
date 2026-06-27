@@ -64,6 +64,7 @@ fn build_state() -> actix_web::web::Data<AppState> {
         candle_history: AppState::new_candle_history(),
         exchange_repository: None,
         asset_repository: None,
+        subscription_repository: None,
         user_repository: Some(user_repo),
         credential_repository: Some(credential_repo),
         credential_cipher: Some(Arc::new(CredentialCipher::new([5u8; 32]))),
