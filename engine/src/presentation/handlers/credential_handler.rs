@@ -8,8 +8,9 @@ use crate::presentation::shared::app_state::AppState;
 const PERMISSION: &str = "exchange_credentials.write";
 
 /// `POST /v1/exchanges/{name}/credentials` — stores the caller's own exchange connection
-/// info (free-form JSON: api_key, secret, passphrase, ... — shape varies per exchange),
-/// encrypted at rest. Always scoped to the authenticated user; never a path user id.
+/// info (free-form JSON, shape varies per exchange), encrypted at rest. Supply both
+/// `api_key` and `api_secret` so the order adapter can HMAC-sign requests (C10); an
+/// `api_key` alone places orders unsigned. Always scoped to the authenticated user.
 pub async fn set_own_credentials(
     req: HttpRequest,
     state: web::Data<AppState>,

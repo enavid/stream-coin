@@ -23,11 +23,11 @@ use stream_coin::infrastructure::db::asset_repository::AssetRepository;
 use stream_coin::infrastructure::db::candle_repository::CandleRepository;
 use stream_coin::infrastructure::db::credential_repository::CredentialRepository;
 use stream_coin::infrastructure::db::exchange_repository::ExchangeRepository;
-use stream_coin::infrastructure::db::order_repository::FakeOrderRepository;
+use stream_coin::infrastructure::db::order_repository::{FakeOrderRepository, OrderRepository};
 use stream_coin::infrastructure::db::postgres::{
     PostgresAssetRepository, PostgresCandleRepository, PostgresCredentialRepository,
-    PostgresExchangeRepository, PostgresSubscriptionRepository, PostgresTickerRepository,
-    PostgresUserRepository,
+    PostgresExchangeRepository, PostgresOrderRepository, PostgresSubscriptionRepository,
+    PostgresTickerRepository, PostgresUserRepository,
 };
 use stream_coin::infrastructure::db::subscription_repository::SubscriptionRepository;
 use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
@@ -36,6 +36,8 @@ use stream_coin::kafka::port::MessagePublisher;
 use stream_coin::kafka::KafkaProducer;
 use stream_coin::order::credential_resolver::{LiveCredentialResolver, OrderAdapterFactory};
 use stream_coin::order::entity::SafetyConfig;
+use stream_coin::order::exir::ExirOrderAdapter;
+use stream_coin::order::hitobit::HitobitOrderAdapter;
 use stream_coin::order::manager::{spawn_order_manager_listener, OrderManager};
 use stream_coin::order::port::OrderAdapter;
 use stream_coin::order::tabdeal::TabdealOrderAdapter;
@@ -304,9 +306,16 @@ async fn main() -> std::io::Result<()> {
     // the API after startup. Set TABDEAL_API_KEY for convenience in development only.
     let mut order_adapter_map: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
     if let Ok(api_key) = env::var("TABDEAL_API_KEY") {
+        // TABDEAL_API_SECRET is optional: when set, the system adapter signs its
+        // requests (C10); without it the adapter is unsigned (logged per request).
+        let api_secret = env::var("TABDEAL_API_SECRET").ok();
         order_adapter_map.insert(
             "tabdeal".to_string(),
-            Arc::new(TabdealOrderAdapter::new(&api_key)),
+            Arc::new(TabdealOrderAdapter::with_credentials(
+                "https://api1.tabdeal.org",
+                &api_key,
+                api_secret,
+            )),
         );
         tracing::info!("tabdeal order adapter loaded from env (use API in production)");
     } else {
@@ -316,7 +325,21 @@ async fn main() -> std::io::Result<()> {
     }
     let order_adapters = Arc::new(tokio::sync::RwLock::new(order_adapter_map));
 
-    let order_repository = Arc::new(FakeOrderRepository::new());
+    // Persist orders in Postgres when a DB is configured (M11) so open-order
+    // state, position limits and timeout reconciliation survive a restart; fall
+    // back to the in-memory repo only when running without a database.
+    let order_repository: Arc<dyn OrderRepository> = match db_pool.clone() {
+        Some(pool) => {
+            tracing::info!("order repository: Postgres (orders persisted)");
+            Arc::new(PostgresOrderRepository::new(pool))
+        }
+        None => {
+            tracing::warn!(
+                "order repository: in-memory fake — orders are NOT persisted across restarts"
+            );
+            Arc::new(FakeOrderRepository::new())
+        }
+    };
 
     // Safety config driven by environment variables so operators can tune without redeploying.
     // All values fall back to SafetyConfig::default() which has dry_run=true for safety.
@@ -378,15 +401,48 @@ async fn main() -> std::io::Result<()> {
     }
 
     // Build per-exchange adapter factories for credential-based order placement.
-    // Each factory decrypts a user's credentials JSON and constructs the adapter.
+    // Each factory decrypts a user's credentials JSON and constructs a signed
+    // adapter. `api_key` is required; `api_secret` is optional but, when present,
+    // turns on per-request HMAC signing (C10).
+    fn extract_key(creds: &serde_json::Value, exchange: &str) -> Result<String, String> {
+        creds["api_key"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("{exchange} credentials must contain 'api_key'"))
+    }
+    fn extract_secret(creds: &serde_json::Value) -> Option<String> {
+        creds["api_secret"].as_str().map(str::to_string)
+    }
+
     let mut order_adapter_factories: HashMap<String, OrderAdapterFactory> = HashMap::new();
     order_adapter_factories.insert(
         "tabdeal".to_string(),
         Arc::new(|creds: &serde_json::Value| {
-            let api_key = creds["api_key"]
-                .as_str()
-                .ok_or_else(|| "tabdeal credentials must contain 'api_key'".to_string())?;
-            Ok(Arc::new(TabdealOrderAdapter::new(api_key)) as Arc<dyn OrderAdapter>)
+            Ok(Arc::new(TabdealOrderAdapter::with_credentials(
+                "https://api1.tabdeal.org",
+                &extract_key(creds, "tabdeal")?,
+                extract_secret(creds),
+            )) as Arc<dyn OrderAdapter>)
+        }),
+    );
+    order_adapter_factories.insert(
+        "hitobit".to_string(),
+        Arc::new(|creds: &serde_json::Value| {
+            Ok(Arc::new(HitobitOrderAdapter::with_credentials(
+                "https://api.hitobit.com",
+                &extract_key(creds, "hitobit")?,
+                extract_secret(creds),
+            )) as Arc<dyn OrderAdapter>)
+        }),
+    );
+    order_adapter_factories.insert(
+        "exir".to_string(),
+        Arc::new(|creds: &serde_json::Value| {
+            Ok(Arc::new(ExirOrderAdapter::with_credentials(
+                "https://api.exir.io",
+                &extract_key(creds, "exir")?,
+                extract_secret(creds),
+            )) as Arc<dyn OrderAdapter>)
         }),
     );
 

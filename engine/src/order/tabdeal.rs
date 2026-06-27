@@ -1,13 +1,14 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::exchange::entity::ExchangeId;
 use crate::order::port::{
     OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderStatusResult,
     OrderType, ReconciledOrder,
 };
+use crate::order::signing;
 
 const PLACE_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
 const CANCEL_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,6 +22,9 @@ pub struct TabdealOrderAdapter {
     exchange_id: ExchangeId,
     base_url: String,
     api_key: String,
+    /// HMAC signing secret. `None` for the system adapter configured with only an
+    /// API key (legacy / read-only); when present, every write request is signed.
+    api_secret: Option<String>,
     http_client: reqwest::Client,
 }
 
@@ -30,10 +34,16 @@ impl TabdealOrderAdapter {
     }
 
     pub fn with_base_url(base_url: &str, api_key: &str) -> Self {
+        Self::with_credentials(base_url, api_key, None)
+    }
+
+    /// Constructs an adapter with an optional HMAC signing secret (C10).
+    pub fn with_credentials(base_url: &str, api_key: &str, api_secret: Option<String>) -> Self {
         Self {
             exchange_id: ExchangeId::new("tabdeal"),
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
+            api_secret,
             http_client: reqwest::Client::new(),
         }
     }
@@ -43,24 +53,39 @@ impl TabdealOrderAdapter {
         pair.replace('/', "").to_uppercase()
     }
 
-    /// Builds the JSON body for a place-order POST request.
-    pub fn build_place_order_body(req: &OrderRequest) -> Value {
-        let mut body = json!({
-            "symbol": Self::symbol(&req.pair),
-            "side": req.side.to_string().to_uppercase(),
-            "type": req.order_type.to_string().to_uppercase(),
-            "quantity": req.quantity.to_string(),
-            "newClientOrderId": req.client_order_id,
-        });
-
+    /// Ordered request parameters for a place-order call (Binance-style names).
+    pub fn place_order_params(req: &OrderRequest) -> Vec<(&'static str, String)> {
+        let mut params = vec![
+            ("symbol", Self::symbol(&req.pair)),
+            ("side", req.side.to_string().to_uppercase()),
+            ("type", req.order_type.to_string().to_uppercase()),
+            ("quantity", req.quantity.to_string()),
+            ("newClientOrderId", req.client_order_id.clone()),
+        ];
         if req.order_type == OrderType::Limit {
             if let Some(price) = &req.price {
-                body["price"] = json!(price.to_string());
-                body["timeInForce"] = json!("GTC");
+                params.push(("price", price.to_string()));
+                params.push(("timeInForce", "GTC".to_string()));
             }
         }
+        params
+    }
 
-        body
+    /// Encodes `params` and, when a secret is configured, appends `recvWindow`,
+    /// `timestamp`, and a Binance-style HMAC `signature` over the encoded string
+    /// (C10). Without a secret the params are returned unsigned (system adapter).
+    /// The returned string is exactly what must be sent so the signature matches.
+    fn signed_payload(&self, mut params: Vec<(&str, String)>, timestamp_ms: i64) -> String {
+        match &self.api_secret {
+            Some(secret) => {
+                params.push(("recvWindow", "5000".to_string()));
+                params.push(("timestamp", timestamp_ms.to_string()));
+                let encoded = signing::encode_query(&params);
+                let signature = signing::hmac_sha256_hex(secret, &encoded);
+                format!("{encoded}&signature={signature}")
+            }
+            None => signing::encode_query(&params),
+        }
     }
 
     /// Parses the HTTP response from a place-order call.
@@ -254,14 +279,25 @@ impl OrderAdapter for TabdealOrderAdapter {
             "placing order"
         );
 
-        let body = Self::build_place_order_body(req);
+        if self.api_secret.is_none() {
+            tracing::warn!(
+                exchange = "tabdeal",
+                client_order_id = %req.client_order_id,
+                "placing order WITHOUT request signing — no api_secret configured for this adapter"
+            );
+        }
+        let payload = self.signed_payload(
+            Self::place_order_params(req),
+            signing::current_timestamp_ms(),
+        );
         let url = format!("{}/api/v1/order", self.base_url);
 
         let response = tokio::time::timeout(PLACE_ORDER_TIMEOUT, async {
             self.http_client
                 .post(&url)
                 .header("X-MBX-APIKEY", &self.api_key)
-                .json(&body)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(payload)
                 .send()
                 .await
         })
@@ -296,13 +332,16 @@ impl OrderAdapter for TabdealOrderAdapter {
             "cancelling order"
         );
 
-        let url = format!("{}/api/v1/order", self.base_url);
+        let query = self.signed_payload(
+            vec![("orderId", order_id.0.clone())],
+            signing::current_timestamp_ms(),
+        );
+        let url = format!("{}/api/v1/order?{}", self.base_url, query);
 
         let response = tokio::time::timeout(CANCEL_ORDER_TIMEOUT, async {
             self.http_client
                 .delete(&url)
                 .header("X-MBX-APIKEY", &self.api_key)
-                .json(&json!({ "orderId": order_id.0 }))
                 .send()
                 .await
         })
@@ -323,7 +362,11 @@ impl OrderAdapter for TabdealOrderAdapter {
         &self,
         order_id: &OrderId,
     ) -> Result<OrderStatusResult, OrderAdapterError> {
-        let url = format!("{}/api/v1/order?orderId={}", self.base_url, order_id.0);
+        let query = self.signed_payload(
+            vec![("orderId", order_id.0.clone())],
+            signing::current_timestamp_ms(),
+        );
+        let url = format!("{}/api/v1/order?{}", self.base_url, query);
 
         let response = tokio::time::timeout(STATUS_TIMEOUT, async {
             self.http_client
@@ -349,10 +392,11 @@ impl OrderAdapter for TabdealOrderAdapter {
         &self,
         client_order_id: &str,
     ) -> Result<Option<ReconciledOrder>, OrderAdapterError> {
-        let url = format!(
-            "{}/api/v1/order?origClientOrderId={}",
-            self.base_url, client_order_id
+        let query = self.signed_payload(
+            vec![("origClientOrderId", client_order_id.to_string())],
+            signing::current_timestamp_ms(),
         );
+        let url = format!("{}/api/v1/order?{}", self.base_url, query);
 
         let response = tokio::time::timeout(STATUS_TIMEOUT, async {
             self.http_client
@@ -397,17 +441,17 @@ mod tests {
     }
 
     #[test]
-    fn tabdeal_order_builds_correct_request() {
+    fn tabdeal_order_builds_correct_params() {
         let req = buy_limit_request();
-        let body = TabdealOrderAdapter::build_place_order_body(&req);
+        let params = TabdealOrderAdapter::place_order_params(&req);
 
-        assert_eq!(body["symbol"], "USDTIRT");
-        assert_eq!(body["side"], "BUY");
-        assert_eq!(body["type"], "LIMIT");
-        assert_eq!(body["quantity"], "100");
-        assert_eq!(body["price"], "58000");
-        assert_eq!(body["timeInForce"], "GTC");
-        assert_eq!(body["newClientOrderId"], "test-uuid-001");
+        assert_eq!(params[0], ("symbol", "USDTIRT".to_string()));
+        assert_eq!(params[1], ("side", "BUY".to_string()));
+        assert_eq!(params[2], ("type", "LIMIT".to_string()));
+        assert_eq!(params[3], ("quantity", "100".to_string()));
+        assert_eq!(params[4], ("newClientOrderId", "test-uuid-001".to_string()));
+        assert!(params.contains(&("price", "58000".to_string())));
+        assert!(params.contains(&("timeInForce", "GTC".to_string())));
     }
 
     #[test]
@@ -422,15 +466,47 @@ mod tests {
             client_order_id: "market-uuid-001".to_string(),
             strategy_id: None,
         };
-        let body = TabdealOrderAdapter::build_place_order_body(&req);
+        let params = TabdealOrderAdapter::place_order_params(&req);
 
-        assert_eq!(body["symbol"], "USDTIRT");
-        assert_eq!(body["type"], "MARKET");
+        assert!(params.contains(&("type", "MARKET".to_string())));
         assert!(
-            body["price"].is_null(),
-            "market order must not have a price field"
+            !params.iter().any(|(k, _)| *k == "price"),
+            "market order must not include a price param"
         );
-        assert!(body["timeInForce"].is_null());
+        assert!(!params.iter().any(|(k, _)| *k == "timeInForce"));
+    }
+
+    #[test]
+    fn tabdeal_signed_payload_appends_timestamp_and_valid_signature() {
+        // With a secret, the payload must carry timestamp + a signature that is the
+        // HMAC over everything preceding `&signature=` (so the exchange can verify).
+        let adapter =
+            TabdealOrderAdapter::with_credentials("http://x", "key", Some("topsecret".to_string()));
+        let payload = adapter.signed_payload(
+            vec![
+                ("symbol", "USDTIRT".to_string()),
+                ("side", "BUY".to_string()),
+            ],
+            1_700_000_000_000,
+        );
+        assert!(payload.contains("timestamp=1700000000000"));
+        assert!(payload.contains("recvWindow=5000"));
+        let (signed_part, sig_part) = payload.rsplit_once("&signature=").expect("has signature");
+        assert_eq!(
+            sig_part,
+            signing::hmac_sha256_hex("topsecret", signed_part),
+            "signature must be the HMAC over the exact preceding payload"
+        );
+    }
+
+    #[test]
+    fn tabdeal_signed_payload_is_unsigned_without_secret() {
+        // The system adapter (no secret) sends plain params — no signature/timestamp.
+        let adapter = TabdealOrderAdapter::new("key");
+        let payload =
+            adapter.signed_payload(vec![("symbol", "USDTIRT".to_string())], 1_700_000_000_000);
+        assert_eq!(payload, "symbol=USDTIRT");
+        assert!(!payload.contains("signature="));
     }
 
     #[test]

@@ -1,13 +1,14 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::exchange::entity::ExchangeId;
 use crate::order::port::{
     OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderSide, OrderStatus,
     OrderStatusResult, OrderType, ReconciledOrder,
 };
+use crate::order::signing;
 
 const PLACE_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
 const CANCEL_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,6 +23,9 @@ pub struct HitobitOrderAdapter {
     exchange_id: ExchangeId,
     base_url: String,
     api_key: String,
+    /// HMAC signing secret. `None` for a key-only (legacy / read-only) adapter;
+    /// when present, every write request is signed (C10).
+    api_secret: Option<String>,
     http_client: reqwest::Client,
 }
 
@@ -31,10 +35,16 @@ impl HitobitOrderAdapter {
     }
 
     pub fn with_base_url(base_url: &str, api_key: &str) -> Self {
+        Self::with_credentials(base_url, api_key, None)
+    }
+
+    /// Constructs an adapter with an optional HMAC signing secret (C10).
+    pub fn with_credentials(base_url: &str, api_key: &str, api_secret: Option<String>) -> Self {
         Self {
             exchange_id: ExchangeId::new("hitobit"),
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
+            api_secret,
             http_client: reqwest::Client::new(),
         }
     }
@@ -44,30 +54,52 @@ impl HitobitOrderAdapter {
         pair.replace('/', "").to_uppercase()
     }
 
-    /// Builds the JSON body for a place-order POST request.
-    pub fn build_place_order_body(req: &OrderRequest) -> Value {
-        let mut body = json!({
-            "symbol": Self::symbol(&req.pair),
-            "side": match req.side {
-                OrderSide::Buy => "BUY",
-                OrderSide::Sell => "SELL",
-            },
-            "type": match req.order_type {
-                OrderType::Limit => "LIMIT",
-                OrderType::Market => "MARKET",
-            },
-            "quantity": req.quantity.to_string(),
-            "newClientOrderId": req.client_order_id,
-        });
-
+    /// Ordered request parameters for a place-order call (Binance-style names).
+    pub fn place_order_params(req: &OrderRequest) -> Vec<(&'static str, String)> {
+        let mut params = vec![
+            ("symbol", Self::symbol(&req.pair)),
+            (
+                "side",
+                match req.side {
+                    OrderSide::Buy => "BUY",
+                    OrderSide::Sell => "SELL",
+                }
+                .to_string(),
+            ),
+            (
+                "type",
+                match req.order_type {
+                    OrderType::Limit => "LIMIT",
+                    OrderType::Market => "MARKET",
+                }
+                .to_string(),
+            ),
+            ("quantity", req.quantity.to_string()),
+            ("newClientOrderId", req.client_order_id.clone()),
+        ];
         if req.order_type == OrderType::Limit {
             if let Some(price) = &req.price {
-                body["price"] = json!(price.to_string());
-                body["timeInForce"] = json!("GTC");
+                params.push(("price", price.to_string()));
+                params.push(("timeInForce", "GTC".to_string()));
             }
         }
+        params
+    }
 
-        body
+    /// Encodes `params` and, when a secret is configured, appends `recvWindow`,
+    /// `timestamp`, and a Binance-style HMAC `signature` over the encoded string
+    /// (C10). The returned string is exactly what must be sent.
+    fn signed_payload(&self, mut params: Vec<(&str, String)>, timestamp_ms: i64) -> String {
+        match &self.api_secret {
+            Some(secret) => {
+                params.push(("recvWindow", "5000".to_string()));
+                params.push(("timestamp", timestamp_ms.to_string()));
+                let encoded = signing::encode_query(&params);
+                let signature = signing::hmac_sha256_hex(secret, &encoded);
+                format!("{encoded}&signature={signature}")
+            }
+            None => signing::encode_query(&params),
+        }
     }
 
     /// Parses the HTTP response from a place-order call.
@@ -257,14 +289,25 @@ impl OrderAdapter for HitobitOrderAdapter {
             "placing order"
         );
 
-        let body = Self::build_place_order_body(req);
+        if self.api_secret.is_none() {
+            tracing::warn!(
+                exchange = "hitobit",
+                client_order_id = %req.client_order_id,
+                "placing order WITHOUT request signing — no api_secret configured for this adapter"
+            );
+        }
+        let payload = self.signed_payload(
+            Self::place_order_params(req),
+            signing::current_timestamp_ms(),
+        );
         let url = format!("{}/api/v1/order", self.base_url);
 
         let response = tokio::time::timeout(PLACE_ORDER_TIMEOUT, async {
             self.http_client
                 .post(&url)
                 .header("X-MBX-APIKEY", &self.api_key)
-                .json(&body)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(payload)
                 .send()
                 .await
         })
@@ -299,13 +342,16 @@ impl OrderAdapter for HitobitOrderAdapter {
             "cancelling order"
         );
 
-        let url = format!("{}/api/v1/order", self.base_url);
+        let query = self.signed_payload(
+            vec![("orderId", order_id.0.clone())],
+            signing::current_timestamp_ms(),
+        );
+        let url = format!("{}/api/v1/order?{}", self.base_url, query);
 
         let response = tokio::time::timeout(CANCEL_ORDER_TIMEOUT, async {
             self.http_client
                 .delete(&url)
                 .header("X-MBX-APIKEY", &self.api_key)
-                .json(&json!({ "orderId": &order_id.0 }))
                 .send()
                 .await
         })
@@ -326,7 +372,11 @@ impl OrderAdapter for HitobitOrderAdapter {
         &self,
         order_id: &OrderId,
     ) -> Result<OrderStatusResult, OrderAdapterError> {
-        let url = format!("{}/api/v1/order?orderId={}", self.base_url, order_id.0);
+        let query = self.signed_payload(
+            vec![("orderId", order_id.0.clone())],
+            signing::current_timestamp_ms(),
+        );
+        let url = format!("{}/api/v1/order?{}", self.base_url, query);
 
         let response = tokio::time::timeout(STATUS_TIMEOUT, async {
             self.http_client
@@ -352,10 +402,11 @@ impl OrderAdapter for HitobitOrderAdapter {
         &self,
         client_order_id: &str,
     ) -> Result<Option<ReconciledOrder>, OrderAdapterError> {
-        let url = format!(
-            "{}/api/v1/order?origClientOrderId={}",
-            self.base_url, client_order_id
+        let query = self.signed_payload(
+            vec![("origClientOrderId", client_order_id.to_string())],
+            signing::current_timestamp_ms(),
         );
+        let url = format!("{}/api/v1/order?{}", self.base_url, query);
 
         let response = tokio::time::timeout(STATUS_TIMEOUT, async {
             self.http_client
@@ -400,17 +451,20 @@ mod tests {
     }
 
     #[test]
-    fn hitobit_order_builds_correct_request() {
+    fn hitobit_order_builds_correct_params() {
         let req = buy_limit_request();
-        let body = HitobitOrderAdapter::build_place_order_body(&req);
+        let params = HitobitOrderAdapter::place_order_params(&req);
 
-        assert_eq!(body["symbol"], "USDTIRT");
-        assert_eq!(body["side"], "BUY");
-        assert_eq!(body["type"], "LIMIT");
-        assert_eq!(body["quantity"], "100");
-        assert_eq!(body["price"], "58000");
-        assert_eq!(body["timeInForce"], "GTC");
-        assert_eq!(body["newClientOrderId"], "test-uuid-hitobit-001");
+        assert_eq!(params[0], ("symbol", "USDTIRT".to_string()));
+        assert_eq!(params[1], ("side", "BUY".to_string()));
+        assert_eq!(params[2], ("type", "LIMIT".to_string()));
+        assert_eq!(params[3], ("quantity", "100".to_string()));
+        assert_eq!(
+            params[4],
+            ("newClientOrderId", "test-uuid-hitobit-001".to_string())
+        );
+        assert!(params.contains(&("price", "58000".to_string())));
+        assert!(params.contains(&("timeInForce", "GTC".to_string())));
     }
 
     #[test]
@@ -425,13 +479,24 @@ mod tests {
             client_order_id: "market-uuid".to_string(),
             strategy_id: None,
         };
-        let body = HitobitOrderAdapter::build_place_order_body(&req);
+        let params = HitobitOrderAdapter::place_order_params(&req);
 
-        assert_eq!(body["symbol"], "BTCIRT");
-        assert_eq!(body["side"], "SELL");
-        assert_eq!(body["type"], "MARKET");
-        assert!(body["price"].is_null());
-        assert!(body["timeInForce"].is_null());
+        assert!(params.contains(&("symbol", "BTCIRT".to_string())));
+        assert!(params.contains(&("side", "SELL".to_string())));
+        assert!(params.contains(&("type", "MARKET".to_string())));
+        assert!(!params.iter().any(|(k, _)| *k == "price"));
+        assert!(!params.iter().any(|(k, _)| *k == "timeInForce"));
+    }
+
+    #[test]
+    fn hitobit_signed_payload_appends_signature_when_secret_present() {
+        let adapter =
+            HitobitOrderAdapter::with_credentials("http://x", "key", Some("sek".to_string()));
+        let payload =
+            adapter.signed_payload(vec![("orderId", "42".to_string())], 1_700_000_000_000);
+        assert!(payload.contains("timestamp=1700000000000"));
+        let (signed, sig) = payload.rsplit_once("&signature=").expect("signed");
+        assert_eq!(sig, signing::hmac_sha256_hex("sek", signed));
     }
 
     #[test]

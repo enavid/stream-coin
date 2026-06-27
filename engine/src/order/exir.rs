@@ -8,6 +8,7 @@ use crate::order::port::{
     OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderStatusResult,
     OrderType, ReconciledOrder,
 };
+use crate::order::signing;
 
 const PLACE_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
 const CANCEL_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,6 +23,9 @@ pub struct ExirOrderAdapter {
     exchange_id: ExchangeId,
     base_url: String,
     api_key: String,
+    /// HollaEx HMAC secret. `None` falls back to the legacy `Bearer` token; when
+    /// present, requests are signed with `api-key`/`api-expires`/`api-signature` (C10).
+    api_secret: Option<String>,
     http_client: reqwest::Client,
 }
 
@@ -31,11 +35,52 @@ impl ExirOrderAdapter {
     }
 
     pub fn with_base_url(base_url: &str, api_key: &str) -> Self {
+        Self::with_credentials(base_url, api_key, None)
+    }
+
+    /// Constructs an adapter with an optional HollaEx HMAC signing secret (C10).
+    pub fn with_credentials(base_url: &str, api_key: &str, api_secret: Option<String>) -> Self {
         Self {
             exchange_id: ExchangeId::new("exir"),
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
+            api_secret,
             http_client: reqwest::Client::new(),
+        }
+    }
+
+    /// HollaEx request signature: `HMAC-SHA256(secret, VERB + path + expires + body)`.
+    /// `path` includes any query string; `body` is the exact JSON sent ("" for GET).
+    pub fn hollaex_signature(
+        secret: &str,
+        verb: &str,
+        path: &str,
+        expires: i64,
+        body: &str,
+    ) -> String {
+        signing::hmac_sha256_hex(secret, &format!("{verb}{path}{expires}{body}"))
+    }
+
+    /// Applies authentication to a request builder. With a secret: HollaEx HMAC
+    /// headers signing `VERB + path + expires + body`. Without: legacy Bearer token.
+    fn authed(
+        &self,
+        builder: reqwest::RequestBuilder,
+        verb: &str,
+        path: &str,
+        body: &str,
+    ) -> reqwest::RequestBuilder {
+        match &self.api_secret {
+            Some(secret) => {
+                // HollaEx expires is a Unix *seconds* deadline.
+                let expires = signing::current_timestamp_ms() / 1000 + 60;
+                let signature = Self::hollaex_signature(secret, verb, path, expires, body);
+                builder
+                    .header("api-key", &self.api_key)
+                    .header("api-expires", expires.to_string())
+                    .header("api-signature", signature)
+            }
+            None => builder.header("Authorization", format!("Bearer {}", self.api_key)),
         }
     }
 
@@ -268,14 +313,21 @@ impl OrderAdapter for ExirOrderAdapter {
             "placing order"
         );
 
-        let body = Self::build_place_order_body(req);
-        let url = format!("{}/v2/order", self.base_url);
+        if self.api_secret.is_none() {
+            tracing::warn!(
+                exchange = "exir",
+                client_order_id = %req.client_order_id,
+                "placing order WITHOUT request signing — no api_secret configured for this adapter"
+            );
+        }
+        let body = Self::build_place_order_body(req).to_string();
+        let path = "/v2/order";
+        let url = format!("{}{}", self.base_url, path);
 
         let response = tokio::time::timeout(PLACE_ORDER_TIMEOUT, async {
-            self.http_client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&body)
+            self.authed(self.http_client.post(&url), "POST", path, &body)
+                .header("Content-Type", "application/json")
+                .body(body.clone())
                 .send()
                 .await
         })
@@ -310,13 +362,14 @@ impl OrderAdapter for ExirOrderAdapter {
             "cancelling order"
         );
 
-        let url = format!("{}/v2/order", self.base_url);
+        let body = json!({ "order_id": &order_id.0 }).to_string();
+        let path = "/v2/order";
+        let url = format!("{}{}", self.base_url, path);
 
         let response = tokio::time::timeout(CANCEL_ORDER_TIMEOUT, async {
-            self.http_client
-                .delete(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&json!({ "order_id": &order_id.0 }))
+            self.authed(self.http_client.delete(&url), "DELETE", path, &body)
+                .header("Content-Type", "application/json")
+                .body(body.clone())
                 .send()
                 .await
         })
@@ -337,12 +390,11 @@ impl OrderAdapter for ExirOrderAdapter {
         &self,
         order_id: &OrderId,
     ) -> Result<OrderStatusResult, OrderAdapterError> {
-        let url = format!("{}/v2/order/{}", self.base_url, order_id.0);
+        let path = format!("/v2/order/{}", order_id.0);
+        let url = format!("{}{}", self.base_url, path);
 
         let response = tokio::time::timeout(STATUS_TIMEOUT, async {
-            self.http_client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
+            self.authed(self.http_client.get(&url), "GET", &path, "")
                 .send()
                 .await
         })
@@ -363,15 +415,11 @@ impl OrderAdapter for ExirOrderAdapter {
         &self,
         client_order_id: &str,
     ) -> Result<Option<ReconciledOrder>, OrderAdapterError> {
-        let url = format!(
-            "{}/v2/order?client_order_id={}",
-            self.base_url, client_order_id
-        );
+        let path = format!("/v2/order?client_order_id={client_order_id}");
+        let url = format!("{}{}", self.base_url, path);
 
         let response = tokio::time::timeout(STATUS_TIMEOUT, async {
-            self.http_client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
+            self.authed(self.http_client.get(&url), "GET", &path, "")
                 .send()
                 .await
         })
@@ -550,6 +598,30 @@ mod tests {
     fn adapter_exchange_id_is_exir() {
         let adapter = ExirOrderAdapter::new("test-key");
         assert_eq!(adapter.exchange_id().to_string(), "exir");
+    }
+
+    #[test]
+    fn hollaex_signature_signs_verb_path_expires_body() {
+        // HollaEx signs VERB + path + expires + body with HMAC-SHA256; pin the
+        // exact concatenation so the wire signature is reproducible.
+        let sig = ExirOrderAdapter::hollaex_signature(
+            "sekret",
+            "POST",
+            "/v2/order",
+            1_700_000_000,
+            r#"{"symbol":"usdt-irt"}"#,
+        );
+        let expected =
+            signing::hmac_sha256_hex("sekret", "POST/v2/order1700000000{\"symbol\":\"usdt-irt\"}");
+        assert_eq!(sig, expected);
+        assert_eq!(sig.len(), 64);
+    }
+
+    #[test]
+    fn hollaex_signature_differs_for_get_with_empty_body() {
+        let post = ExirOrderAdapter::hollaex_signature("s", "POST", "/v2/order", 1, "{}");
+        let get = ExirOrderAdapter::hollaex_signature("s", "GET", "/v2/order", 1, "");
+        assert_ne!(post, get, "verb and body must affect the signature");
     }
 
     #[test]

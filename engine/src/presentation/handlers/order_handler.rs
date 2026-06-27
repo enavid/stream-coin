@@ -143,7 +143,8 @@ pub async fn place_order(
         "order placement requested"
     );
 
-    match manager.place_order(order_req).await {
+    // Scope the order (and its position limit) to the authenticated placing user.
+    match manager.place_order(Some(ctx.user_id), order_req).await {
         Ok(client_order_id) => {
             tracing::info!(
                 actor_user_id = ctx.user_id,

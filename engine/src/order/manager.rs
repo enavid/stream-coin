@@ -190,13 +190,19 @@ impl OrderManager {
             "signal accepted, executing order"
         );
 
-        self.execute_order(req, None).await
+        // System-level order: no owning user, limited against the system bucket.
+        self.execute_order(req, None, None).await
     }
 
-    /// Direct order placement from REST endpoint or admin.
-    pub async fn place_order(&self, req: OrderRequest) -> Result<String, OrderManagerError> {
+    /// Direct order placement from a REST endpoint, scoped to the placing user
+    /// for position limits. Pass `None` for a system-level (user-less) order.
+    pub async fn place_order(
+        &self,
+        user_id: Option<i32>,
+        req: OrderRequest,
+    ) -> Result<String, OrderManagerError> {
         let client_order_id = req.client_order_id.clone();
-        self.execute_order(req, None).await?;
+        self.execute_order(req, None, user_id).await?;
         Ok(client_order_id)
     }
 
@@ -230,7 +236,8 @@ impl OrderManager {
         );
 
         let client_order_id = req.client_order_id.clone();
-        self.execute_order(req, Some(adapter)).await?;
+        self.execute_order(req, Some(adapter), Some(user_id))
+            .await?;
         Ok(client_order_id)
     }
 
@@ -303,10 +310,13 @@ impl OrderManager {
 
     /// `adapter_override`: when `Some`, bypasses the global `order_adapters` registry
     /// and uses the supplied adapter directly (e.g. for per-user credential-based orders).
+    /// `user_id`: the owning user for per-user position scoping (M8) — `None` for a
+    /// system / signal-driven order, which is limited against its own (user-less) bucket.
     async fn execute_order(
         &self,
         req: OrderRequest,
         adapter_override: Option<Arc<dyn OrderAdapter>>,
+        user_id: Option<i32>,
     ) -> Result<(), OrderManagerError> {
         // A buy adds to the position, a sell reduces it (C7: side-aware netting).
         let signed_qty = match req.side {
@@ -342,12 +352,13 @@ impl OrderManager {
             // against the circuit breaker.
             let net = self
                 .order_repository
-                .net_position(&req.exchange, &req.pair)
+                .net_position(user_id, &req.exchange, &req.pair)
                 .await?;
             let projected = net + signed_qty;
             // The cap bounds absolute exposure in either direction.
             if projected.abs() > self.safety_config.max_position_size {
                 tracing::warn!(
+                    user_id = ?user_id,
                     exchange = %req.exchange,
                     pair = %req.pair,
                     net_position = %net,
@@ -382,7 +393,7 @@ impl OrderManager {
             } else {
                 "open"
             };
-            let record = self.build_record(&req, status, None);
+            let record = self.build_record(&req, status, None, user_id);
             self.order_repository.insert(&record).await?;
             record
         };
@@ -556,10 +567,12 @@ impl OrderManager {
         req: &OrderRequest,
         status: &str,
         exchange_order_id: Option<String>,
+        user_id: Option<i32>,
     ) -> OrderRecord {
         let now = Utc::now();
         OrderRecord {
             id: None,
+            user_id,
             exchange: req.exchange.clone(),
             pair: req.pair.clone(),
             side: req.side.to_string(),
@@ -682,7 +695,7 @@ impl OrderManager {
 
             let net = match self
                 .order_repository
-                .net_position(&signal.exchange, &signal.pair)
+                .net_position(Some(sub.user_id), &signal.exchange, &signal.pair)
                 .await
             {
                 Ok(n) => n,
@@ -771,7 +784,10 @@ impl OrderManager {
                 None
             };
 
-            if let Err(e) = self.execute_order(req, user_adapter).await {
+            if let Err(e) = self
+                .execute_order(req, user_adapter, Some(sub.user_id))
+                .await
+            {
                 tracing::error!(
                     user_id = sub.user_id,
                     subscription_id = sub.id,
@@ -1310,7 +1326,7 @@ mod tests {
 
         // First 60-unit buy is accepted and fills via the poller.
         manager
-            .place_order(order_req(OrderSide::Buy, 60))
+            .place_order(None, order_req(OrderSide::Buy, 60))
             .await
             .expect("first order within the cap must succeed");
 
@@ -1331,7 +1347,9 @@ mod tests {
         }
 
         // Second 60-unit buy must be rejected: 60 filled + 60 = 120 > 100.
-        let res = manager.place_order(order_req(OrderSide::Buy, 60)).await;
+        let res = manager
+            .place_order(None, order_req(OrderSide::Buy, 60))
+            .await;
         assert!(
             matches!(res, Err(OrderManagerError::PositionLimitExceeded(_, _))),
             "filled inventory must count toward the position limit"
@@ -1353,20 +1371,82 @@ mod tests {
         let (manager, _repo, _rx) = build_manager_with_repo(cfg, FakeOrderAdapter::new("tabdeal"));
 
         manager
-            .place_order(order_req(OrderSide::Buy, 100))
+            .place_order(None, order_req(OrderSide::Buy, 100))
             .await
             .expect("buy up to the cap must succeed");
 
         manager
-            .place_order(order_req(OrderSide::Sell, 50))
+            .place_order(None, order_req(OrderSide::Sell, 50))
             .await
             .expect("a reducing sell must be allowed at the position cap");
 
         // Net is now 50; a further 60 buy would reach 110 > 100 and is rejected.
-        let res = manager.place_order(order_req(OrderSide::Buy, 60)).await;
+        let res = manager
+            .place_order(None, order_req(OrderSide::Buy, 60))
+            .await;
         assert!(
             matches!(res, Err(OrderManagerError::PositionLimitExceeded(_, _))),
             "net 50 + 60 = 110 must still be capped at 100"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn position_limit_is_scoped_per_user() {
+        // M8: the position cap is enforced per user. User 1 hitting the cap must
+        // not block user 2 (or the system bucket) from placing their own orders.
+        let cfg = SafetyConfig {
+            dry_run: false,
+            max_position_size: Decimal::new(100, 0),
+            default_order_quantity: Decimal::new(100, 0),
+            circuit_breaker_max_orders: 100,
+            circuit_breaker_window_secs: 60,
+            min_confidence: 0.0,
+        };
+        let (manager, repo, _rx) = build_manager_with_repo(cfg, FakeOrderAdapter::new("tabdeal"));
+
+        // User 1 fills their cap.
+        manager
+            .place_order(Some(1), order_req(OrderSide::Buy, 100))
+            .await
+            .expect("user 1's first order fits their own cap");
+        // User 1 is now at the cap — another unit is rejected for THEM.
+        assert!(
+            matches!(
+                manager
+                    .place_order(Some(1), order_req(OrderSide::Buy, 1))
+                    .await,
+                Err(OrderManagerError::PositionLimitExceeded(_, _))
+            ),
+            "user 1 over their own cap must be rejected"
+        );
+        // User 2 is unaffected by user 1's exposure.
+        manager
+            .place_order(Some(2), order_req(OrderSide::Buy, 100))
+            .await
+            .expect("user 2 has their own independent cap");
+        // The system bucket is unaffected too.
+        manager
+            .place_order(None, order_req(OrderSide::Buy, 100))
+            .await
+            .expect("the system bucket is independent of any user");
+
+        assert_eq!(
+            repo.net_position(Some(1), "tabdeal", "USDT/IRT")
+                .await
+                .unwrap(),
+            Decimal::new(100, 0)
+        );
+        assert_eq!(
+            repo.net_position(Some(2), "tabdeal", "USDT/IRT")
+                .await
+                .unwrap(),
+            Decimal::new(100, 0)
+        );
+        assert_eq!(
+            repo.net_position(None, "tabdeal", "USDT/IRT")
+                .await
+                .unwrap(),
+            Decimal::new(100, 0)
         );
     }
 
@@ -1387,7 +1467,7 @@ mod tests {
         for _ in 0..5 {
             let m = manager.clone();
             handles.push(tokio::spawn(async move {
-                m.place_order(order_req(OrderSide::Buy, 60)).await
+                m.place_order(None, order_req(OrderSide::Buy, 60)).await
             }));
         }
 
@@ -1402,7 +1482,10 @@ mod tests {
             accepted, 1,
             "exactly one 60-unit order fits under the 100 cap — the rest must be rejected"
         );
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert!(
             net <= Decimal::new(100, 0),
             "net position {net} must never exceed the cap under concurrency"
@@ -1489,7 +1572,7 @@ mod tests {
         let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
 
         manager
-            .place_order(order_req(OrderSide::Buy, 100))
+            .place_order(None, order_req(OrderSide::Buy, 100))
             .await
             .expect("a reconciled live order must not surface as an error");
 
@@ -1504,7 +1587,10 @@ mod tests {
             Some("exch-reconciled-1"),
             "the exchange id discovered by reconciliation must be persisted"
         );
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(
             net,
             Decimal::new(100, 0),
@@ -1526,12 +1612,17 @@ mod tests {
         adapter.will_reconcile_not_found().await;
         let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
 
-        let result = manager.place_order(order_req(OrderSide::Buy, 100)).await;
+        let result = manager
+            .place_order(None, order_req(OrderSide::Buy, 100))
+            .await;
         assert!(matches!(result, Err(OrderManagerError::Adapter(_))));
 
         let records = repo.all_records().await;
         assert_eq!(records[0].status, "failed");
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(
             net,
             Decimal::ZERO,
@@ -1558,7 +1649,9 @@ mod tests {
             .await;
         let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
 
-        let result = manager.place_order(order_req(OrderSide::Buy, 100)).await;
+        let result = manager
+            .place_order(None, order_req(OrderSide::Buy, 100))
+            .await;
         assert!(
             matches!(result, Err(OrderManagerError::Adapter(_))),
             "the caller is still told placement did not confirm"
@@ -1569,7 +1662,10 @@ mod tests {
             records[0].status, "open",
             "an unconfirmed order must stay open, never failed, to avoid orphaning"
         );
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(
             net,
             Decimal::new(100, 0),
@@ -1596,7 +1692,9 @@ mod tests {
             .await;
         let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
 
-        let result = manager.place_order(order_req(OrderSide::Buy, 100)).await;
+        let result = manager
+            .place_order(None, order_req(OrderSide::Buy, 100))
+            .await;
         assert!(matches!(result, Err(OrderManagerError::Adapter(_))));
 
         let records = repo.all_records().await;
@@ -1637,7 +1735,7 @@ mod tests {
             strategy_id: None,
         };
 
-        manager.place_order(req).await.unwrap();
+        manager.place_order(None, req).await.unwrap();
 
         let text = rx
             .try_recv()
@@ -1683,7 +1781,7 @@ mod tests {
             strategy_id: None,
         };
 
-        manager.place_order(req).await.unwrap();
+        manager.place_order(None, req).await.unwrap();
 
         assert!(
             manager.has_active_poll("client-cancel-001").await,
@@ -1773,7 +1871,7 @@ mod tests {
         let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
 
         manager
-            .place_order(order_req(OrderSide::Buy, 100))
+            .place_order(None, order_req(OrderSide::Buy, 100))
             .await
             .unwrap();
 
@@ -1812,7 +1910,7 @@ mod tests {
 
         let req = order_req(OrderSide::Buy, 100);
         let client_order_id = req.client_order_id.clone();
-        manager.place_order(req).await.unwrap();
+        manager.place_order(None, req).await.unwrap();
 
         // Wait for the poller to record the partial fill.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -1835,7 +1933,10 @@ mod tests {
             Decimal::new(40, 0),
             "the partial fill must survive the cancel"
         );
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(
             net,
             Decimal::new(40, 0),

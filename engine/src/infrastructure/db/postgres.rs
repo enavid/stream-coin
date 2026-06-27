@@ -14,6 +14,9 @@ use crate::infrastructure::db::credential_repository::{
     CredentialRepository, CredentialRepositoryError, CredentialSummary,
 };
 use crate::infrastructure::db::exchange_repository::{ExchangeRepository, ExchangeRepositoryError};
+use crate::infrastructure::db::order_repository::{
+    OrderRecord, OrderRepository, OrderRepositoryError,
+};
 use crate::infrastructure::db::subscription_repository::{
     SubscriptionRecord, SubscriptionRepository, SubscriptionRepositoryError,
 };
@@ -908,5 +911,190 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .await
         .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
         Ok(result.rows_affected())
+    }
+}
+
+/// Postgres-backed `OrderRepository` (M11). Persists orders so open-order state,
+/// position limits and timeout reconciliation survive a restart instead of living
+/// only in process memory. NUMERIC columns are read via a `::text` cast and parsed
+/// into `Decimal` (the project-wide convention, see [`parse_decimal`]).
+pub struct PostgresOrderRepository {
+    pool: PgPool,
+}
+
+impl PostgresOrderRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Column list for SELECTs, with every NUMERIC column cast to text so it can
+    /// be parsed losslessly into `Decimal`.
+    const SELECT_COLUMNS: &'static str = "id, user_id, exchange, pair, side, order_type, \
+         quantity::text AS quantity, filled_quantity::text AS filled_quantity, \
+         price::text AS price, status, exchange_order_id, client_order_id, strategy_id, \
+         created_at, updated_at";
+
+    fn row_to_record(row: &sqlx::postgres::PgRow) -> Result<OrderRecord, OrderRepositoryError> {
+        let parse_required = |col: &str| -> Result<rust_decimal::Decimal, OrderRepositoryError> {
+            row.get::<String, _>(col).parse().map_err(|e| {
+                OrderRepositoryError::Database(format!("unparseable {col} from orders row: {e}"))
+            })
+        };
+        Ok(OrderRecord {
+            id: Some(row.get::<i64, _>("id")),
+            user_id: row.get::<Option<i32>, _>("user_id"),
+            exchange: row.get("exchange"),
+            pair: row.get("pair"),
+            side: row.get("side"),
+            order_type: row.get("order_type"),
+            quantity: parse_required("quantity")?,
+            filled_quantity: parse_required("filled_quantity")?,
+            price: parse_decimal(row.get::<Option<String>, _>("price")),
+            status: row.get("status"),
+            exchange_order_id: row.get("exchange_order_id"),
+            client_order_id: row.get("client_order_id"),
+            strategy_id: row.get("strategy_id"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
+    }
+}
+
+#[async_trait]
+impl OrderRepository for PostgresOrderRepository {
+    async fn insert(&self, record: &OrderRecord) -> Result<i64, OrderRepositoryError> {
+        let row = sqlx::query(
+            "INSERT INTO orders
+                 (user_id, exchange, pair, side, order_type, quantity, filled_quantity,
+                  price, status, exchange_order_id, client_order_id, strategy_id,
+                  created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6::numeric, $7::numeric, $8::numeric, $9, $10,
+                     $11, $12, $13, $14)
+             RETURNING id",
+        )
+        .bind(record.user_id)
+        .bind(&record.exchange)
+        .bind(&record.pair)
+        .bind(&record.side)
+        .bind(&record.order_type)
+        .bind(record.quantity.to_string())
+        .bind(record.filled_quantity.to_string())
+        .bind(record.price.map(|p| p.to_string()))
+        .bind(&record.status)
+        .bind(record.exchange_order_id.as_deref())
+        .bind(&record.client_order_id)
+        .bind(record.strategy_id.as_deref())
+        .bind(record.created_at)
+        .bind(record.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| OrderRepositoryError::Database(e.to_string()))?;
+        Ok(row.get::<i64, _>("id"))
+    }
+
+    async fn update_status(
+        &self,
+        client_order_id: &str,
+        status: &str,
+        exchange_order_id: Option<&str>,
+        fill_price: Option<rust_decimal::Decimal>,
+        filled_quantity: Option<rust_decimal::Decimal>,
+    ) -> Result<(), OrderRepositoryError> {
+        // No fill_price column today (parity with the in-memory repo); accept it on
+        // the port so a future column needs no signature change.
+        let _ = fill_price;
+        let result = sqlx::query(
+            "UPDATE orders
+             SET status = $2,
+                 exchange_order_id = COALESCE($3, exchange_order_id),
+                 filled_quantity = COALESCE($4::numeric, filled_quantity),
+                 updated_at = NOW()
+             WHERE client_order_id = $1",
+        )
+        .bind(client_order_id)
+        .bind(status)
+        .bind(exchange_order_id)
+        .bind(filled_quantity.map(|q| q.to_string()))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| OrderRepositoryError::Database(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(OrderRepositoryError::NotFound(client_order_id.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn net_position(
+        &self,
+        user_id: Option<i32>,
+        exchange: &str,
+        pair: &str,
+    ) -> Result<rust_decimal::Decimal, OrderRepositoryError> {
+        // The exposure rules (M7/M8) live in SQL so the database is the single
+        // source of truth even with multiple engine instances:
+        //  - open/filled/partially_filled count the full quantity (conservative),
+        //  - cancelled/failed count only what actually executed,
+        //  - the user bucket is matched with IS NOT DISTINCT FROM so the NULL
+        //    (system) bucket is selected by a NULL parameter.
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(
+                 (CASE WHEN side = 'sell' THEN -1 ELSE 1 END) *
+                 (CASE
+                     WHEN status IN ('open', 'filled', 'partially_filled') THEN quantity
+                     WHEN status IN ('cancelled', 'failed') THEN filled_quantity
+                     ELSE 0
+                  END)
+             ), 0)::text AS net
+             FROM orders
+             WHERE user_id IS NOT DISTINCT FROM $1 AND exchange = $2 AND pair = $3",
+        )
+        .bind(user_id)
+        .bind(exchange)
+        .bind(pair)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| OrderRepositoryError::Database(e.to_string()))?;
+
+        row.get::<String, _>("net")
+            .parse()
+            .map_err(|e| OrderRepositoryError::Database(format!("unparseable net position: {e}")))
+    }
+
+    async fn get_by_client_order_id(
+        &self,
+        client_order_id: &str,
+    ) -> Result<OrderRecord, OrderRepositoryError> {
+        let sql = format!(
+            "SELECT {} FROM orders WHERE client_order_id = $1",
+            Self::SELECT_COLUMNS
+        );
+        let row = sqlx::query(&sql)
+            .bind(client_order_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| OrderRepositoryError::Database(e.to_string()))?
+            .ok_or_else(|| OrderRepositoryError::NotFound(client_order_id.to_string()))?;
+        Self::row_to_record(&row)
+    }
+
+    async fn list(
+        &self,
+        exchange: Option<&str>,
+        pair: Option<&str>,
+    ) -> Result<Vec<OrderRecord>, OrderRepositoryError> {
+        let sql = format!(
+            "SELECT {} FROM orders
+             WHERE ($1::text IS NULL OR exchange = $1) AND ($2::text IS NULL OR pair = $2)
+             ORDER BY id",
+            Self::SELECT_COLUMNS
+        );
+        let rows = sqlx::query(&sql)
+            .bind(exchange)
+            .bind(pair)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| OrderRepositoryError::Database(e.to_string()))?;
+        rows.iter().map(Self::row_to_record).collect()
     }
 }

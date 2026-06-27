@@ -6,4 +6,5 @@ pub mod fake;
 pub mod hitobit;
 pub mod manager;
 pub mod port;
+pub mod signing;
 pub mod tabdeal;

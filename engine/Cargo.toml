@@ -35,6 +35,8 @@ rust_decimal = { version = "1", features = ["db-postgres"] }
 libc = "0.2"
 argon2 = "0.5"
 aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
 rand = "0.8"
 base64 = "0.22"
 prost = "0.13"

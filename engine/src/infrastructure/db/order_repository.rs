@@ -7,6 +7,9 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone)]
 pub struct OrderRecord {
     pub id: Option<i64>,
+    /// Owning user. `None` for a system / signal-driven order (no owning user);
+    /// `Some(id)` scopes the order to one user for per-user position limits (M8).
+    pub user_id: Option<i32>,
     pub exchange: String,
     pub pair: String,
     pub side: String,
@@ -54,9 +57,14 @@ pub trait OrderRepository: Send + Sync {
         filled_quantity: Option<Decimal>,
     ) -> Result<(), OrderRepositoryError>;
 
-    /// Returns the signed **net position** for the given exchange + pair: the sum
-    /// of buy quantities minus sell quantities over every order that carries real
-    /// or pending exposure. A positive value is net long, a negative value net short.
+    /// Returns the signed **net position** for one user bucket + exchange + pair:
+    /// the sum of buy quantities minus sell quantities over every order that
+    /// carries real or pending exposure. A positive value is net long, a negative
+    /// value net short.
+    ///
+    /// `user_id` selects the bucket (M8): `None` sums only system / signal-driven
+    /// orders (rows with no owning user); `Some(id)` sums only that user's orders,
+    /// so one user's exposure never counts against another's position limit.
     ///
     /// Each order contributes (M7):
     /// - `open` / `filled` / `partially_filled` → full `quantity` (the whole order
@@ -68,6 +76,7 @@ pub trait OrderRepository: Send + Sync {
     /// - `dry_run` → nothing (no real exposure).
     async fn net_position(
         &self,
+        user_id: Option<i32>,
         exchange: &str,
         pair: &str,
     ) -> Result<Decimal, OrderRepositoryError>;
@@ -149,13 +158,14 @@ impl OrderRepository for FakeOrderRepository {
 
     async fn net_position(
         &self,
+        user_id: Option<i32>,
         exchange: &str,
         pair: &str,
     ) -> Result<Decimal, OrderRepositoryError> {
         let recs = self.records.lock().await;
         let net = recs
             .iter()
-            .filter(|r| r.exchange == exchange && r.pair == pair)
+            .filter(|r| r.user_id == user_id && r.exchange == exchange && r.pair == pair)
             .fold(Decimal::ZERO, |acc, r| {
                 let exposure = match r.status.as_str() {
                     "open" | "filled" | "partially_filled" => r.quantity,
@@ -218,6 +228,7 @@ mod tests {
         let now = Utc::now();
         OrderRecord {
             id: None,
+            user_id: None,
             exchange: "tabdeal".to_string(),
             pair: "USDT/IRT".to_string(),
             side: side.to_string(),
@@ -289,7 +300,10 @@ mod tests {
         ))
         .await
         .unwrap();
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(
             net,
             Decimal::new(170, 0),
@@ -317,7 +331,10 @@ mod tests {
         ))
         .await
         .unwrap();
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(net, Decimal::new(70, 0), "100 buy - 30 sell = 70 net");
     }
 
@@ -333,7 +350,10 @@ mod tests {
         repo.insert(&make_record("uuid-3", "dry_run", Decimal::new(100, 0)))
             .await
             .unwrap();
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(
             net,
             Decimal::ZERO,
@@ -410,7 +430,10 @@ mod tests {
         repo.update_status("uuid-1", "cancelled", None, None, None)
             .await
             .unwrap();
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(
             net,
             Decimal::new(40, 0),
@@ -425,7 +448,10 @@ mod tests {
         repo.insert(&make_record("uuid-1", "cancelled", Decimal::new(100, 0)))
             .await
             .unwrap();
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(net, Decimal::ZERO);
     }
 
@@ -446,11 +472,51 @@ mod tests {
         )
         .await
         .unwrap();
-        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        let net = repo
+            .net_position(None, "tabdeal", "USDT/IRT")
+            .await
+            .unwrap();
         assert_eq!(
             net,
             Decimal::new(100, 0),
             "an active partial fill is still committed to its full quantity"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_net_position_is_scoped_per_user() {
+        // M8: one user's exposure must never count against another's limit, and a
+        // system order (user_id None) is its own bucket separate from both.
+        let repo = FakeOrderRepository::new();
+        let mut u1 = make_record("u1-buy", "filled", Decimal::new(100, 0));
+        u1.user_id = Some(1);
+        let mut u2 = make_record("u2-buy", "filled", Decimal::new(30, 0));
+        u2.user_id = Some(2);
+        let sys = make_record("sys-buy", "filled", Decimal::new(7, 0)); // user_id None
+        repo.insert(&u1).await.unwrap();
+        repo.insert(&u2).await.unwrap();
+        repo.insert(&sys).await.unwrap();
+
+        assert_eq!(
+            repo.net_position(Some(1), "tabdeal", "USDT/IRT")
+                .await
+                .unwrap(),
+            Decimal::new(100, 0),
+            "user 1 sees only their own 100"
+        );
+        assert_eq!(
+            repo.net_position(Some(2), "tabdeal", "USDT/IRT")
+                .await
+                .unwrap(),
+            Decimal::new(30, 0),
+            "user 2 sees only their own 30"
+        );
+        assert_eq!(
+            repo.net_position(None, "tabdeal", "USDT/IRT")
+                .await
+                .unwrap(),
+            Decimal::new(7, 0),
+            "the system bucket sees only the user-less order"
         );
     }
 
@@ -460,7 +526,7 @@ mod tests {
         repo.insert(&make_record("uuid-1", "open", Decimal::new(100, 0)))
             .await
             .unwrap();
-        let net = repo.net_position("tabdeal", "BTC/IRT").await.unwrap();
+        let net = repo.net_position(None, "tabdeal", "BTC/IRT").await.unwrap();
         assert_eq!(net, Decimal::ZERO, "different pair must not count");
     }
 
