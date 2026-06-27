@@ -11,8 +11,7 @@ pub enum PublisherError {
 #[async_trait]
 pub trait MessagePublisher: Send + Sync {
     /// Publishes a UTF-8 text `payload` to `topic` with the given `key` — used
-    /// for the JSON topics (`prices`, and the JSON side of `candles`/`signals`
-    /// during the protobuf migration). Errors are non-fatal: the caller logs
+    /// for the `prices` JSON topic. Errors are non-fatal: the caller logs
     /// them and continues broadcasting to WS clients.
     async fn publish(&self, topic: &str, key: &str, payload: &str) -> Result<(), PublisherError>;
 

@@ -28,11 +28,6 @@ fn spawn_price_forwarder(
     use crate::presentation::ws_message::{PricePayload, WsMessage};
 
     let price_topic = std::env::var("KAFKA_TOPIC_PRICES").unwrap_or_else(|_| "prices".to_string());
-    let candle_topic =
-        std::env::var("KAFKA_TOPIC_CANDLES").unwrap_or_else(|_| "candles".to_string());
-    // Protobuf side of the `candles` topic (ROADMAP Loop 4c). Published in
-    // parallel with the JSON topic during the migration; JSON consumers are
-    // unaffected, and the WS/JSON-Kafka payloads stay byte-identical.
     let candle_proto_topic =
         std::env::var("KAFKA_TOPIC_CANDLES_PROTO").unwrap_or_else(|_| "candles.proto".to_string());
 
@@ -108,12 +103,7 @@ fn spawn_price_forwarder(
                         }
                         match serde_json::to_string(&WsMessage::Candle(payload)) {
                             Ok(json) => {
-                                let _ = broadcaster.send(json.clone());
-                                if let Some(ref pub_) = publisher {
-                                    if let Err(e) = pub_.publish(&candle_topic, &key, &json).await {
-                                        tracing::error!(error = %e, "failed to publish candle to kafka");
-                                    }
-                                }
+                                let _ = broadcaster.send(json);
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, "failed to serialize candle");
@@ -929,10 +919,12 @@ mod tests {
         );
     }
 
+    /// ROADMAP Loop 4c-3 acceptance test: the JSON `candles` topic must receive
+    /// no messages once all consumers have migrated to `candles.proto`.
+    /// Uses the proto arrival as a reliable "candle was processed" sentinel
+    /// before asserting the JSON side is silent.
     #[actix_web::test]
-    async fn closed_candle_published_to_kafka() {
-        // Two prices in different 1m windows: 10:00:30 and 10:01:00.
-        // The second tick closes the 10:00 candle → publisher must receive it on "candles".
+    async fn json_candle_topic_no_longer_receives_messages() {
         let price1 = Price {
             exchange: ExchangeId::new("tabdeal"),
             pair: TradingPair::new("USDT", "IRT"),
@@ -995,17 +987,204 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let messages = publisher.published();
-                if messages.iter().any(|(topic, _, payload)| {
-                    topic == "candles" && payload.contains("\"type\":\"candle\"")
-                }) {
+                if publisher
+                    .published_bytes()
+                    .iter()
+                    .any(|(topic, _, _)| topic == "candles.proto")
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("a closed candle must be published to the candles Kafka topic within 5s");
+        .expect("candles.proto must receive a message — used as processing sentinel");
+
+        let json_messages = publisher.published();
+        assert!(
+            json_messages.iter().all(|(topic, _, _)| topic != "candles"),
+            "the JSON candles topic must receive no messages after the protobuf migration"
+        );
+    }
+
+    /// After Loop 4c-3, a closed candle triggers exactly two Kafka publishes:
+    /// one protobuf on `candles.proto` and nothing on the JSON `candles` topic.
+    /// Additionally, `prices` JSON must still flow (prices are not migrated).
+    #[actix_web::test]
+    async fn only_proto_and_prices_topics_receive_messages_after_candle_migration() {
+        let price1 = Price {
+            exchange: ExchangeId::new("tabdeal"),
+            pair: TradingPair::new("USDT", "IRT"),
+            bid: 58000,
+            ask: 58100,
+            timestamp: Utc.with_ymd_and_hms(2026, 6, 20, 10, 0, 30).unwrap(),
+        };
+        let price2 = Price {
+            exchange: ExchangeId::new("tabdeal"),
+            pair: TradingPair::new("USDT", "IRT"),
+            bid: 59000,
+            ask: 59100,
+            timestamp: Utc.with_ymd_and_hms(2026, 6, 20, 10, 1, 0).unwrap(),
+        };
+
+        let publisher = Arc::new(MockPublisher::new());
+        let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+        adapters.insert(
+            "tabdeal".to_string(),
+            Arc::new(TwoPriceAdapter { price1, price2 }),
+        );
+
+        let state = web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(adapters)),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            publisher: Some(Arc::clone(&publisher) as Arc<dyn crate::kafka::port::MessagePublisher>),
+            broadcaster: AppState::new_broadcaster(),
+            jwt_secret: None,
+            ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
+            signal_repository: None,
+            order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            order_manager: None,
+            python_strategy_repository: None,
+            candle_repository: None,
+            historical_sources: Arc::new(HashMap::new()),
+            candle_history: AppState::new_candle_history(),
+            exchange_repository: None,
+            asset_repository: None,
+            subscription_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
+        });
+
+        let dummy_req = test::TestRequest::default().to_http_request();
+        start_kline_symbol_ticker(
+            state,
+            ValidatedJson(SymbolRequest {
+                exchange: ExchangeId::new("tabdeal"),
+                symbol: TradingPair::new("USDT", "IRT"),
+            }),
+        )
+        .await
+        .respond_to(&dummy_req);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if publisher
+                    .published_bytes()
+                    .iter()
+                    .any(|(topic, _, _)| topic == "candles.proto")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("candles.proto must arrive to confirm the candle was fully processed");
+
+        let json_msgs = publisher.published();
+        for (topic, _, _) in &json_msgs {
+            assert_eq!(
+                topic, "prices",
+                "only the prices JSON topic is allowed after candle migration; found: {topic}"
+            );
+        }
+        assert!(
+            json_msgs.iter().any(|(topic, _, _)| topic == "prices"),
+            "prices JSON topic must still receive messages — prices are not migrated"
+        );
+    }
+
+    /// The WS broadcaster must still deliver the closed candle as JSON even after
+    /// the Kafka JSON publish is removed. The UI chart feed must not be disrupted.
+    #[actix_web::test]
+    async fn candle_still_broadcast_over_ws_after_json_kafka_removal() {
+        let price1 = Price {
+            exchange: ExchangeId::new("tabdeal"),
+            pair: TradingPair::new("USDT", "IRT"),
+            bid: 58000,
+            ask: 58100,
+            timestamp: Utc.with_ymd_and_hms(2026, 6, 20, 10, 0, 30).unwrap(),
+        };
+        let price2 = Price {
+            exchange: ExchangeId::new("tabdeal"),
+            pair: TradingPair::new("USDT", "IRT"),
+            bid: 59000,
+            ask: 59100,
+            timestamp: Utc.with_ymd_and_hms(2026, 6, 20, 10, 1, 0).unwrap(),
+        };
+
+        let broadcaster = AppState::new_broadcaster();
+        let mut rx = broadcaster.subscribe();
+        let mut adapters: HashMap<String, Arc<dyn ExchangeAdapter>> = HashMap::new();
+        adapters.insert(
+            "tabdeal".to_string(),
+            Arc::new(TwoPriceAdapter { price1, price2 }),
+        );
+
+        let state = web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(adapters)),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            publisher: None,
+            broadcaster,
+            jwt_secret: None,
+            ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
+            signal_repository: None,
+            order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            order_manager: None,
+            python_strategy_repository: None,
+            candle_repository: None,
+            historical_sources: Arc::new(HashMap::new()),
+            candle_history: AppState::new_candle_history(),
+            exchange_repository: None,
+            asset_repository: None,
+            subscription_repository: None,
+            user_repository: None,
+            credential_repository: None,
+            credential_cipher: None,
+        });
+
+        let dummy_req = test::TestRequest::default().to_http_request();
+        start_kline_symbol_ticker(
+            state,
+            ValidatedJson(SymbolRequest {
+                exchange: ExchangeId::new("tabdeal"),
+                symbol: TradingPair::new("USDT", "IRT"),
+            }),
+        )
+        .await
+        .respond_to(&dummy_req);
+
+        let saw_candle = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(text) => {
+                        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                        if v["type"] == "candle" {
+                            break true;
+                        }
+                    }
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("candle WS broadcast must arrive within 5s");
+
+        assert!(
+            saw_candle,
+            "closed candle must still be broadcast over WS after Kafka JSON removal"
+        );
     }
 
     #[actix_web::test]

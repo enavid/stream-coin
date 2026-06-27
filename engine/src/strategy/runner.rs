@@ -71,10 +71,6 @@ pub fn spawn_strategy_runner(
     signal_repository: Option<Arc<dyn SignalRepository>>,
 ) -> AbortHandle {
     let mut rx = broadcaster.subscribe();
-    let signals_topic =
-        std::env::var("KAFKA_TOPIC_SIGNALS").unwrap_or_else(|_| "signals".to_string());
-    // Protobuf side of the `signals` topic (ROADMAP Loop 4c), published in
-    // parallel with the JSON topic during the migration.
     let signals_proto_topic =
         std::env::var("KAFKA_TOPIC_SIGNALS_PROTO").unwrap_or_else(|_| "signals.proto".to_string());
     let tracker = LiveTradeTracker::new();
@@ -195,18 +191,7 @@ pub fn spawn_strategy_runner(
 
                 match serde_json::to_string(&WsMessage::Signal(payload)) {
                     Ok(json) => {
-                        let _ = broadcaster.send(json.clone());
-                        if let Some(ref pub_) = publisher {
-                            if let Err(e) =
-                                pub_.publish(&signals_topic, &sig.strategy_id, &json).await
-                            {
-                                tracing::error!(
-                                    error = %e,
-                                    signal_id = %signal_id,
-                                    "failed to publish signal to kafka"
-                                );
-                            }
-                        }
+                        let _ = broadcaster.send(json);
                     }
                     Err(e) => {
                         tracing::error!(
@@ -308,6 +293,117 @@ mod tests {
         assert_eq!(signal.exchange, "tabdeal");
         assert_eq!(signal.pair, "USDT/IRT");
         assert!(!signal.signal_id.is_empty(), "signal_id must be set");
+    }
+
+    /// ROADMAP Loop 4c-3 acceptance test for signals: the JSON `signals` topic
+    /// must receive no messages once consumers have migrated to `signals.proto`.
+    /// Uses proto arrival as the "signal was processed" sentinel.
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_signal_topic_no_longer_receives_messages() {
+        let publisher = Arc::new(MockPublisher::new());
+        let (tx, _rx) = broadcast::channel::<String>(16);
+        let strategy: Arc<dyn Strategy> = Arc::new(SpreadThresholdStrategy::new(
+            "test-spread",
+            "tabdeal",
+            "USDT/IRT",
+            1000,
+        ));
+
+        let handle = spawn_strategy_runner(
+            strategy,
+            tx.clone(),
+            Some(Arc::clone(&publisher) as Arc<dyn MessagePublisher>),
+            None,
+        );
+
+        let price_json = serde_json::to_string(&WsMessage::PriceUpdate(PricePayload {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            bid: 175_000,
+            ask: 177_000,
+            timestamp: Utc::now(),
+        }))
+        .unwrap();
+        tx.send(price_json).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if publisher
+                    .published_bytes()
+                    .iter()
+                    .any(|(topic, _, _)| topic == "signals.proto")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("signals.proto must receive a message — used as processing sentinel");
+
+        handle.abort();
+
+        let json_messages = publisher.published();
+        assert!(
+            json_messages.iter().all(|(topic, _, _)| topic != "signals"),
+            "the JSON signals topic must receive no messages after the protobuf migration"
+        );
+    }
+
+    /// After proto migration, every JSON Kafka message from the strategy runner
+    /// must come from a topic that is NOT `signals`. Signals only go as protobuf.
+    #[tokio::test(flavor = "current_thread")]
+    async fn strategy_runner_emits_no_json_kafka_traffic_after_signal_migration() {
+        let publisher = Arc::new(MockPublisher::new());
+        let (tx, _rx) = broadcast::channel::<String>(16);
+        let strategy: Arc<dyn Strategy> = Arc::new(SpreadThresholdStrategy::new(
+            "sig-audit",
+            "tabdeal",
+            "USDT/IRT",
+            500,
+        ));
+
+        let handle = spawn_strategy_runner(
+            strategy,
+            tx.clone(),
+            Some(Arc::clone(&publisher) as Arc<dyn MessagePublisher>),
+            None,
+        );
+
+        let price_json = serde_json::to_string(&WsMessage::PriceUpdate(PricePayload {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            bid: 175_000,
+            ask: 177_000,
+            timestamp: Utc::now(),
+        }))
+        .unwrap();
+        tx.send(price_json).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if publisher
+                    .published_bytes()
+                    .iter()
+                    .any(|(topic, _, _)| topic == "signals.proto")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("signals.proto must arrive to confirm processing");
+
+        handle.abort();
+
+        let json_messages = publisher.published();
+        for (topic, _, _) in &json_messages {
+            assert_ne!(
+                topic, "signals",
+                "the JSON signals Kafka topic must not be written after migration; found: {topic}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
