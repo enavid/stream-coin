@@ -64,6 +64,10 @@ pub struct OrderManager {
     /// Resolves per-user exchange credentials into `OrderAdapter` instances.
     /// Used by admin order placement and signal fanout.
     credential_resolver: Option<Arc<dyn CredentialResolver>>,
+    /// Serializes the position-limit check-and-reserve so concurrent placements
+    /// cannot both read a stale net position and overshoot `max_position_size`
+    /// (held only across read→check→reserve, never across the exchange call).
+    position_guard: Arc<Mutex<()>>,
 }
 
 impl OrderManager {
@@ -103,6 +107,7 @@ impl OrderManager {
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
             subscription_repository: None,
             credential_resolver: None,
+            position_guard: Arc::new(Mutex::new(())),
         }
     }
 
@@ -301,37 +306,86 @@ impl OrderManager {
         req: OrderRequest,
         adapter_override: Option<Arc<dyn OrderAdapter>>,
     ) -> Result<(), OrderManagerError> {
-        // Position limit checked first — must not count rejected orders against the circuit breaker
-        let open_qty = self
-            .order_repository
-            .get_open_quantity(&req.exchange, &req.pair)
-            .await?;
-        let projected = open_qty + req.quantity;
-        if projected > self.safety_config.max_position_size {
-            tracing::warn!(
-                exchange = %req.exchange,
-                pair = %req.pair,
-                open_qty = %open_qty,
-                requested = %req.quantity,
-                max = %self.safety_config.max_position_size,
-                "order blocked: position limit would be exceeded"
-            );
-            return Err(OrderManagerError::PositionLimitExceeded(
-                projected,
-                self.safety_config.max_position_size,
-            ));
-        }
+        // A buy adds to the position, a sell reduces it (C7: side-aware netting).
+        let signed_qty = match req.side {
+            OrderSide::Buy => req.quantity,
+            OrderSide::Sell => -req.quantity,
+        };
 
-        // Circuit breaker — only incremented after position limit passes
-        {
-            let mut cb = self.circuit_breaker.lock().await;
-            cb.record_order()
-                .map_err(|CircuitBreakerError::Tripped(_, _)| {
-                    OrderManagerError::CircuitBreakerTripped
-                })?;
-        }
+        // Resolve the live adapter up-front so we never reserve a position we
+        // cannot actually place (dry-run needs no adapter).
+        let adapter = if self.safety_config.dry_run {
+            None
+        } else if let Some(a) = adapter_override {
+            Some(a)
+        } else {
+            let adapters = self.order_adapters.read().await;
+            Some(
+                adapters
+                    .get(&req.exchange)
+                    .ok_or_else(|| OrderManagerError::NoAdapterForExchange(req.exchange.clone()))?
+                    .clone(),
+            )
+        };
 
-        // Dry-run — full pipeline runs but no real exchange call
+        // --- Atomic check-and-reserve (C9) -----------------------------------
+        // Held across read -> check -> circuit-breaker -> reserve so two
+        // concurrent placements cannot both pass a stale net-position read and
+        // overshoot the cap. Released before the (slow) exchange call below — by
+        // then the reserving row is already visible to others via net_position.
+        let record = {
+            let _guard = self.position_guard.lock().await;
+
+            // Position limit checked first — rejected orders must not count
+            // against the circuit breaker.
+            let net = self
+                .order_repository
+                .net_position(&req.exchange, &req.pair)
+                .await?;
+            let projected = net + signed_qty;
+            // The cap bounds absolute exposure in either direction.
+            if projected.abs() > self.safety_config.max_position_size {
+                tracing::warn!(
+                    exchange = %req.exchange,
+                    pair = %req.pair,
+                    net_position = %net,
+                    requested = %req.quantity,
+                    side = %req.side,
+                    projected = %projected,
+                    max = %self.safety_config.max_position_size,
+                    "order blocked: position limit would be exceeded"
+                );
+                return Err(OrderManagerError::PositionLimitExceeded(
+                    projected,
+                    self.safety_config.max_position_size,
+                ));
+            }
+
+            // Circuit breaker — only incremented after the position limit passes.
+            {
+                let mut cb = self.circuit_breaker.lock().await;
+                cb.record_order()
+                    .map_err(|CircuitBreakerError::Tripped(_, _)| {
+                        OrderManagerError::CircuitBreakerTripped
+                    })?;
+            }
+
+            // Reserve the position by persisting the row while still holding the
+            // guard. Dry-run reserves a "dry_run" row (no real exposure, excluded
+            // from net_position); live reserves "open" BEFORE the exchange call
+            // for idempotency — on a network timeout the manager can query
+            // get_order_status before retrying.
+            let status = if self.safety_config.dry_run {
+                "dry_run"
+            } else {
+                "open"
+            };
+            let record = self.build_record(&req, status, None);
+            self.order_repository.insert(&record).await?;
+            record
+        };
+
+        // Dry-run — full pipeline ran but no real exchange call.
         if self.safety_config.dry_run {
             tracing::info!(
                 exchange = %req.exchange,
@@ -342,26 +396,11 @@ impl OrderManager {
                 strategy_id = ?req.strategy_id,
                 "dry-run: order not sent to exchange"
             );
-            let record = self.build_record(&req, "dry_run", None);
-            self.order_repository.insert(&record).await?;
             self.broadcast_update(&record, None);
             return Ok(());
         }
 
-        let adapter = if let Some(a) = adapter_override {
-            a
-        } else {
-            let adapters = self.order_adapters.read().await;
-            adapters
-                .get(&req.exchange)
-                .ok_or_else(|| OrderManagerError::NoAdapterForExchange(req.exchange.clone()))?
-                .clone()
-        };
-
-        // Persist with "open" BEFORE the exchange call for idempotency.
-        // On network timeout, the Order Manager queries get_order_status before retrying.
-        let record = self.build_record(&req, "open", None);
-        self.order_repository.insert(&record).await?;
+        let adapter = adapter.expect("live path resolves an adapter above");
 
         tracing::info!(
             exchange = %req.exchange,
@@ -585,32 +624,38 @@ impl OrderManager {
                 .max_position_size
                 .unwrap_or(self.safety_config.max_position_size);
 
-            let open_qty = match self
+            let net = match self
                 .order_repository
-                .get_open_quantity(&signal.exchange, &signal.pair)
+                .net_position(&signal.exchange, &signal.pair)
                 .await
             {
-                Ok(q) => q,
+                Ok(n) => n,
                 Err(e) => {
                     tracing::error!(
                         user_id = sub.user_id,
                         subscription_id = sub.id,
                         signal_id = %signal.signal_id,
                         error = %e,
-                        "failed to query open quantity for subscription order — skipping"
+                        "failed to query net position for subscription order — skipping"
                     );
                     continue;
                 }
             };
 
-            let projected = open_qty + self.safety_config.default_order_quantity;
-            if projected > max_pos {
+            let signed_qty = match side {
+                OrderSide::Buy => self.safety_config.default_order_quantity,
+                OrderSide::Sell => -self.safety_config.default_order_quantity,
+            };
+            let projected = net + signed_qty;
+            if projected.abs() > max_pos {
                 tracing::warn!(
                     user_id = sub.user_id,
                     subscription_id = sub.id,
                     signal_id = %signal.signal_id,
-                    open_qty = %open_qty,
+                    net_position = %net,
                     requested = %self.safety_config.default_order_quantity,
+                    side = %side,
+                    projected = %projected,
                     max = %max_pos,
                     "subscription order blocked: position limit exceeded"
                 );
@@ -876,6 +921,43 @@ mod tests {
         (manager, rx)
     }
 
+    /// Like `build_manager` but exposes the order repository (for asserting
+    /// persisted state) and returns the manager behind an `Arc` (for concurrency).
+    fn build_manager_with_repo(
+        safety_config: SafetyConfig,
+        adapter: FakeOrderAdapter,
+    ) -> (
+        Arc<OrderManager>,
+        Arc<FakeOrderRepository>,
+        broadcast::Receiver<String>,
+    ) {
+        let (broadcaster, rx) = broadcast::channel(32);
+        let mut adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
+        adapters.insert("tabdeal".to_string(), Arc::new(adapter));
+        let repo = Arc::new(FakeOrderRepository::new());
+        let manager = OrderManager::with_poll_interval(
+            Arc::new(RwLock::new(adapters)),
+            repo.clone(),
+            broadcaster,
+            safety_config,
+            Duration::from_millis(10),
+        );
+        (Arc::new(manager), repo, rx)
+    }
+
+    fn order_req(side: OrderSide, qty: i64) -> OrderRequest {
+        OrderRequest {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            side,
+            order_type: OrderType::Market,
+            quantity: Decimal::new(qty, 0),
+            price: None,
+            client_order_id: Uuid::new_v4().to_string(),
+            strategy_id: None,
+        }
+    }
+
     fn live_config() -> SafetyConfig {
         SafetyConfig {
             dry_run: false,
@@ -1128,6 +1210,126 @@ mod tests {
         assert!(
             matches!(result, Err(OrderManagerError::PositionLimitExceeded(_, _))),
             "order quantity 101 > max 100 must be blocked"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn position_limit_counts_filled_inventory() {
+        // C6: once an order fills it is still held inventory and MUST keep counting
+        // toward the cap. The old open-only accounting let filled orders vanish,
+        // allowing unbounded sequential placement.
+        let cfg = SafetyConfig {
+            dry_run: false,
+            max_position_size: Decimal::new(100, 0),
+            default_order_quantity: Decimal::new(60, 0),
+            circuit_breaker_max_orders: 10,
+            circuit_breaker_window_secs: 60,
+            min_confidence: 0.0,
+        };
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter
+            .will_return_status(OrderStatusResult::filled(Decimal::new(58_000, 0)))
+            .await;
+        let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
+
+        // First 60-unit buy is accepted and fills via the poller.
+        manager
+            .place_order(order_req(OrderSide::Buy, 60))
+            .await
+            .expect("first order within the cap must succeed");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if repo
+                .all_records()
+                .await
+                .iter()
+                .any(|r| r.status == "filled")
+            {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("first order never reached 'filled'");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Second 60-unit buy must be rejected: 60 filled + 60 = 120 > 100.
+        let res = manager.place_order(order_req(OrderSide::Buy, 60)).await;
+        assert!(
+            matches!(res, Err(OrderManagerError::PositionLimitExceeded(_, _))),
+            "filled inventory must count toward the position limit"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn position_limit_allows_reducing_sell() {
+        // C7: a sell reduces exposure, so it must be allowed even when long at the
+        // cap. The old side-agnostic accounting wrongly added the sell quantity.
+        let cfg = SafetyConfig {
+            dry_run: false,
+            max_position_size: Decimal::new(100, 0),
+            default_order_quantity: Decimal::new(1, 0),
+            circuit_breaker_max_orders: 10,
+            circuit_breaker_window_secs: 60,
+            min_confidence: 0.0,
+        };
+        let (manager, _repo, _rx) = build_manager_with_repo(cfg, FakeOrderAdapter::new("tabdeal"));
+
+        manager
+            .place_order(order_req(OrderSide::Buy, 100))
+            .await
+            .expect("buy up to the cap must succeed");
+
+        manager
+            .place_order(order_req(OrderSide::Sell, 50))
+            .await
+            .expect("a reducing sell must be allowed at the position cap");
+
+        // Net is now 50; a further 60 buy would reach 110 > 100 and is rejected.
+        let res = manager.place_order(order_req(OrderSide::Buy, 60)).await;
+        assert!(
+            matches!(res, Err(OrderManagerError::PositionLimitExceeded(_, _))),
+            "net 50 + 60 = 110 must still be capped at 100"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_orders_do_not_exceed_position_limit() {
+        // C9: concurrent placements must not both pass a stale net-position read.
+        let cfg = SafetyConfig {
+            dry_run: false,
+            max_position_size: Decimal::new(100, 0),
+            default_order_quantity: Decimal::new(60, 0),
+            circuit_breaker_max_orders: 100,
+            circuit_breaker_window_secs: 60,
+            min_confidence: 0.0,
+        };
+        let (manager, repo, _rx) = build_manager_with_repo(cfg, FakeOrderAdapter::new("tabdeal"));
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let m = manager.clone();
+            handles.push(tokio::spawn(async move {
+                m.place_order(order_req(OrderSide::Buy, 60)).await
+            }));
+        }
+
+        let mut accepted = 0;
+        for h in handles {
+            if h.await.unwrap().is_ok() {
+                accepted += 1;
+            }
+        }
+
+        assert_eq!(
+            accepted, 1,
+            "exactly one 60-unit order fits under the 100 cap — the rest must be rejected"
+        );
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert!(
+            net <= Decimal::new(100, 0),
+            "net position {net} must never exceed the cap under concurrency"
         );
     }
 

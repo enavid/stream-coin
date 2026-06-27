@@ -44,9 +44,16 @@ pub trait OrderRepository: Send + Sync {
         fill_price: Option<Decimal>,
     ) -> Result<(), OrderRepositoryError>;
 
-    /// Returns total open quantity for the given exchange + pair.
-    /// Used by the Order Manager to enforce position limits.
-    async fn get_open_quantity(
+    /// Returns the signed **net position** for the given exchange + pair: the sum
+    /// of buy quantities minus sell quantities over every order that still
+    /// represents real or pending exposure (`open`, `filled`, `partially_filled`).
+    /// `cancelled`, `failed`, and `dry_run` orders are excluded (no real exposure).
+    ///
+    /// Used by the Order Manager to enforce position limits. A positive value is a
+    /// net long position, a negative value a net short. Partially-filled orders are
+    /// counted at full quantity (a conservative over-estimate that never lets the
+    /// cap be breached pending exact fill-quantity tracking).
+    async fn net_position(
         &self,
         exchange: &str,
         pair: &str,
@@ -123,18 +130,21 @@ impl OrderRepository for FakeOrderRepository {
         Ok(())
     }
 
-    async fn get_open_quantity(
+    async fn net_position(
         &self,
         exchange: &str,
         pair: &str,
     ) -> Result<Decimal, OrderRepositoryError> {
         let recs = self.records.lock().await;
-        let total = recs
+        let net = recs
             .iter()
-            .filter(|r| r.exchange == exchange && r.pair == pair && r.status == "open")
-            .map(|r| r.quantity)
-            .fold(Decimal::ZERO, |acc, q| acc + q);
-        Ok(total)
+            .filter(|r| r.exchange == exchange && r.pair == pair)
+            .filter(|r| matches!(r.status.as_str(), "open" | "filled" | "partially_filled"))
+            .fold(Decimal::ZERO, |acc, r| match r.side.as_str() {
+                "sell" => acc - r.quantity,
+                _ => acc + r.quantity,
+            });
+        Ok(net)
     }
 
     async fn get_by_client_order_id(
@@ -173,12 +183,21 @@ mod tests {
     use super::*;
 
     fn make_record(client_order_id: &str, status: &str, quantity: Decimal) -> OrderRecord {
+        make_record_side(client_order_id, status, quantity, "buy")
+    }
+
+    fn make_record_side(
+        client_order_id: &str,
+        status: &str,
+        quantity: Decimal,
+        side: &str,
+    ) -> OrderRecord {
         let now = Utc::now();
         OrderRecord {
             id: None,
             exchange: "tabdeal".to_string(),
             pair: "USDT/IRT".to_string(),
-            side: "buy".to_string(),
+            side: side.to_string(),
             order_type: "market".to_string(),
             quantity,
             price: None,
@@ -230,33 +249,82 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fake_order_repository_get_open_quantity_sums_only_open_orders() {
+    async fn fake_order_repository_net_position_counts_filled_inventory_not_just_open() {
+        // C6: a filled order is held inventory and MUST count toward the position.
         let repo = FakeOrderRepository::new();
         repo.insert(&make_record("uuid-1", "open", Decimal::new(100, 0)))
             .await
             .unwrap();
-        repo.insert(&make_record("uuid-2", "open", Decimal::new(200, 0)))
+        repo.insert(&make_record("uuid-2", "filled", Decimal::new(50, 0)))
             .await
             .unwrap();
-        repo.insert(&make_record("uuid-3", "filled", Decimal::new(50, 0)))
-            .await
-            .unwrap();
-        let qty = repo.get_open_quantity("tabdeal", "USDT/IRT").await.unwrap();
+        repo.insert(&make_record(
+            "uuid-3",
+            "partially_filled",
+            Decimal::new(20, 0),
+        ))
+        .await
+        .unwrap();
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
         assert_eq!(
-            qty,
-            Decimal::new(300, 0),
-            "only open orders count toward position"
+            net,
+            Decimal::new(170, 0),
+            "open + filled + partially_filled buys all count (100+50+20)"
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fake_order_repository_get_open_quantity_filters_by_pair() {
+    async fn fake_order_repository_net_position_is_side_aware_buys_minus_sells() {
+        // C7: sells reduce the net position; they must not be added to it.
+        let repo = FakeOrderRepository::new();
+        repo.insert(&make_record_side(
+            "uuid-1",
+            "filled",
+            Decimal::new(100, 0),
+            "buy",
+        ))
+        .await
+        .unwrap();
+        repo.insert(&make_record_side(
+            "uuid-2",
+            "filled",
+            Decimal::new(30, 0),
+            "sell",
+        ))
+        .await
+        .unwrap();
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert_eq!(net, Decimal::new(70, 0), "100 buy - 30 sell = 70 net");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_net_position_excludes_terminal_and_dry_run() {
+        let repo = FakeOrderRepository::new();
+        repo.insert(&make_record("uuid-1", "cancelled", Decimal::new(100, 0)))
+            .await
+            .unwrap();
+        repo.insert(&make_record("uuid-2", "failed", Decimal::new(100, 0)))
+            .await
+            .unwrap();
+        repo.insert(&make_record("uuid-3", "dry_run", Decimal::new(100, 0)))
+            .await
+            .unwrap();
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert_eq!(
+            net,
+            Decimal::ZERO,
+            "cancelled/failed/dry_run carry no real exposure"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_order_repository_net_position_filters_by_pair() {
         let repo = FakeOrderRepository::new();
         repo.insert(&make_record("uuid-1", "open", Decimal::new(100, 0)))
             .await
             .unwrap();
-        let qty = repo.get_open_quantity("tabdeal", "BTC/IRT").await.unwrap();
-        assert_eq!(qty, Decimal::ZERO, "different pair must not count");
+        let net = repo.net_position("tabdeal", "BTC/IRT").await.unwrap();
+        assert_eq!(net, Decimal::ZERO, "different pair must not count");
     }
 
     #[tokio::test(flavor = "current_thread")]
