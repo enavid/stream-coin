@@ -18,6 +18,17 @@ const STRATEGIES_MANAGE: &str = "strategies.manage";
 /// The strategy subprocess uses the same launcher script (including the seccomp
 /// preamble on Linux) as the live deployment path, so backtest and live behaviour
 /// are guaranteed to be identical.
+#[utoipa::path(
+    post,
+    path = "/v1/backtest/run",
+    tag = "Backtest",
+    request_body = BacktestRunRequest,
+    responses(
+        (status = 200, description = "Backtest complete", body = crate::backtest::entity::BacktestResult),
+        (status = 400, description = "Invalid request, strategy not found, or no candles", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError)
+    )
+)]
 pub async fn run_backtest(
     req: HttpRequest,
     state: web::Data<AppState>,

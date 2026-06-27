@@ -204,9 +204,6 @@ async fn run_subprocess(
     let stdout = child.stdout.take().expect("stdout must be piped");
     let stderr = child.stderr.take().expect("stderr must be piped");
 
-    let signals_topic =
-        std::env::var("KAFKA_TOPIC_SIGNALS").unwrap_or_else(|_| "signals".to_string());
-
     // Feed candle events to subprocess stdin
     let mut rx = broadcaster.subscribe();
     let mut stdin_writer = stdin;
@@ -293,8 +290,7 @@ async fn run_subprocess(
             match serde_json::to_string(&WsMessage::Signal(payload.clone())) {
                 Ok(json) => {
                     let _ = broadcaster_clone.send(BroadcastEnvelope::public(json));
-                    // Kafka publish is handled by the order manager listener consuming the broadcaster
-                    let _ = signals_topic.as_str(); // referenced to avoid unused warning
+                    // Kafka publish is handled by the order manager listener consuming the broadcaster.
                 }
                 Err(e) => {
                     tracing::error!(

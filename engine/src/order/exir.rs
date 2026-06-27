@@ -30,8 +30,12 @@ pub struct ExirOrderAdapter {
 }
 
 impl ExirOrderAdapter {
+    /// Production REST base URL. Overridable per deployment via
+    /// `EXIR_REST_BASE_URL` (see `engine/bin/http.rs`).
+    pub const DEFAULT_BASE_URL: &'static str = "https://api.exir.io";
+
     pub fn new(api_key: &str) -> Self {
-        Self::with_base_url("https://api.exir.io", api_key)
+        Self::with_base_url(Self::DEFAULT_BASE_URL, api_key)
     }
 
     pub fn with_base_url(base_url: &str, api_key: &str) -> Self {

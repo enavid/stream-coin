@@ -29,8 +29,13 @@ pub struct TabdealOrderAdapter {
 }
 
 impl TabdealOrderAdapter {
+    /// Production REST base URL. Overridable per deployment via
+    /// `TABDEAL_REST_BASE_URL` (see `engine/bin/http.rs`) so staging can point
+    /// at a sandbox without a code change.
+    pub const DEFAULT_BASE_URL: &'static str = "https://api1.tabdeal.org";
+
     pub fn new(api_key: &str) -> Self {
-        Self::with_base_url("https://api1.tabdeal.org", api_key)
+        Self::with_base_url(Self::DEFAULT_BASE_URL, api_key)
     }
 
     pub fn with_base_url(base_url: &str, api_key: &str) -> Self {

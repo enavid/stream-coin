@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS strategy_subscriptions (
 CREATE INDEX IF NOT EXISTS idx_strategy_subscriptions_strategy_active
     ON strategy_subscriptions (strategy_id, active);
 
--- ─── Permissions ────────────────────────────────────────────────────────────
+-- Permissions for strategy subscriptions.
 INSERT INTO permissions (name) VALUES
     ('subscriptions.write'),
     ('subscriptions.read')

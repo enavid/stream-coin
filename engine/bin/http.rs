@@ -18,6 +18,7 @@ use stream_coin::exchange::port::ExchangeAdapter;
 use stream_coin::exchange::registry::{ExchangeRecord, ExchangeRegistry, TradingPairRecord};
 use stream_coin::exchange::tabdeal::TabdealWsAdapter;
 use stream_coin::infrastructure::cache::redis;
+use stream_coin::infrastructure::config::{reject_placeholder_secret, resolve_or_default};
 use stream_coin::infrastructure::crypto::credential_cipher::CredentialCipher;
 use stream_coin::infrastructure::db::asset_repository::AssetRepository;
 use stream_coin::infrastructure::db::candle_repository::CandleRepository;
@@ -128,6 +129,18 @@ async fn main() -> std::io::Result<()> {
         Arc::new(CoinexHistoricalAdapter::new()) as Arc<dyn HistoricalCandleSource>,
     );
     let historical_sources = Arc::new(historical_sources);
+
+    // Fail closed on any secret left at its shipped `change-me` placeholder —
+    // a default JWT key, DB password, or encryption key in a real deployment is
+    // a critical hole. Checked before anything connects or serves.
+    for var in ["JWT_SECRET", "DATABASE_URL", "CREDENTIALS_ENCRYPTION_KEY"] {
+        if let Ok(value) = env::var(var) {
+            if let Err(e) = reject_placeholder_secret(var, &value) {
+                tracing::error!("{e}");
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e));
+            }
+        }
+    }
 
     let db_pool: Option<sqlx::PgPool> = match env::var("DATABASE_URL") {
         Ok(url) => match sqlx::PgPool::connect(&url).await {
@@ -422,12 +435,26 @@ async fn main() -> std::io::Result<()> {
         creds["api_secret"].as_str().map(str::to_string)
     }
 
+    // Broker REST base URLs: production defaults baked into each adapter, but
+    // overridable per deployment (e.g. a sandbox in staging) without a rebuild.
+    let base_url =
+        |var: &str, default: &str| resolve_or_default(env::var(var).ok().as_deref(), default);
+    let tabdeal_base_url = base_url(
+        "TABDEAL_REST_BASE_URL",
+        TabdealOrderAdapter::DEFAULT_BASE_URL,
+    );
+    let hitobit_base_url = base_url(
+        "HITOBIT_REST_BASE_URL",
+        HitobitOrderAdapter::DEFAULT_BASE_URL,
+    );
+    let exir_base_url = base_url("EXIR_REST_BASE_URL", ExirOrderAdapter::DEFAULT_BASE_URL);
+
     let mut order_adapter_factories: HashMap<String, OrderAdapterFactory> = HashMap::new();
     order_adapter_factories.insert(
         "tabdeal".to_string(),
-        Arc::new(|creds: &serde_json::Value| {
+        Arc::new(move |creds: &serde_json::Value| {
             Ok(Arc::new(TabdealOrderAdapter::with_credentials(
-                "https://api1.tabdeal.org",
+                &tabdeal_base_url,
                 &extract_key(creds, "tabdeal")?,
                 extract_secret(creds),
             )) as Arc<dyn OrderAdapter>)
@@ -435,9 +462,9 @@ async fn main() -> std::io::Result<()> {
     );
     order_adapter_factories.insert(
         "hitobit".to_string(),
-        Arc::new(|creds: &serde_json::Value| {
+        Arc::new(move |creds: &serde_json::Value| {
             Ok(Arc::new(HitobitOrderAdapter::with_credentials(
-                "https://api.hitobit.com",
+                &hitobit_base_url,
                 &extract_key(creds, "hitobit")?,
                 extract_secret(creds),
             )) as Arc<dyn OrderAdapter>)
@@ -445,9 +472,9 @@ async fn main() -> std::io::Result<()> {
     );
     order_adapter_factories.insert(
         "exir".to_string(),
-        Arc::new(|creds: &serde_json::Value| {
+        Arc::new(move |creds: &serde_json::Value| {
             Ok(Arc::new(ExirOrderAdapter::with_credentials(
-                "https://api.exir.io",
+                &exir_base_url,
                 &extract_key(creds, "exir")?,
                 extract_secret(creds),
             )) as Arc<dyn OrderAdapter>)

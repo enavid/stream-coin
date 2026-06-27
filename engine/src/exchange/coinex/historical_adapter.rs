@@ -36,11 +36,11 @@ fn parse_kline_item(market: &str, interval: Interval, item: &Value) -> Result<Ca
     let time = DateTime::<Utc>::from_timestamp_millis(created_at_ms)
         .ok_or_else(|| format!("invalid created_at timestamp: {created_at_ms}"))?;
 
-    let open = super::parse_minor_units(field_str(item, "open")?)?;
-    let high = super::parse_minor_units(field_str(item, "high")?)?;
-    let low = super::parse_minor_units(field_str(item, "low")?)?;
-    let close = super::parse_minor_units(field_str(item, "close")?)?;
-    let volume = super::parse_minor_units(field_str(item, "volume")?)?;
+    let open = crate::exchange::parse_minor_units(field_str(item, "open")?)?;
+    let high = crate::exchange::parse_minor_units(field_str(item, "high")?)?;
+    let low = crate::exchange::parse_minor_units(field_str(item, "low")?)?;
+    let close = crate::exchange::parse_minor_units(field_str(item, "close")?)?;
+    let volume = crate::exchange::parse_minor_units(field_str(item, "volume")?)?;
 
     let pair = super::market_to_pair(market)
         .ok_or_else(|| format!("unrecognized market quote suffix: {market}"))?;

@@ -10,7 +10,7 @@ use actix_web::http::header;
 /// origins just because a token leaked somewhere.
 pub fn cors_middleware(allowed_origins: Option<&str>) -> Cors {
     let cors = Cors::default()
-        .allowed_methods(["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+        .allowed_methods(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
         .allowed_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
         .max_age(3600);
 

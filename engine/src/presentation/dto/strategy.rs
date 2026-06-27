@@ -1,28 +1,29 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct StartStrategyRequest {
     pub strategy_id: String,
     pub strategy_type: String,
     pub exchange: String,
     pub pair: String,
+    #[schema(value_type = Object)]
     pub params: serde_json::Value,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct StopStrategyRequest {
     pub strategy_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct RegisterStrategyRequest {
     pub strategy_id: String,
     pub name: String,
     pub strategy_type: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ActiveStrategy {
     pub strategy_id: String,
     pub strategy_type: String,
@@ -30,7 +31,7 @@ pub struct ActiveStrategy {
     pub pair: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct StrategyList {
     pub strategies: Vec<ActiveStrategy>,
 }

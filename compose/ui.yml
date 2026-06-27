@@ -20,7 +20,7 @@ services:
     expose:
       - "8080"
     ports:
-      - "8083:8080"   # accessible on host for local dev
+      - "127.0.0.1:8083:8080"   # loopback only — accessible on host for local dev
 
     environment:
       DYNAMIC_CONFIG_ENABLED: "true"

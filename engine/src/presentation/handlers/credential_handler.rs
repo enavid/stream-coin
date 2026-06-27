@@ -11,6 +11,19 @@ const PERMISSION: &str = "exchange_credentials.write";
 /// info (free-form JSON, shape varies per exchange), encrypted at rest. Supply both
 /// `api_key` and `api_secret` so the order adapter can HMAC-sign requests (C10); an
 /// `api_key` alone places orders unsigned. Always scoped to the authenticated user.
+#[utoipa::path(
+    post,
+    path = "/v1/exchanges/{name}/credentials",
+    tag = "Credentials",
+    params(("name" = String, Path, description = "Exchange name")),
+    request_body(content = serde_json::Value, description = "Free-form credential JSON (e.g. api_key, api_secret)"),
+    responses(
+        (status = 200, description = "Credentials saved"),
+        (status = 400, description = "Unknown exchange", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "Credential encryption or storage not configured", body = ApiError)
+    )
+)]
 pub async fn set_own_credentials(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -53,6 +66,16 @@ pub async fn set_own_credentials(
 
 /// `GET /v1/exchanges/credentials` — lists the caller's own configured exchanges.
 /// Never decrypts or returns the secret — name + `created_at` only.
+#[utoipa::path(
+    get,
+    path = "/v1/exchanges/credentials",
+    tag = "Credentials",
+    responses(
+        (status = 200, description = "Configured credentials (no secrets)", body = CredentialListResponse),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "Credential storage not configured", body = ApiError)
+    )
+)]
 pub async fn list_own_credentials(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     let ctx = match require_permission(&req, PERMISSION) {
         Ok(c) => c,
@@ -85,6 +108,17 @@ pub async fn list_own_credentials(req: HttpRequest, state: web::Data<AppState>) 
 }
 
 /// `DELETE /v1/exchanges/{name}/credentials` — removes the caller's own credential.
+#[utoipa::path(
+    delete,
+    path = "/v1/exchanges/{name}/credentials",
+    tag = "Credentials",
+    params(("name" = String, Path, description = "Exchange name")),
+    responses(
+        (status = 200, description = "Credentials removed"),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "Credential storage not configured", body = ApiError)
+    )
+)]
 pub async fn delete_own_credentials(
     req: HttpRequest,
     state: web::Data<AppState>,

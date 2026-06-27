@@ -1,7 +1,8 @@
 # stream-coin Architecture
 
 Arbitrage engine for Iranian cryptocurrency exchanges. One backend (Rust/actix-web),
-fed by per-exchange WebSocket adapters, exposing a REST control-plane + a real-time
+fed by per-exchange WebSocket adapters, persisting to Postgres/TimescaleDB and
+streaming to Kafka, exposing a JWT-secured REST control-plane + a real-time
 WebSocket feed, consumed by a CLI (`sc`) and a cross-platform UI (Dioxus).
 
 ## System diagram
@@ -15,18 +16,21 @@ WebSocket feed, consumed by a CLI (`sc`) and a cross-platform UI (Dioxus).
 graph TB
     subgraph EX["Exchanges"]
         TABDEAL["Tabdeal WS API"]
+        HITOBIT["Hitobit WS API"]
+        COINEX["CoinEx WS API"]
         FUTURE_EX["more exchanges later\n(Nobitex, ...)"]
     end
 
     subgraph SERVER["stream-coin server  (engine/bin/http.rs, actix-web)"]
-        ADAPTER["ExchangeAdapter\nTabdealWsAdapter"]
+        ADAPTER["ExchangeAdapter\nTabdeal / Hitobit / CoinEx WsAdapter"]
         HANDLER["exchange_handler\nstart / stop / list ticker"]
         STATE["AppState\nclients map · broadcaster · publisher"]
         WSH["ws_handler\nGET /v1/ws"]
-        REDIS[("Redis\nTickerRepository")]
+        PG[("Postgres / TimescaleDB\nusers · exchanges · pairs · candles\nstrategies · orders · subscriptions")]
+        REDIS[("Redis\nTickerRepository (cache)")]
     end
 
-    KAFKA[("Kafka\ntopic: prices")]
+    KAFKA[("Kafka\nprices (JSON) · candles.proto · signals.proto")]
     FLINK["Flink\n(future stream processing /\narbitrage detection)"]
 
     subgraph CLI["sc  (cli/src/main.rs)"]
@@ -52,16 +56,19 @@ graph TB
     end
 
     TABDEAL -->|depth stream| ADAPTER
+    HITOBIT -->|depth stream| ADAPTER
+    COINEX -->|depth stream| ADAPTER
     FUTURE_EX -.->|same ExchangeAdapter trait| ADAPTER
     ADAPTER -->|Price| HANDLER
-    HANDLER -->|serialize + publish| KAFKA
+    HANDLER -->|prices JSON · candles/signals protobuf| KAFKA
     HANDLER -->|serialize + broadcast| STATE
     HANDLER <-->|register/lookup ticker| REDIS
+    STATE <-->|repositories: load/persist| PG
     STATE --> WSH
     KAFKA -.->|future| FLINK
 
     CLI_TICKER -->|REST POST /start /stop\nGET /tickers| HANDLER
-    CLI_AUTH -.->|future: device-flow auth| HANDLER
+    CLI_AUTH -->|REST POST /v1/auth/token| HANDLER
 
     WSH ===|"WS  ws://host/v1/ws\nJSON PriceMessage"| WWS
     WWS -->|parse + apply| STORE
@@ -79,11 +86,12 @@ graph TB
 | Layer | Crate / module | Responsibility |
 |---|---|---|
 | Exchange adapters | `engine/src/exchange/*` | One adapter per exchange implementing `ExchangeAdapter`; parses exchange-specific WS messages into the shared `Price` type. |
-| Control plane | `engine/src/presentation/handlers/exchange_handler.rs` | REST: start/stop/list tickers. On every price tick: publishes to Kafka **and** broadcasts to WS clients. |
-| Real-time feed | `engine/src/presentation/handlers/ws_handler.rs` | `GET /v1/ws` — upgrades to WebSocket, forwards every `AppState::broadcaster` message to the client; answers ping/close. |
-| Shared state | `engine/src/presentation/shared/app_state.rs` | `clients` (running ticker handles), `broadcaster` (`tokio::broadcast`), `publisher` (Kafka), `ticker_repository` (Redis). |
-| Cache | `engine/src/infrastructure/cache/*` | Redis-backed `TickerRepository`. |
-| Messaging | `engine/src/kafka/*` | `MessagePublisher` port + `KafkaProducer` adapter (rdkafka). |
+| Control plane | `engine/src/presentation/handlers/exchange_handler.rs` | REST: start/stop/list tickers. On every price tick: publishes to Kafka **and** broadcasts to WS clients; aggregates closed candles (persisted to Postgres + published as Protobuf). |
+| Real-time feed | `engine/src/presentation/handlers/ws_handler.rs` | `GET /v1/ws` — upgrades to WebSocket, forwards every `AppState::broadcaster` message to the client (audience-routed: public vs per-user); answers ping/close. |
+| Shared state | `engine/src/presentation/shared/app_state.rs` | `clients` (running ticker handles), `broadcaster` (`tokio::broadcast`), `publisher` (Kafka), and the repository handles (Postgres-backed) for users, exchanges/pairs, candles, strategies, orders, subscriptions, credentials; `ticker_repository` (Redis). |
+| Persistence | `engine/src/infrastructure/db/*` (`postgres.rs`) | Postgres/TimescaleDB-backed repositories — the primary store for users/RBAC, exchanges/pairs/assets, candles (hypertable), strategies, orders, subscriptions, encrypted credentials. Schema in `engine/migrations/`, applied on startup; see `docs/database-schema.md`. |
+| Cache | `engine/src/infrastructure/cache/*` | Redis-backed `TickerRepository` (optional ticker cache). |
+| Messaging | `engine/src/kafka/*` | `MessagePublisher` port + `KafkaProducer` adapter (rdkafka). Topics: `prices` (JSON), `candles.proto` and `signals.proto` (Protobuf). |
 | CLI | `cli/src/*` | `sc auth/ticker/config` — talks to the same REST control plane as the UI; zero dependency on `engine`. |
 | UI shared core | `ui/ui_core/*` | Domain logic, wire protocol, reactive state, REST client, all Dioxus components, and the `Dashboard` composition — platform-agnostic, unit tested without WASM. |
 | UI web launcher | `ui/web/*` | Thin binary: provides `AppState`, runs the `gloo-net` WebSocket client (`ws.rs`), renders `Dashboard`. |
@@ -91,13 +99,14 @@ graph TB
 
 ## Data flow (one price tick)
 
-1. `TabdealWsAdapter` reads a depth message from the exchange's WebSocket and parses it into a `Price`.
+1. A `WsAdapter` (Tabdeal/Hitobit/CoinEx) reads a depth message from the exchange's WebSocket and parses it into a `Price` (shared decimal parsing in `engine/src/exchange/mod.rs`).
 2. `exchange_handler` receives the `Price` over an internal `mpsc` channel.
-3. It serializes the price once (`KafkaProducer::price_to_payload`) and:
-   - publishes it to the `prices` Kafka topic (for future Flink/arbitrage processing), and
-   - sends it on `AppState::broadcaster` (a `tokio::sync::broadcast` channel).
-4. Every connected `ws_handler` session (one per browser tab) receives the broadcast and forwards it as a WS text frame.
-5. The UI's `ws.rs` (web) parses it into `PriceMessage`, calls `AppState::apply_price`, which updates `TickerStore` (ticker map, flash direction, capped live-feed list) — Dioxus signals re-render the affected components automatically.
+3. It serializes the price once to JSON and:
+   - publishes that JSON to the `prices` Kafka topic (for downstream Flink/arbitrage processing), and
+   - sends the same JSON on `AppState::broadcaster` (a `tokio::sync::broadcast` channel) — the price WS and Kafka payloads are byte-identical.
+4. The same handler feeds the tick to per-interval candle aggregators; each closed candle is persisted to Postgres, published to `candles.proto` as Protobuf, and broadcast to the WS as JSON.
+5. Every connected `ws_handler` session receives broadcasts for its audience (public ticks, or per-user order updates) and forwards them as WS text frames.
+6. The UI's `ws.rs` (web) parses each message, calls the matching `AppState::apply_*`, which updates the relevant store — Dioxus signals re-render the affected components automatically.
 
 ## Extension points
 

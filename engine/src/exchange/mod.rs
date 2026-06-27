@@ -42,6 +42,27 @@ pub(crate) fn truncate_for_log(s: &str) -> String {
     }
 }
 
+/// Parses an exchange-supplied numeric string (price, amount, or volume) into
+/// non-negative minor units (`u64`).
+///
+/// Exchanges send these as JSON strings; we never parse them as `f64` (the
+/// financial-precision rule). Any fractional part is truncated — IRR/IRT prices
+/// are integers in practice, and minor-unit volumes are whole. A leading `-`
+/// is rejected outright rather than silently truncated to `0`.
+///
+/// This is the single shared parser for every adapter (tabdeal, hitobit, coinex
+/// WS depth frames and the coinex historical kline adapter); previously each had
+/// its own byte-identical copy with subtly different error strings (Q-duplication).
+pub(crate) fn parse_minor_units(s: &str) -> Result<u64, String> {
+    if s.starts_with('-') {
+        return Err(format!("value must be non-negative: {s}"));
+    }
+    let integer_part = s.split_once('.').map_or(s, |(int, _)| int);
+    integer_part
+        .parse::<u64>()
+        .map_err(|_| format!("invalid numeric value: {s}"))
+}
+
 /// Runs `f` with a temporary tracing subscriber and returns everything it
 /// logged, so a test can assert that a code path actually emitted a log line.
 #[cfg(test)]
@@ -91,6 +112,36 @@ mod tests {
         let out = truncate_for_log(&long);
         assert!(out.chars().count() <= 257, "256 chars + ellipsis");
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn parse_minor_units_parses_a_plain_integer() {
+        assert_eq!(parse_minor_units("42").unwrap(), 42);
+    }
+
+    #[test]
+    fn parse_minor_units_truncates_the_fractional_part() {
+        assert_eq!(parse_minor_units("100.999").unwrap(), 100);
+        assert_eq!(parse_minor_units("0.5").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_minor_units_rejects_a_negative_value() {
+        let err = parse_minor_units("-5").unwrap_err();
+        assert!(err.contains("non-negative"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_minor_units_rejects_non_numeric_input() {
+        assert!(parse_minor_units("abc").is_err());
+        assert!(parse_minor_units("").is_err());
+        // A non-negative sentinel that overflows u64 must error, not wrap.
+        assert!(parse_minor_units("99999999999999999999999999").is_err());
+    }
+
+    #[test]
+    fn parse_minor_units_accepts_a_large_in_range_value() {
+        assert_eq!(parse_minor_units("18446744073709551615").unwrap(), u64::MAX);
     }
 
     #[test]

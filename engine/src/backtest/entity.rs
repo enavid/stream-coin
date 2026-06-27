@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TradeRecord {
     pub order_id: String,
     pub side: String,
@@ -16,7 +17,7 @@ pub struct TradeRecord {
     pub take_profit: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BacktestSignalRecord {
     pub signal_id: String,
     pub strategy_id: String,
@@ -27,7 +28,7 @@ pub struct BacktestSignalRecord {
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BacktestResult {
     pub strategy_id: String,
     pub exchange: String,
@@ -44,7 +45,7 @@ pub struct BacktestResult {
     pub avg_rr: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeSide {
     Long,
@@ -60,7 +61,7 @@ impl TradeSide {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeOutcome {
     Win,
@@ -81,7 +82,7 @@ impl TradeOutcome {
 /// A fully closed trade — one entry fill paired with its exit fill.
 /// Prices and quantity use the same scaled-`u64` convention as `Price`/
 /// `TradeRecord`; `pnl` is signed because a loss must be representable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ClosedTrade {
     pub strategy_id: String,
     pub side: TradeSide,

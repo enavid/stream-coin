@@ -15,6 +15,15 @@ use crate::price::entity::MarketType;
 const EXCHANGES_MANAGE: &str = "exchanges.manage";
 
 /// `GET /v1/exchanges` — returns all currently enabled exchanges.
+#[utoipa::path(
+    get,
+    path = "/v1/exchanges",
+    tag = "Exchanges",
+    security(()),
+    responses(
+        (status = 200, description = "Enabled exchanges", body = ExchangeListResponse)
+    )
+)]
 pub async fn list_exchanges(state: web::Data<AppState>) -> impl Responder {
     let registry = state.exchange_registry.lock().await;
     let exchanges = registry
@@ -32,6 +41,18 @@ pub async fn list_exchanges(state: web::Data<AppState>) -> impl Responder {
 
 /// `GET /v1/exchanges/{name}/pairs` — returns active pairs for an exchange,
 /// optionally filtered by `?market_type=spot|futures|swap`.
+#[utoipa::path(
+    get,
+    path = "/v1/exchanges/{name}/pairs",
+    tag = "Exchanges",
+    params(
+        ("name" = String, Path, description = "Exchange name"),
+        ("market_type" = Option<String>, Query, description = "Filter by market type (spot|futures|swap)")
+    ),
+    responses(
+        (status = 200, description = "Active pairs", body = PairListResponse)
+    )
+)]
 pub async fn list_exchange_pairs(
     state: web::Data<AppState>,
     path: web::Path<String>,
@@ -55,6 +76,17 @@ pub async fn list_exchange_pairs(
 
 /// `POST /v1/admin/exchanges/enable` — enables an exchange and inserts its adapter
 /// into the live adapter map using the registered factory.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/exchanges/enable",
+    tag = "Exchanges",
+    request_body = ExchangeNameRequest,
+    responses(
+        (status = 200, description = "Exchange enabled"),
+        (status = 400, description = "Exchange not found or has no WS URL", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError)
+    )
+)]
 pub async fn enable_exchange(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -102,6 +134,17 @@ pub async fn enable_exchange(
 
 /// `POST /v1/admin/exchanges/disable` — disables an exchange, removes its adapter,
 /// and aborts all running ticker subscriptions for that exchange.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/exchanges/disable",
+    tag = "Exchanges",
+    request_body = ExchangeNameRequest,
+    responses(
+        (status = 200, description = "Exchange disabled"),
+        (status = 400, description = "Exchange not found", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError)
+    )
+)]
 pub async fn disable_exchange(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -176,6 +219,21 @@ pub fn build_pairs_from_assets(
 /// live network call to any exchange. A one-shot admin action, not a
 /// recurring job — re-running it with the same quotes is idempotent
 /// (`ExchangeRegistry::upsert_pair` / `ExchangeRepository::upsert_pair`).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/exchanges/{name}/seed-from-assets",
+    tag = "Exchanges",
+    params(
+        ("name" = String, Path, description = "Exchange name"),
+        ("quotes" = Option<String>, Query, description = "Comma-separated quote currencies (default USDT)")
+    ),
+    responses(
+        (status = 200, description = "Pairs seeded", body = SeedPairsResponse),
+        (status = 400, description = "Exchange not found in registry", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "No asset repository configured", body = ApiError)
+    )
+)]
 pub async fn seed_pairs_from_assets(
     req: HttpRequest,
     state: web::Data<AppState>,

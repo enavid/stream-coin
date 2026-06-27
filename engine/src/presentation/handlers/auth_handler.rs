@@ -12,6 +12,18 @@ const TOKEN_EXPIRES_SECS: i64 = 86400;
 
 /// `POST /v1/auth/token` — exchange username + password for a JWT carrying the
 /// user's flattened permission set. Exempt from JWT middleware.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/token",
+    tag = "Auth",
+    security(()),
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful", body = TokenResponse),
+        (status = 401, description = "Invalid credentials", body = ApiError),
+        (status = 503, description = "User storage or JWT secret not configured", body = ApiError)
+    )
+)]
 pub async fn login(state: web::Data<AppState>, body: web::Json<LoginRequest>) -> impl Responder {
     let Some(repo) = &state.user_repository else {
         return ApiError::service_unavailable("User storage not configured on this server")
@@ -61,6 +73,18 @@ pub async fn login(state: web::Data<AppState>, body: web::Json<LoginRequest>) ->
 /// `POST /v1/auth/refresh` — exchange a valid (or recently-expired) JWT for a fresh one.
 /// The new token carries the same permissions as the old one — a permission change
 /// only takes effect on the next full login, not on refresh. Exempt from JWT middleware.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/refresh",
+    tag = "Auth",
+    security(()),
+    request_body = RefreshRequest,
+    responses(
+        (status = 200, description = "Token refreshed", body = TokenResponse),
+        (status = 401, description = "Invalid token", body = ApiError),
+        (status = 503, description = "JWT secret not configured", body = ApiError)
+    )
+)]
 pub async fn refresh(
     state: web::Data<AppState>,
     body: web::Json<RefreshRequest>,

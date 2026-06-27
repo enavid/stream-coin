@@ -23,6 +23,18 @@ fn user_repo_error(e: UserRepositoryError) -> ApiError {
 }
 
 /// `POST /v1/admin/users` — creates a user and assigns the given roles. Gated by `users.manage`.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/users",
+    tag = "Admin",
+    request_body = CreateUserRequest,
+    responses(
+        (status = 200, description = "User created", body = UserResponse),
+        (status = 400, description = "Duplicate username or unknown role", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "User storage not configured", body = ApiError)
+    )
+)]
 pub async fn create_user(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -61,6 +73,16 @@ pub async fn create_user(
 }
 
 /// `GET /v1/admin/users` — lists every user with their assigned roles. Gated by `users.manage`.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/users",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "Users with roles", body = UserListResponse),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "User storage not configured", body = ApiError)
+    )
+)]
 pub async fn list_users(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_permission(&req, "users.manage") {
         return resp;
@@ -92,6 +114,19 @@ pub async fn list_users(req: HttpRequest, state: web::Data<AppState>) -> impl Re
 }
 
 /// `POST /v1/admin/users/{id}/roles` — replaces a user's role assignment. Gated by `users.manage`.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/users/{id}/roles",
+    tag = "Admin",
+    params(("id" = i32, Path, description = "User id")),
+    request_body = AssignRolesRequest,
+    responses(
+        (status = 200, description = "Roles assigned"),
+        (status = 400, description = "Unknown role", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "User storage not configured", body = ApiError)
+    )
+)]
 pub async fn assign_user_roles(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -117,6 +152,16 @@ pub async fn assign_user_roles(
 }
 
 /// `GET /v1/admin/roles` — lists every role with its permissions. Gated by `users.manage`.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/roles",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "Roles with permissions", body = RoleListResponse),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "User storage not configured", body = ApiError)
+    )
+)]
 pub async fn list_roles(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_permission(&req, "users.manage") {
         return resp;
@@ -145,6 +190,18 @@ pub async fn list_roles(req: HttpRequest, state: web::Data<AppState>) -> impl Re
 }
 
 /// `POST /v1/admin/roles` — creates a new role with the given permissions. Gated by `roles.manage`.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/roles",
+    tag = "Admin",
+    request_body = CreateRoleRequest,
+    responses(
+        (status = 200, description = "Role created", body = RoleResponse),
+        (status = 400, description = "Invalid role definition", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "User storage not configured", body = ApiError)
+    )
+)]
 pub async fn create_role(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -171,6 +228,16 @@ pub async fn create_role(
 }
 
 /// `GET /v1/admin/permissions` — lists the fixed permission catalog. Gated by `users.manage`.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/permissions",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "Permission catalog", body = PermissionListResponse),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "User storage not configured", body = ApiError)
+    )
+)]
 pub async fn list_permissions(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_permission(&req, "users.manage") {
         return resp;

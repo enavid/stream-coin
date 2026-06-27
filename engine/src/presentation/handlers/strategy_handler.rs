@@ -4,8 +4,8 @@ use chrono::Utc;
 use crate::infrastructure::db::python_strategy_repository::PythonStrategyRecord;
 use crate::infrastructure::db::strategy_repository::{StrategyRecord, StrategyRegistration};
 use crate::presentation::dto::strategy::{
-    ActiveStrategy, DeployStrategyRequest, RegisterStrategyRequest, StartStrategyRequest,
-    StopStrategyRequest, StrategyList,
+    ActiveStrategy, DeployStrategyRequest, DeployedStrategy, RegisterStrategyRequest,
+    StartStrategyRequest, StopStrategyRequest, StrategyList,
 };
 use crate::presentation::middlewares::jwt::require_permission;
 use crate::presentation::responses::{success_response, ApiError};
@@ -19,6 +19,17 @@ use crate::strategy::subprocess::{spawn_subprocess_runner, SubprocessConfig};
 /// this is a high-trust capability granted to admin and trader roles.
 const STRATEGIES_MANAGE: &str = "strategies.manage";
 
+#[utoipa::path(
+    post,
+    path = "/v1/strategies/start",
+    tag = "Strategies",
+    request_body = StartStrategyRequest,
+    responses(
+        (status = 200, description = "Strategy started"),
+        (status = 400, description = "Unknown strategy type or already running", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError)
+    )
+)]
 pub async fn start_strategy(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -123,6 +134,17 @@ pub async fn start_strategy(
     )
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/strategies/stop",
+    tag = "Strategies",
+    request_body = StopStrategyRequest,
+    responses(
+        (status = 200, description = "Strategy stopped"),
+        (status = 400, description = "Strategy is not running", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError)
+    )
+)]
 pub async fn stop_strategy(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -161,6 +183,15 @@ pub async fn stop_strategy(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/strategies",
+    tag = "Strategies",
+    responses(
+        (status = 200, description = "Active strategies", body = StrategyList),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError)
+    )
+)]
 pub async fn list_strategies(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_permission(&req, STRATEGIES_MANAGE) {
         return resp;
@@ -179,6 +210,17 @@ pub async fn list_strategies(req: HttpRequest, state: web::Data<AppState>) -> Ht
     success_response("Active strategies", StrategyList { strategies })
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/strategies/register",
+    tag = "Strategies",
+    request_body = RegisterStrategyRequest,
+    responses(
+        (status = 200, description = "Strategy registered"),
+        (status = 400, description = "Invalid strategy_type", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError)
+    )
+)]
 pub async fn register_strategy(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -231,6 +273,17 @@ pub async fn register_strategy(
 /// The engine prepends a seccomp preamble (Linux) that blocks socket/connect/bind
 /// before executing the user's code. The subprocess reads candle JSON lines from
 /// stdin and writes signal JSON lines to stdout.
+#[utoipa::path(
+    post,
+    path = "/v1/strategies/deploy",
+    tag = "Strategies",
+    request_body = DeployStrategyRequest,
+    responses(
+        (status = 200, description = "Strategy deployed", body = DeployedStrategy),
+        (status = 400, description = "Empty name or code", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError)
+    )
+)]
 pub async fn deploy_strategy(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -359,61 +412,5 @@ pub async fn restore_python_strategies(state: &web::Data<AppState>) {
             name = %record.name,
             "python strategy subprocess restored"
         );
-    }
-}
-
-/// Loads active strategy records from the repository and restarts each one.
-/// Called on engine startup to restore state that survived a restart.
-pub async fn restore_strategies(state: &web::Data<AppState>) {
-    let repo = match &state.strategy_repository {
-        Some(r) => r.clone(),
-        None => return,
-    };
-
-    let records = match repo.list_active().await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to load strategies from repository");
-            return;
-        }
-    };
-
-    let mut running = state.running_strategies.lock().await;
-    for record in records {
-        if running.contains_key(&record.strategy_id) {
-            continue;
-        }
-        let strategy = match build_strategy(
-            &record.strategy_id,
-            &record.strategy_type,
-            &record.exchange,
-            &record.pair,
-            &record.params_json,
-        ) {
-            Some(s) => s,
-            None => {
-                tracing::warn!(
-                    strategy_type = %record.strategy_type,
-                    "unknown strategy type during restore — skipping"
-                );
-                continue;
-            }
-        };
-        let abort_handle = spawn_strategy_runner(
-            strategy,
-            state.broadcaster.clone(),
-            state.publisher.clone(),
-            state.signal_repository.clone(),
-        );
-        running.insert(
-            record.strategy_id.clone(),
-            StrategyHandle {
-                strategy_type: record.strategy_type.clone(),
-                exchange: record.exchange.clone(),
-                pair: record.pair.clone(),
-                abort_handle,
-            },
-        );
-        tracing::info!(strategy_id = %record.strategy_id, strategy_type = %record.strategy_type, "strategy restored");
     }
 }

@@ -27,7 +27,9 @@ futures-util = "0.3"
 rdkafka = { version = "0.37", features = ["cmake-build"] }
 actix-ws = "0.3"
 jsonwebtoken = "9"
-sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "chrono", "json"] }
+# default-features off so the unused MySQL/SQLite drivers (and their `rsa`
+# dependency, RUSTSEC-2023-0071) are never pulled — we only target Postgres.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-native-tls", "postgres", "chrono", "json", "macros", "migrate"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 reqwest = { version = "0.12", features = ["json"] }

@@ -83,7 +83,7 @@ async fn seed_user_and_login(
     body["data"]["token"].as_str().unwrap().to_string()
 }
 
-// ── Full CRUD lifecycle ──────────────────────────────────────────────────────
+// Full CRUD lifecycle.
 
 #[actix_web::test]
 async fn subscription_full_crud_lifecycle_through_real_router() {
@@ -154,7 +154,7 @@ async fn subscription_full_crud_lifecycle_through_real_router() {
     );
 }
 
-// ── Duplicate subscription returns 409 ──────────────────────────────────────
+// Duplicate subscription returns 409.
 
 #[actix_web::test]
 async fn subscribe_twice_to_same_strategy_returns_409() {
@@ -181,7 +181,7 @@ async fn subscribe_twice_to_same_strategy_returns_409() {
     assert_eq!(resp.status(), 409, "duplicate subscription must return 409");
 }
 
-// ── Unauthenticated requests are rejected ───────────────────────────────────
+// Unauthenticated requests are rejected.
 
 #[actix_web::test]
 async fn unauthenticated_subscription_request_returns_401() {
@@ -199,7 +199,7 @@ async fn unauthenticated_subscription_request_returns_401() {
     assert_eq!(resp.status(), 401);
 }
 
-// ── Ownership isolation: user cannot touch another user's subscription ───────
+// Ownership isolation: user cannot touch another user's subscription.
 
 #[actix_web::test]
 async fn user_cannot_update_subscription_belonging_to_another_user() {
@@ -271,7 +271,7 @@ async fn user_cannot_delete_subscription_belonging_to_another_user() {
     );
 }
 
-// ── Cross-user isolation: list only returns own subscriptions ────────────────
+// Cross-user isolation: list only returns own subscriptions.
 
 #[actix_web::test]
 async fn list_subscriptions_never_leaks_other_users_data() {
@@ -327,7 +327,7 @@ async fn list_subscriptions_never_leaks_other_users_data() {
     );
 }
 
-// ── 400 on missing subscription ──────────────────────────────────────────────
+// 400 on missing subscription.
 
 #[actix_web::test]
 async fn update_nonexistent_subscription_returns_400() {

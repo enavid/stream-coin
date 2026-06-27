@@ -46,15 +46,10 @@ pub fn Settings(server_url: String) -> Element {
     let mut secret = use_signal(String::new);
     let mut save_error = use_signal(|| None::<String>);
 
-    let exchanges = state.catalog.read().exchanges().to_vec();
-    let selected_exchange = if exchanges.iter().any(|e| e.name == exchange_choice()) {
-        exchange_choice()
-    } else {
-        exchanges
-            .first()
-            .map(|e| e.name.clone())
-            .unwrap_or_default()
-    };
+    let catalog = state.catalog.read();
+    let exchanges = catalog.exchanges().to_vec();
+    let selected_exchange = catalog.resolve_exchange(&exchange_choice());
+    drop(catalog);
 
     let exchange_for_save = selected_exchange.clone();
     let on_save = move |evt: Event<FormData>| {

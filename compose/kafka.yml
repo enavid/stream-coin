@@ -150,8 +150,8 @@ services:
         condition: service_completed_successfully
 
     ports:
-      - "9092:9092"   # HOST — dev tools on host machine
-      - "9095:9095"   # EXTERNAL — SSL, internet-facing
+      - "127.0.0.1:9092:9092"   # HOST — plaintext, loopback only (dev tools on host machine)
+      - "9095:9095"             # EXTERNAL — SSL, intentionally internet-facing
     expose:
       - "9091"        # SSL internal
       - "9094"        # DOCKER plaintext internal

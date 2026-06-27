@@ -14,8 +14,9 @@ services:
 
     expose:
       - "6379"
+    # Loopback only — reachable by the host for local dev, never from the LAN.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
     volumes:
       - redis-data:/data
@@ -49,8 +50,9 @@ services:
     hostname: redis-insight
     restart: unless-stopped
 
+    # Redis Insight UI — loopback only, never exposed beyond the host.
     ports:
-      - "5540:5540"
+      - "127.0.0.1:5540:5540"
 
     depends_on:
       redis:

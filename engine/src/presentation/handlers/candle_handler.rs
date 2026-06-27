@@ -10,6 +10,20 @@ use crate::price::entity::TradingPair;
 /// (an in-process ring buffer populated as candles close), not
 /// `candle_repository` — there is no persistent candle store wired in yet, so
 /// history is only as deep as `CANDLE_HISTORY_CAPACITY` and resets on restart.
+#[utoipa::path(
+    get,
+    path = "/v1/candles",
+    tag = "Candles",
+    params(
+        ("exchange" = String, Query, description = "Exchange name"),
+        ("pair" = String, Query, description = "Trading pair, e.g. USDT/IRT"),
+        ("interval" = String, Query, description = "Candle interval, e.g. 1m"),
+        ("limit" = Option<u32>, Query, description = "Max candles to return (default 300, max 1000)")
+    ),
+    responses(
+        (status = 200, description = "Candle history (oldest first)", body = [crate::candle::entity::CandlePayload])
+    )
+)]
 pub async fn get_candles(
     state: web::Data<AppState>,
     query: web::Query<CandleHistoryQuery>,
@@ -27,6 +41,17 @@ pub async fn get_candles(
 /// from `POST /v1/backtest/run` on purpose: a user re-running the same
 /// backtest while tuning params must not silently re-fetch from the
 /// exchange every time.
+#[utoipa::path(
+    post,
+    path = "/v1/candles/backfill",
+    tag = "Candles",
+    request_body = BackfillRequest,
+    responses(
+        (status = 200, description = "Backfill complete", body = BackfillResponse),
+        (status = 400, description = "Invalid range, pair, or no historical source", body = ApiError),
+        (status = 503, description = "Upstream exchange unavailable or no candle repository", body = ApiError)
+    )
+)]
 pub async fn backfill_candles(
     state: web::Data<AppState>,
     body: web::Json<BackfillRequest>,

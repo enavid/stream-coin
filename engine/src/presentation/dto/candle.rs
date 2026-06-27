@@ -8,7 +8,7 @@ use crate::candle::entity::Interval;
 pub const DEFAULT_CANDLE_LIMIT: usize = 300;
 pub const MAX_CANDLE_LIMIT: usize = 1000;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct BackfillRequest {
     pub exchange: String,
     /// `"BASE/QUOTE"`, e.g. `"BTC/USDT"`.

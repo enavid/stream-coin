@@ -6,11 +6,13 @@ use tokio::task::AbortHandle;
 use crate::exchange::entity::ExchangeId;
 use crate::price::entity::{Price, TradingPair};
 
+/// Error type for [`ExchangeAdapter::subscribe`]. Empty today — adapters spawn
+/// their connection loop in the background and return `Ok(AbortHandle)`
+/// immediately, surfacing transient connection failures via reconnect logic and
+/// logging rather than as a synchronous error. Kept as a named type so adding a
+/// real failure mode later is non-breaking for the trait signature.
 #[derive(Debug, Error)]
-pub enum ExchangeAdapterError {
-    #[error("connection failed: {0}")]
-    ConnectionFailed(String),
-}
+pub enum ExchangeAdapterError {}
 
 /// Drives a single exchange's real-time price feed.
 ///

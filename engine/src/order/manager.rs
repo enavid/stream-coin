@@ -75,6 +75,19 @@ pub struct OrderManager {
     position_guard: Arc<Mutex<()>>,
 }
 
+/// The market type stamped on outbound order-update broadcasts. All trading is
+/// spot today; `DEFAULT_MARKET_TYPE` overrides it so a futures deployment is a
+/// config change, not a code change. (A true per-order market type belongs on
+/// `OrderRecord` once non-spot instruments exist — see ROADMAP.)
+fn default_market_type() -> String {
+    use crate::infrastructure::config::resolve_or_default;
+    use crate::price::entity::MarketType;
+    resolve_or_default(
+        std::env::var("DEFAULT_MARKET_TYPE").ok().as_deref(),
+        MarketType::Spot.to_string().as_str(),
+    )
+}
+
 impl OrderManager {
     pub fn new(
         order_adapters: Arc<RwLock<HashMap<String, Arc<dyn OrderAdapter>>>>,
@@ -663,7 +676,7 @@ impl OrderManager {
             client_order_id: record.client_order_id.clone(),
             exchange: record.exchange.clone(),
             pair: record.pair.clone(),
-            market_type: "spot".to_string(),
+            market_type: default_market_type(),
             side: record.side.clone(),
             status: record.status.clone(),
             quantity: record.quantity.to_string(),
@@ -968,7 +981,7 @@ async fn poll_fill_status(ctx: FillPollContext) {
             client_order_id: client_order_id.clone(),
             exchange: exchange.clone(),
             pair: pair.clone(),
-            market_type: "spot".to_string(),
+            market_type: default_market_type(),
             side: side.clone(),
             status: status_str,
             quantity: quantity.to_string(),
@@ -2123,8 +2136,7 @@ mod tests {
         );
     }
 
-    // ─── Subscription fanout tests ────────────────────────────────────────────
-
+    // Subscription fanout tests.
     use crate::infrastructure::db::subscription_repository::FakeSubscriptionRepository;
 
     fn build_manager_with_subscriptions(
@@ -2387,7 +2399,6 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------------
     // place_order_for_user — credential-aware admin order placement
 
     #[tokio::test(flavor = "current_thread")]

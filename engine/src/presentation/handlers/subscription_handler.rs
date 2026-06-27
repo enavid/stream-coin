@@ -27,6 +27,18 @@ fn to_response(
 
 /// `POST /v1/subscriptions` — subscribe the authenticated user to a strategy.
 /// Returns 409 if the user is already subscribed to that strategy.
+#[utoipa::path(
+    post,
+    path = "/v1/subscriptions",
+    tag = "Subscriptions",
+    request_body = SubscribeRequest,
+    responses(
+        (status = 200, description = "Subscribed", body = SubscriptionResponse),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 409, description = "Already subscribed to this strategy"),
+        (status = 503, description = "Subscription storage not configured", body = ApiError)
+    )
+)]
 pub async fn subscribe(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -83,6 +95,16 @@ pub async fn subscribe(
 }
 
 /// `GET /v1/subscriptions` — list all active subscriptions for the authenticated user.
+#[utoipa::path(
+    get,
+    path = "/v1/subscriptions",
+    tag = "Subscriptions",
+    responses(
+        (status = 200, description = "User subscriptions", body = SubscriptionListResponse),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 503, description = "Subscription storage not configured", body = ApiError)
+    )
+)]
 pub async fn list_subscriptions(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     let ctx = match require_permission(&req, READ) {
         Ok(c) => c,
@@ -112,6 +134,19 @@ pub async fn list_subscriptions(req: HttpRequest, state: web::Data<AppState>) ->
 
 /// `PATCH /v1/subscriptions/{id}` — update overrides (active flag, position size,
 /// confidence threshold) for a subscription owned by the authenticated user.
+#[utoipa::path(
+    patch,
+    path = "/v1/subscriptions/{id}",
+    tag = "Subscriptions",
+    params(("id" = i64, Path, description = "Subscription id")),
+    request_body = UpdateSubscriptionRequest,
+    responses(
+        (status = 200, description = "Subscription updated", body = SubscriptionResponse),
+        (status = 400, description = "Subscription not found", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 403, description = "Subscription owned by another user", body = ApiError)
+    )
+)]
 pub async fn update_subscription(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -169,6 +204,18 @@ pub async fn update_subscription(
 }
 
 /// `DELETE /v1/subscriptions/{id}` — remove a subscription owned by the authenticated user.
+#[utoipa::path(
+    delete,
+    path = "/v1/subscriptions/{id}",
+    tag = "Subscriptions",
+    params(("id" = i64, Path, description = "Subscription id")),
+    responses(
+        (status = 200, description = "Unsubscribed"),
+        (status = 400, description = "Subscription not found", body = ApiError),
+        (status = 401, description = "Not authenticated or missing permission", body = ApiError),
+        (status = 403, description = "Subscription owned by another user", body = ApiError)
+    )
+)]
 pub async fn delete_subscription(
     req: HttpRequest,
     state: web::Data<AppState>,

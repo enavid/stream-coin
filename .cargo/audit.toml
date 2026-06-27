@@ -1,0 +1,13 @@
+# cargo-audit configuration. Every ignore MUST carry a justification and be
+# re-evaluated when an upstream fix becomes available.
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — rsa timing side-channel ("Marvin Attack").
+    # No upstream fix exists. `rsa` is pulled ONLY by sqlx's optional MySQL
+    # driver, which we do not enable (engine/Cargo.toml sets
+    # `sqlx = { default-features = false, features = ["postgres", ...] }`), so
+    # this code is never compiled into the engine. It lingers in Cargo.lock as
+    # an inactive optional dependency, which is all cargo-audit scans.
+    # Re-evaluate if a fix ships or if a MySQL backend is ever added.
+    "RUSTSEC-2023-0071",
+]

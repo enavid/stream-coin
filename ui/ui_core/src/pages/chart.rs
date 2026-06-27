@@ -140,39 +140,13 @@ pub fn Chart(server_url: String) -> Element {
     // closure body. That bug is exactly why switching timeframe/pair used
     // to silently do nothing — the seeding effect only ever read
     // `chart_ready`, so it ran once and never again.
-    let exchanges = use_memo(move || state.catalog.read().exchanges().to_vec());
-    let selected_exchange = use_memo(move || {
-        let exchanges = exchanges();
-        if exchanges.iter().any(|e| e.name == exchange_choice()) {
-            exchange_choice()
-        } else {
-            exchanges
-                .first()
-                .map(|e| e.name.clone())
-                .unwrap_or_default()
-        }
-    });
-    let pairs = use_memo(move || {
+    let selected_exchange =
+        use_memo(move || state.catalog.read().resolve_exchange(&exchange_choice()));
+    let selected_pair = use_memo(move || {
         state
             .catalog
             .read()
-            .pairs_for(&selected_exchange())
-            .to_vec()
-    });
-    let selected_pair = use_memo(move || {
-        let pairs = pairs();
-        let wanted = pair_choice();
-        if pairs
-            .iter()
-            .any(|p| format!("{}/{}", p.base, p.quote) == wanted)
-        {
-            wanted
-        } else {
-            pairs
-                .first()
-                .map(|p| format!("{}/{}", p.base, p.quote))
-                .unwrap_or_default()
-        }
+            .resolve_pair(&selected_exchange(), &pair_choice())
     });
     #[allow(clippy::redundant_closure)]
     let selected_interval = use_memo(move || interval_choice());

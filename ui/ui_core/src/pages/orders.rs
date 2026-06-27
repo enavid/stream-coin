@@ -49,27 +49,10 @@ pub fn Orders(server_url: String) -> Element {
 
     let catalog = state.catalog.read();
     let exchanges = catalog.exchanges().to_vec();
-    let selected_exchange = if exchanges.iter().any(|e| e.name == exchange_choice()) {
-        exchange_choice()
-    } else {
-        exchanges
-            .first()
-            .map(|e| e.name.clone())
-            .unwrap_or_default()
-    };
+    let selected_exchange = catalog.resolve_exchange(&exchange_choice());
     let pairs = catalog.pairs_for(&selected_exchange).to_vec();
+    let selected_pair = catalog.resolve_pair(&selected_exchange, &pair_choice());
     drop(catalog);
-    let selected_pair = if pairs
-        .iter()
-        .any(|p| format!("{}/{}", p.base, p.quote) == pair_choice())
-    {
-        pair_choice()
-    } else {
-        pairs
-            .first()
-            .map(|p| format!("{}/{}", p.base, p.quote))
-            .unwrap_or_default()
-    };
 
     let exchange_for_place = selected_exchange.clone();
     let pair_for_place = selected_pair.clone();

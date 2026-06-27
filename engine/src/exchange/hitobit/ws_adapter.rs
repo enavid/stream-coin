@@ -102,12 +102,12 @@ impl HitobitWsAdapter {
         let bid = bids[0][0]
             .as_str()
             .ok_or_else(|| "invalid bid price".to_string())
-            .and_then(Self::parse_price_units)?;
+            .and_then(crate::exchange::parse_minor_units)?;
 
         let ask = asks[0][0]
             .as_str()
             .ok_or_else(|| "invalid ask price".to_string())
-            .and_then(Self::parse_price_units)?;
+            .and_then(crate::exchange::parse_minor_units)?;
 
         Ok(Price {
             exchange: ExchangeId::new("hitobit"),
@@ -116,17 +116,6 @@ impl HitobitWsAdapter {
             ask,
             timestamp: crate::exchange::event_time_or_now(data["E"].as_i64(), "hitobit"),
         })
-    }
-
-    // Truncates fractional rials — IRR prices from Hitobit are integers in practice.
-    fn parse_price_units(s: &str) -> Result<u64, String> {
-        if s.starts_with('-') {
-            return Err(format!("price must be non-negative: {s}"));
-        }
-        let integer_part = s.split_once('.').map_or(s, |(int, _)| int);
-        integer_part
-            .parse::<u64>()
-            .map_err(|_| format!("invalid price: {s}"))
     }
 
     fn parse_trading_pair(symbol: &str) -> TradingPair {

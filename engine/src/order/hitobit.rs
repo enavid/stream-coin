@@ -30,8 +30,12 @@ pub struct HitobitOrderAdapter {
 }
 
 impl HitobitOrderAdapter {
+    /// Production REST base URL. Overridable per deployment via
+    /// `HITOBIT_REST_BASE_URL` (see `engine/bin/http.rs`).
+    pub const DEFAULT_BASE_URL: &'static str = "https://api.hitobit.com";
+
     pub fn new(api_key: &str) -> Self {
-        Self::with_base_url("https://api.hitobit.com", api_key)
+        Self::with_base_url(Self::DEFAULT_BASE_URL, api_key)
     }
 
     pub fn with_base_url(base_url: &str, api_key: &str) -> Self {

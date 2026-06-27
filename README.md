@@ -5,6 +5,7 @@
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Actix Web](https://img.shields.io/badge/actix--web-000?style=flat-square&logo=rust&logoColor=white)](https://actix.rs/)
 [![Kafka](https://img.shields.io/badge/Apache%20Kafka-000?style=flat-square&logo=apachekafka)](https://kafka.apache.org/)
+[![PostgreSQL](https://img.shields.io/badge/postgres-%23316192.svg?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/redis-%23DD0031.svg?style=flat-square&logo=redis&logoColor=white)](https://redis.io/)
 [![Dioxus](https://img.shields.io/badge/dioxus-0.7-blue?style=flat-square)](https://dioxuslabs.com/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue?style=flat-square)](LICENSE)
@@ -25,28 +26,37 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data-flow diagram.
 
 ```
 stream-coin/
-├── engine/   # the server — actix-web, exchange adapters, Kafka, Redis, WS feed
+├── engine/   # the server — actix-web, exchange adapters, Postgres, Kafka, Redis, WS feed
 ├── cli/      # `sc` — controls the engine over REST, zero dependency on engine
 └── ui/       # Dioxus SPA — shared core + a web launcher, consumes the WS feed
 ```
 
+Persistent state (users, exchanges/pairs, candles, strategies, orders,
+subscriptions) lives in PostgreSQL; Redis is an optional ticker cache, and
+Kafka carries the price/candle/signal streams for downstream processing.
+
 ## Supported exchanges
 
-| Exchange | Status |
-|---|---|
-| Tabdeal | ✅ |
+| Exchange | Price feed (WS) | Order placement |
+|---|---|---|
+| Tabdeal | ✅ | ✅ |
+| Hitobit | ✅ | ✅ |
+| CoinEx | ✅ (seeded disabled) | — |
+| Exir | — | ✅ |
 
-New exchanges are added by implementing one trait (`ExchangeAdapter`) —
-nothing else in the engine changes.
+New price feeds are added by implementing one trait (`ExchangeAdapter`); new
+order venues implement `OrderAdapter`. Nothing else in the engine changes.
 
 ## Quick start
 
-**Infra** (Redis, Kafka, Flink, Kafka UI):
+**Infra** (Postgres, Redis, Kafka, Kafka UI):
 
 ```bash
-cp .env.example .env   # fill in passwords
+cp .env.example .env   # fill in passwords (POSTGRES_PASSWORD is required)
 docker compose up -d
 ```
+
+The engine applies its SQL migrations to Postgres automatically on startup.
 
 **Engine:**
 
@@ -57,7 +67,8 @@ just run               # cargo run --bin stream-coin
 **CLI:**
 
 ```bash
-just sc ticker start --exchange tabdeal --pair USDT/IRT
+just sc auth login                         # authenticate first (saves a token)
+just sc ticker start tabdeal USDT/IRT      # exchange and pair are positional
 just sc ticker list
 ```
 
@@ -72,7 +83,7 @@ just ui-dev
 This project uses [`just`](https://github.com/casey/just) as its task runner.
 
 ```bash
-just check    # fmt + clippy -D warnings + unit tests + integration tests + clean-room docker build
+just check    # fmt + clippy -D warnings + unit tests + integration tests
 just test     # unit tests only
 just sc --help
 ```

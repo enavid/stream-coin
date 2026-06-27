@@ -11,14 +11,10 @@ use tokio::sync::{Mutex, RwLock};
 use stream_coin::exchange::registry::ExchangeRegistry;
 use stream_coin::infrastructure::db::order_repository::FakeOrderRepository;
 use stream_coin::infrastructure::db::python_strategy_repository::FakePythonStrategyRepository;
-use stream_coin::infrastructure::db::strategy_repository::{
-    FakeStrategyRepository, StrategyRecord,
-};
 use stream_coin::order::entity::SafetyConfig;
 use stream_coin::order::fake::FakeOrderAdapter;
 use stream_coin::order::manager::{spawn_order_manager_listener, OrderManager};
 use stream_coin::order::port::OrderAdapter;
-use stream_coin::presentation::handlers::strategy_handler::restore_strategies;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
 use stream_coin::presentation::shared::broadcast::BroadcastEnvelope;
@@ -37,37 +33,6 @@ fn build_state() -> actix_web::web::Data<AppState> {
         ticker_repository: None,
         running_strategies: Arc::new(Mutex::new(HashMap::new())),
         strategy_repository: None,
-        signal_repository: None,
-        order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        order_manager: None,
-        python_strategy_repository: None,
-        candle_repository: None,
-        historical_sources: Arc::new(HashMap::new()),
-        candle_history: AppState::new_candle_history(),
-        exchange_repository: None,
-        asset_repository: None,
-        subscription_repository: None,
-        user_repository: None,
-        credential_repository: None,
-        credential_cipher: None,
-    })
-}
-
-fn build_state_with_strategy_repo(
-    repo: Arc<FakeStrategyRepository>,
-) -> actix_web::web::Data<AppState> {
-    actix_web::web::Data::new(AppState {
-        redis: None,
-        exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
-        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
-        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
-        clients: Arc::new(Mutex::new(HashMap::new())),
-        publisher: None,
-        broadcaster: AppState::new_broadcaster(),
-        jwt_secret: None,
-        ticker_repository: None,
-        running_strategies: Arc::new(Mutex::new(HashMap::new())),
-        strategy_repository: Some(repo),
         signal_repository: None,
         order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         order_manager: None,
@@ -510,32 +475,6 @@ async fn start_strategy_without_token_returns_401() {
         .unwrap();
 
     assert_eq!(resp.status(), 401);
-}
-
-#[actix_web::test]
-async fn strategy_restored_on_engine_restart() {
-    use chrono::Utc;
-
-    let repo = Arc::new(FakeStrategyRepository::with_records(vec![StrategyRecord {
-        strategy_id: "seeded-spread".to_string(),
-        strategy_type: "spread_threshold".to_string(),
-        exchange: "tabdeal".to_string(),
-        pair: "USDT/IRT".to_string(),
-        params_json: json!({"threshold": 500}),
-        started_at: Utc::now(),
-    }]));
-
-    let state = build_state_with_strategy_repo(Arc::clone(&repo));
-
-    // Simulate restart: restore strategies from the repository
-    restore_strategies(&state).await;
-
-    // Verify the strategy is running
-    let running = state.running_strategies.lock().await;
-    assert!(
-        running.contains_key("seeded-spread"),
-        "restored strategy must appear in running_strategies"
-    );
 }
 
 fn build_state_with_deploy_support() -> (actix_web::web::Data<AppState>, Arc<FakeOrderRepository>) {

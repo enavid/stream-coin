@@ -108,12 +108,12 @@ impl CoinexWsAdapter {
         let bid = bids[0][0]
             .as_str()
             .ok_or_else(|| "invalid bid price".to_string())
-            .and_then(Self::parse_price_units)?;
+            .and_then(crate::exchange::parse_minor_units)?;
 
         let ask = asks[0][0]
             .as_str()
             .ok_or_else(|| "invalid ask price".to_string())
-            .and_then(Self::parse_price_units)?;
+            .and_then(crate::exchange::parse_minor_units)?;
 
         let pair = super::market_to_pair(market)
             .ok_or_else(|| format!("unrecognized market quote suffix, dropping: {market}"))?;
@@ -128,16 +128,6 @@ impl CoinexWsAdapter {
                 "coinex",
             ),
         })
-    }
-
-    fn parse_price_units(s: &str) -> Result<u64, String> {
-        if s.starts_with('-') {
-            return Err(format!("price must be non-negative: {s}"));
-        }
-        let integer_part = s.split_once('.').map_or(s, |(int, _)| int);
-        integer_part
-            .parse::<u64>()
-            .map_err(|_| format!("invalid price: {s}"))
     }
 }
 

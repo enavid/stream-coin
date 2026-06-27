@@ -116,12 +116,12 @@ impl TabdealWsAdapter {
         let bid = bids[0][0]
             .as_str()
             .ok_or_else(|| "invalid bid price".to_string())
-            .and_then(Self::parse_price_units)?;
+            .and_then(crate::exchange::parse_minor_units)?;
 
         let ask = asks[0][0]
             .as_str()
             .ok_or_else(|| "invalid ask price".to_string())
-            .and_then(Self::parse_price_units)?;
+            .and_then(crate::exchange::parse_minor_units)?;
 
         Ok(Price {
             exchange: ExchangeId::new("tabdeal"),
@@ -130,17 +130,6 @@ impl TabdealWsAdapter {
             ask,
             timestamp: crate::exchange::event_time_or_now(data["E"].as_i64(), "tabdeal"),
         })
-    }
-
-    // Truncates fractional rials — IRR prices from Tabdeal are integers in practice.
-    fn parse_price_units(s: &str) -> Result<u64, String> {
-        if s.starts_with('-') {
-            return Err(format!("price must be non-negative: {s}"));
-        }
-        let integer_part = s.split_once('.').map_or(s, |(int, _)| int);
-        integer_part
-            .parse::<u64>()
-            .map_err(|_| format!("invalid price: {s}"))
     }
 
     fn parse_trading_pair(symbol: &str) -> TradingPair {
@@ -645,63 +634,5 @@ mod tests {
             !result.chars().any(|c| c.is_uppercase()),
             "result must be all lowercase, got: {result}"
         );
-    }
-
-    // --- parse_price_units unit tests ---
-
-    #[test]
-    fn parse_price_units_truncates_fractional_rials() {
-        assert_eq!(
-            TabdealWsAdapter::parse_price_units("58000.9").unwrap(),
-            58000
-        );
-    }
-
-    #[test]
-    fn parse_price_units_zero_is_valid() {
-        assert_eq!(TabdealWsAdapter::parse_price_units("0").unwrap(), 0);
-    }
-
-    #[test]
-    fn parse_price_units_zero_point_zero_is_valid() {
-        assert_eq!(TabdealWsAdapter::parse_price_units("0.0").unwrap(), 0);
-    }
-
-    #[test]
-    fn parse_price_units_integer_string_is_valid() {
-        assert_eq!(
-            TabdealWsAdapter::parse_price_units("175500").unwrap(),
-            175500
-        );
-    }
-
-    #[test]
-    fn parse_price_units_large_value_near_u64_max() {
-        assert!(TabdealWsAdapter::parse_price_units("18000000000000000000").is_ok());
-    }
-
-    #[test]
-    fn parse_price_units_negative_returns_err() {
-        assert!(TabdealWsAdapter::parse_price_units("-1").is_err());
-    }
-
-    #[test]
-    fn parse_price_units_nan_string_returns_err() {
-        assert!(TabdealWsAdapter::parse_price_units("NaN").is_err());
-    }
-
-    #[test]
-    fn parse_price_units_infinity_string_returns_err() {
-        assert!(TabdealWsAdapter::parse_price_units("Infinity").is_err());
-    }
-
-    #[test]
-    fn parse_price_units_non_numeric_string_returns_err() {
-        assert!(TabdealWsAdapter::parse_price_units("abc").is_err());
-    }
-
-    #[test]
-    fn parse_price_units_empty_string_returns_err() {
-        assert!(TabdealWsAdapter::parse_price_units("").is_err());
     }
 }

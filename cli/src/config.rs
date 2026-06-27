@@ -57,7 +57,23 @@ impl Config {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let content = toml::to_string(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, content).map_err(|e| e.to_string())
+        std::fs::write(&path, content).map_err(|e| e.to_string())?;
+        Self::restrict_permissions(&path)
+    }
+
+    /// Tightens the config file to owner-only read/write (`0600`). It holds the
+    /// auth bearer token, so a world-readable file would leak it to any local
+    /// user. No-op on non-Unix platforms (Windows ACLs differ).
+    #[cfg(unix)]
+    fn restrict_permissions(path: &PathBuf) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms).map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &PathBuf) -> Result<(), String> {
+        Ok(())
     }
 
     pub fn set_url(&mut self, url: &str) {
@@ -179,6 +195,35 @@ token = "abc123"
         let loaded = Config::load();
         assert_eq!(loaded.server.url, "http://saved.example.com");
         assert_eq!(loaded.auth.token.as_deref(), Some("saved-token"));
+
+        std::env::remove_var("SC_CONFIG_PATH");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_save_restricts_file_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_GUARD.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::env::set_var("SC_CONFIG_PATH", config_path.to_str().unwrap());
+
+        let mut config = Config::default();
+        config.set_token(Some("secret-bearer-token".to_string()));
+        config.save().unwrap();
+
+        let mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        // The token file must not be readable/writable by group or others.
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "config holding the auth token must be chmod 0600, got {:o}",
+            mode & 0o777
+        );
 
         std::env::remove_var("SC_CONFIG_PATH");
     }

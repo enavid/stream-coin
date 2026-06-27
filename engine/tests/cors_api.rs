@@ -97,6 +97,39 @@ async fn cors_preflight_bypasses_jwt_auth() {
 }
 
 #[actix_web::test]
+async fn cors_preflight_allows_patch_method() {
+    // PATCH /v1/subscriptions/{id} is a real route; its browser preflight
+    // sends Access-Control-Request-Method: PATCH. If PATCH isn't in the
+    // allowed-methods set, actix-cors rejects the preflight (no allow-origin /
+    // 400), breaking the UI's subscription update.
+    let app = test::init_service(
+        App::new()
+            .wrap(cors_middleware(None))
+            .configure(init_routes)
+            .app_data(build_state())
+            .app_data(json_error_handler_config()),
+    )
+    .await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::with_uri("/v1/subscriptions/1")
+            .method(actix_web::http::Method::OPTIONS)
+            .insert_header(("Origin", "http://localhost:38391"))
+            .insert_header(("Access-Control-Request-Method", "PATCH"))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200, "PATCH preflight must be accepted");
+    assert!(
+        resp.headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        "PATCH preflight must carry Access-Control-Allow-Origin"
+    );
+}
+
+#[actix_web::test]
 async fn cors_actual_response_carries_allow_origin_header() {
     let app = test::init_service(
         App::new()
