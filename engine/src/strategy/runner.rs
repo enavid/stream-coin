@@ -73,6 +73,10 @@ pub fn spawn_strategy_runner(
     let mut rx = broadcaster.subscribe();
     let signals_topic =
         std::env::var("KAFKA_TOPIC_SIGNALS").unwrap_or_else(|_| "signals".to_string());
+    // Protobuf side of the `signals` topic (ROADMAP Loop 4c), published in
+    // parallel with the JSON topic during the migration.
+    let signals_proto_topic =
+        std::env::var("KAFKA_TOPIC_SIGNALS_PROTO").unwrap_or_else(|_| "signals.proto".to_string());
     let tracker = LiveTradeTracker::new();
 
     let handle = tokio::spawn(async move {
@@ -174,6 +178,21 @@ pub fn spawn_strategy_runner(
                     take_profit: sig.take_profit,
                 };
 
+                if let Some(ref pub_) = publisher {
+                    let proto_bytes = crate::proto::encode_signal(&payload);
+                    if let Err(e) = pub_
+                        .publish_bytes(&signals_proto_topic, &sig.strategy_id, &proto_bytes)
+                        .await
+                    {
+                        tracing::error!(
+                            error = %e,
+                            signal_id = %signal_id,
+                            strategy_id = %sig.strategy_id,
+                            "failed to publish signal protobuf to kafka"
+                        );
+                    }
+                }
+
                 match serde_json::to_string(&WsMessage::Signal(payload)) {
                     Ok(json) => {
                         let _ = broadcaster.send(json.clone());
@@ -222,4 +241,116 @@ pub fn spawn_strategy_runner(
     });
 
     handle.abort_handle()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::Utc;
+    use prost::Message;
+
+    use super::*;
+    use crate::kafka::port::mock::MockPublisher;
+    use crate::strategy::builtin::spread_threshold::SpreadThresholdStrategy;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runner_publishes_signal_as_protobuf_on_signals_proto_topic() {
+        let publisher = Arc::new(MockPublisher::new());
+        let (tx, _rx) = broadcast::channel::<String>(16);
+        let strategy: Arc<dyn Strategy> = Arc::new(SpreadThresholdStrategy::new(
+            "test-spread",
+            "tabdeal",
+            "USDT/IRT",
+            1000,
+        ));
+
+        let handle = spawn_strategy_runner(
+            strategy,
+            tx.clone(),
+            Some(Arc::clone(&publisher) as Arc<dyn MessagePublisher>),
+            None,
+        );
+
+        // spread = ask - bid = 2000 > threshold 1000 → a buy signal.
+        let price_json = serde_json::to_string(&WsMessage::PriceUpdate(PricePayload {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            bid: 175_000,
+            ask: 177_000,
+            timestamp: Utc::now(),
+        }))
+        .unwrap();
+        tx.send(price_json).unwrap();
+
+        let signal = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some((_, key, bytes)) = publisher
+                    .published_bytes()
+                    .into_iter()
+                    .find(|(topic, _, _)| topic == "signals.proto")
+                {
+                    let signal = crate::proto::v1::Signal::decode(&bytes[..])
+                        .expect("protobuf signal must decode");
+                    break (key, signal);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a signal must be published to the signals.proto topic within 2s");
+
+        handle.abort();
+
+        let (key, signal) = signal;
+        assert_eq!(key, "test-spread", "proto signal keeps the strategy_id key");
+        assert_eq!(signal.action, "buy");
+        assert_eq!(signal.exchange, "tabdeal");
+        assert_eq!(signal.pair, "USDT/IRT");
+        assert!(!signal.signal_id.is_empty(), "signal_id must be set");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runner_without_publisher_still_broadcasts_signal() {
+        let (tx, mut rx) = broadcast::channel::<String>(16);
+        let strategy: Arc<dyn Strategy> = Arc::new(SpreadThresholdStrategy::new(
+            "test-spread",
+            "tabdeal",
+            "USDT/IRT",
+            1000,
+        ));
+
+        let handle = spawn_strategy_runner(strategy, tx.clone(), None, None);
+
+        let price_json = serde_json::to_string(&WsMessage::PriceUpdate(PricePayload {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            bid: 175_000,
+            ask: 177_000,
+            timestamp: Utc::now(),
+        }))
+        .unwrap();
+        tx.send(price_json).unwrap();
+
+        let saw_signal = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await {
+                    Ok(text) => {
+                        if let Ok(WsMessage::Signal(_)) = serde_json::from_str::<WsMessage>(&text) {
+                            break true;
+                        }
+                    }
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("signal broadcast must arrive within 2s");
+
+        handle.abort();
+        assert!(
+            saw_signal,
+            "a signal must still broadcast over WS when no Kafka publisher is configured"
+        );
+    }
 }

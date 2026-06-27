@@ -6,5 +6,6 @@ pub mod kafka;
 pub mod order;
 pub mod presentation;
 pub mod price;
+pub mod proto;
 pub mod strategy;
 pub mod wire_message;

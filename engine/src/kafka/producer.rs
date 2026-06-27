@@ -41,6 +41,15 @@ impl KafkaProducer {
 #[async_trait]
 impl MessagePublisher for KafkaProducer {
     async fn publish(&self, topic: &str, key: &str, payload: &str) -> Result<(), PublisherError> {
+        self.publish_bytes(topic, key, payload.as_bytes()).await
+    }
+
+    async fn publish_bytes(
+        &self,
+        topic: &str,
+        key: &str,
+        payload: &[u8],
+    ) -> Result<(), PublisherError> {
         self.inner
             .send(
                 FutureRecord::to(topic).key(key).payload(payload),
