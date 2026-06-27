@@ -66,6 +66,10 @@ deb-server:
 deb-sc:
     cargo deb -p sc
 
+# Run Python SDK unit tests (betterproto + consumer decode, no Kafka required)
+python-sdk-test:
+    cd python_sdk && .venv/bin/python3 -m pytest tests/ -v
+
 # Security audit
 audit:
     cargo audit
