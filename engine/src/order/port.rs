@@ -86,6 +86,14 @@ impl OrderStatusResult {
     }
 }
 
+/// Outcome of reconciling an order by its client-assigned id after a transient
+/// placement failure: the exchange-assigned id plus the order's current status.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReconciledOrder {
+    pub order_id: OrderId,
+    pub result: OrderStatusResult,
+}
+
 impl fmt::Display for OrderId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -148,6 +156,25 @@ pub enum OrderAdapterError {
     Serialization(String),
 }
 
+/// Detects a Binance-compatible "order does not exist" response body (HTTP 4xx) —
+/// the signal that an order being reconciled never reached the exchange. Shared by
+/// every Binance-shaped order adapter (Tabdeal, Hitobit, Exir).
+pub(crate) fn is_order_not_found_body(body: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    if v["code"].as_i64() == Some(-2013) {
+        return true;
+    }
+    let msg = v["msg"]
+        .as_str()
+        .or_else(|| v["message"].as_str())
+        .or_else(|| v["error"].as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    msg.contains("does not exist") || msg.contains("not found") || msg.contains("unknown order")
+}
+
 impl OrderAdapterError {
     /// Returns `true` for errors that are safe to retry.
     ///
@@ -166,9 +193,10 @@ pub trait OrderAdapter: Send + Sync {
     /// Places a new order. Returns the exchange-assigned `OrderId`.
     ///
     /// The caller must persist `req.client_order_id` atomically with the order
-    /// record in the database **before** calling this method. On
-    /// `NetworkTimeout`, query `get_order_status` by `client_order_id` before
-    /// retrying placement.
+    /// record in the database **before** calling this method. On a transient
+    /// failure (`NetworkTimeout` / `ServerError`), reconcile with
+    /// `get_order_status_by_client_id` before marking the order failed — the
+    /// request may have reached the exchange even though the response was lost.
     async fn place_order(&self, req: &OrderRequest) -> Result<OrderId, OrderAdapterError>;
 
     /// Requests cancellation of an open order.
@@ -181,6 +209,21 @@ pub trait OrderAdapter: Send + Sync {
         &self,
         order_id: &OrderId,
     ) -> Result<OrderStatusResult, OrderAdapterError>;
+
+    /// Reconciles an order's true state by its **client-assigned** id, used after
+    /// a transient error or timeout on placement where the exchange-assigned
+    /// `OrderId` is unknown. The request may have reached the exchange even though
+    /// the caller observed an error — marking such an order `failed` would orphan
+    /// a live position.
+    ///
+    /// - `Ok(Some(reconciled))` — the exchange has the order; adopt its id + status.
+    /// - `Ok(None)` — the exchange has no record; the order never landed (safe to fail).
+    /// - `Err(_)` — reconciliation itself failed; the true state is unknown and the
+    ///   caller must NOT mark the order `failed`.
+    async fn get_order_status_by_client_id(
+        &self,
+        client_order_id: &str,
+    ) -> Result<Option<ReconciledOrder>, OrderAdapterError>;
 }
 
 #[cfg(test)]
@@ -288,5 +331,16 @@ mod tests {
         let r = OrderStatusResult::filled(price);
         assert_eq!(r.status, OrderStatus::Filled);
         assert_eq!(r.fill_price, Some(price));
+    }
+
+    #[test]
+    fn reconciled_order_carries_exchange_id_and_status() {
+        let r = ReconciledOrder {
+            order_id: OrderId("exch-77".to_string()),
+            result: OrderStatusResult::filled(Decimal::new(58_000, 0)),
+        };
+        assert_eq!(r.order_id.0, "exch-77");
+        assert_eq!(r.result.status, OrderStatus::Filled);
+        assert_eq!(r.result.fill_price, Some(Decimal::new(58_000, 0)));
     }
 }

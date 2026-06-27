@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 use crate::exchange::entity::ExchangeId;
 use crate::order::port::{
     OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderStatusResult,
+    ReconciledOrder,
 };
 
 /// Configures how `FakeOrderAdapter` responds to place/cancel/status calls.
@@ -16,6 +17,16 @@ pub enum FakeResponse {
     Failure(OrderAdapterError),
 }
 
+/// Configures how `FakeOrderAdapter::get_order_status_by_client_id` responds.
+pub enum FakeReconcile {
+    /// The order landed at the exchange: `Ok(Some(..))`.
+    Landed(OrderId, OrderStatusResult),
+    /// The exchange has no record of the order: `Ok(None)`.
+    NotFound,
+    /// Reconciliation itself failed: `Err(..)`.
+    Failed(OrderAdapterError),
+}
+
 pub struct FakeOrderAdapter {
     exchange: ExchangeId,
     /// Orders recorded by `place_order`, in call order.
@@ -24,6 +35,9 @@ pub struct FakeOrderAdapter {
     place_response: Arc<Mutex<Option<FakeResponse>>>,
     /// Canned result returned by `get_order_status`. Defaults to `Open` with no fill price.
     status_response: Arc<Mutex<OrderStatusResult>>,
+    /// Canned outcome for `get_order_status_by_client_id`. `None` (the default)
+    /// behaves as `NotFound` — the exchange has no record of the order.
+    reconcile_response: Arc<Mutex<Option<FakeReconcile>>>,
 }
 
 impl FakeOrderAdapter {
@@ -33,12 +47,29 @@ impl FakeOrderAdapter {
             placed_orders: Arc::new(Mutex::new(vec![])),
             place_response: Arc::new(Mutex::new(None)),
             status_response: Arc::new(Mutex::new(OrderStatusResult::new(OrderStatus::Open))),
+            reconcile_response: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Pre-configure the result returned by `get_order_status`.
     pub async fn will_return_status(&self, result: OrderStatusResult) {
         *self.status_response.lock().await = result;
+    }
+
+    /// Pre-configure reconciliation to report the order as live at the exchange.
+    pub async fn will_reconcile_to_landed(&self, order_id: &str, result: OrderStatusResult) {
+        *self.reconcile_response.lock().await =
+            Some(FakeReconcile::Landed(OrderId(order_id.to_string()), result));
+    }
+
+    /// Pre-configure reconciliation to report the exchange has no record (never landed).
+    pub async fn will_reconcile_not_found(&self) {
+        *self.reconcile_response.lock().await = Some(FakeReconcile::NotFound);
+    }
+
+    /// Pre-configure reconciliation itself to fail (true state unknown).
+    pub async fn will_fail_reconciliation(&self, err: OrderAdapterError) {
+        *self.reconcile_response.lock().await = Some(FakeReconcile::Failed(err));
     }
 
     /// Pre-configure the adapter to return an error on the next `place_order` call.
@@ -82,6 +113,19 @@ impl OrderAdapter for FakeOrderAdapter {
         _order_id: &OrderId,
     ) -> Result<OrderStatusResult, OrderAdapterError> {
         Ok(self.status_response.lock().await.clone())
+    }
+
+    async fn get_order_status_by_client_id(
+        &self,
+        _client_order_id: &str,
+    ) -> Result<Option<ReconciledOrder>, OrderAdapterError> {
+        match self.reconcile_response.lock().await.take() {
+            Some(FakeReconcile::Landed(order_id, result)) => {
+                Ok(Some(ReconciledOrder { order_id, result }))
+            }
+            Some(FakeReconcile::Failed(e)) => Err(e),
+            Some(FakeReconcile::NotFound) | None => Ok(None),
+        }
     }
 }
 
@@ -185,5 +229,45 @@ mod tests {
             .unwrap();
         assert_eq!(result.status, OrderStatus::Filled);
         assert_eq!(result.fill_price, Some(price));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_adapter_reconcile_defaults_to_not_found() {
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        let result = adapter
+            .get_order_status_by_client_id("uuid-1234")
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "an unconfigured reconciliation must report no record (never landed)"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_adapter_reconcile_landed_returns_exchange_id_and_status() {
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter
+            .will_reconcile_to_landed("exch-55", OrderStatusResult::new(OrderStatus::Open))
+            .await;
+
+        let result = adapter
+            .get_order_status_by_client_id("uuid-1234")
+            .await
+            .unwrap()
+            .expect("must report the order as landed");
+        assert_eq!(result.order_id.0, "exch-55");
+        assert_eq!(result.result.status, OrderStatus::Open);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fake_adapter_reconcile_can_fail() {
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter
+            .will_fail_reconciliation(OrderAdapterError::NetworkTimeout("down".to_string()))
+            .await;
+
+        let result = adapter.get_order_status_by_client_id("uuid-1234").await;
+        assert!(matches!(result, Err(OrderAdapterError::NetworkTimeout(_))));
     }
 }

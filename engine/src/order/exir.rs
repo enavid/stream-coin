@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::exchange::entity::ExchangeId;
 use crate::order::port::{
     OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderStatusResult,
-    OrderType,
+    OrderType, ReconciledOrder,
 };
 
 const PLACE_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -181,6 +181,56 @@ impl ExirOrderAdapter {
             ))),
         }
     }
+
+    /// Parses a reconciliation response (`GET ...?client_order_id=`).
+    /// `Ok(None)` means the exchange has no record of the order (it never
+    /// landed); `Err(_)` means the lookup was inconclusive (state still unknown).
+    pub fn parse_reconcile_response(
+        status: u16,
+        body: &str,
+    ) -> Result<Option<ReconciledOrder>, OrderAdapterError> {
+        match status {
+            200 => {
+                let v: Value = serde_json::from_str(body).map_err(|e| {
+                    OrderAdapterError::Serialization(format!("invalid reconcile response: {e}"))
+                })?;
+                let order_id = if let Some(s) = v["id"].as_str() {
+                    s.to_string()
+                } else if let Some(n) = v["id"].as_u64() {
+                    n.to_string()
+                } else if let Some(s) = v["order_id"].as_str() {
+                    s.to_string()
+                } else {
+                    return Err(OrderAdapterError::Serialization(
+                        "reconcile response missing id".to_string(),
+                    ));
+                };
+                let result = Self::parse_order_status_response(200, body)?;
+                Ok(Some(ReconciledOrder {
+                    order_id: OrderId(order_id),
+                    result,
+                }))
+            }
+            404 => Ok(None),
+            400 | 422 => {
+                if crate::order::port::is_order_not_found_body(body) {
+                    Ok(None)
+                } else {
+                    Err(OrderAdapterError::Rejected(format!(
+                        "unexpected reconcile status {status}: {body}"
+                    )))
+                }
+            }
+            401 | 403 => Err(OrderAdapterError::AuthFailed),
+            _ if status >= 500 => Err(OrderAdapterError::ServerError {
+                status,
+                body: body.to_string(),
+            }),
+            _ => Err(OrderAdapterError::Rejected(format!(
+                "unexpected reconcile status {status}"
+            ))),
+        }
+    }
 }
 
 #[async_trait]
@@ -295,6 +345,37 @@ impl OrderAdapter for ExirOrderAdapter {
         })?;
 
         Self::parse_order_status_response(status, &text)
+    }
+
+    #[tracing::instrument(skip(self), fields(exchange = "exir", client_order_id = %client_order_id))]
+    async fn get_order_status_by_client_id(
+        &self,
+        client_order_id: &str,
+    ) -> Result<Option<ReconciledOrder>, OrderAdapterError> {
+        let url = format!(
+            "{}/v2/order?client_order_id={}",
+            self.base_url, client_order_id
+        );
+
+        let response = tokio::time::timeout(STATUS_TIMEOUT, async {
+            self.http_client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .send()
+                .await
+        })
+        .await
+        .map_err(|_| {
+            OrderAdapterError::NetworkTimeout("get_order_status_by_client_id timed out".to_string())
+        })?
+        .map_err(|e| OrderAdapterError::NetworkTimeout(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        let text = response.text().await.map_err(|e| {
+            OrderAdapterError::Serialization(format!("failed to read response body: {e}"))
+        })?;
+
+        Self::parse_reconcile_response(status, &text)
     }
 }
 
@@ -443,5 +524,39 @@ mod tests {
     fn adapter_exchange_id_is_exir() {
         let adapter = ExirOrderAdapter::new("test-key");
         assert_eq!(adapter.exchange_id().to_string(), "exir");
+    }
+
+    #[test]
+    fn reconcile_200_returns_landed_with_id_and_status() {
+        let body = r#"{"id":"exir-abc","status":"new"}"#;
+        let reconciled = ExirOrderAdapter::parse_reconcile_response(200, body)
+            .unwrap()
+            .expect("a 200 with an id means the order landed");
+        assert_eq!(reconciled.order_id.0, "exir-abc");
+        assert_eq!(reconciled.result.status, OrderStatus::Open);
+    }
+
+    #[test]
+    fn reconcile_404_returns_none() {
+        let result = ExirOrderAdapter::parse_reconcile_response(404, r#"{"message":"not found"}"#);
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn reconcile_order_not_found_message_returns_none() {
+        let body = r#"{"message":"Order does not exist"}"#;
+        assert_eq!(
+            ExirOrderAdapter::parse_reconcile_response(400, body).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn reconcile_500_is_inconclusive_error() {
+        let result = ExirOrderAdapter::parse_reconcile_response(502, "bad gateway");
+        assert!(matches!(
+            result,
+            Err(OrderAdapterError::ServerError { status: 502, .. })
+        ));
     }
 }

@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::exchange::entity::ExchangeId;
 use crate::order::port::{
     OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderStatus, OrderStatusResult,
-    OrderType,
+    OrderType, ReconciledOrder,
 };
 
 const PLACE_ORDER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -174,6 +174,56 @@ impl TabdealOrderAdapter {
             ))),
         }
     }
+
+    /// Parses a reconciliation response (`GET ...?origClientOrderId=`).
+    /// `Ok(None)` means the exchange has no record of the order (it never
+    /// landed); `Err(_)` means the lookup was inconclusive (state still unknown).
+    pub fn parse_reconcile_response(
+        status: u16,
+        body: &str,
+    ) -> Result<Option<ReconciledOrder>, OrderAdapterError> {
+        match status {
+            200 => {
+                let v: Value = serde_json::from_str(body).map_err(|e| {
+                    OrderAdapterError::Serialization(format!("invalid reconcile response: {e}"))
+                })?;
+                let order_id = if let Some(s) = v["orderId"].as_str() {
+                    s.to_string()
+                } else if let Some(n) = v["orderId"].as_u64() {
+                    n.to_string()
+                } else {
+                    return Err(OrderAdapterError::Serialization(
+                        "reconcile response missing orderId".to_string(),
+                    ));
+                };
+                let result = Self::parse_order_status_response(200, body)?;
+                Ok(Some(ReconciledOrder {
+                    order_id: OrderId(order_id),
+                    result,
+                }))
+            }
+            // 404, or a Binance-compatible "order does not exist" (code -2013),
+            // means the order genuinely never landed — safe to treat as no record.
+            404 => Ok(None),
+            400 | 422 => {
+                if crate::order::port::is_order_not_found_body(body) {
+                    Ok(None)
+                } else {
+                    Err(OrderAdapterError::Rejected(format!(
+                        "unexpected reconcile status {status}: {body}"
+                    )))
+                }
+            }
+            401 | 403 => Err(OrderAdapterError::AuthFailed),
+            _ if status >= 500 => Err(OrderAdapterError::ServerError {
+                status,
+                body: body.to_string(),
+            }),
+            _ => Err(OrderAdapterError::Rejected(format!(
+                "unexpected reconcile status {status}"
+            ))),
+        }
+    }
 }
 
 #[async_trait]
@@ -288,6 +338,37 @@ impl OrderAdapter for TabdealOrderAdapter {
         })?;
 
         Self::parse_order_status_response(status, &text)
+    }
+
+    #[tracing::instrument(skip(self), fields(exchange = "tabdeal", client_order_id = %client_order_id))]
+    async fn get_order_status_by_client_id(
+        &self,
+        client_order_id: &str,
+    ) -> Result<Option<ReconciledOrder>, OrderAdapterError> {
+        let url = format!(
+            "{}/api/v1/order?origClientOrderId={}",
+            self.base_url, client_order_id
+        );
+
+        let response = tokio::time::timeout(STATUS_TIMEOUT, async {
+            self.http_client
+                .get(&url)
+                .header("X-MBX-APIKEY", &self.api_key)
+                .send()
+                .await
+        })
+        .await
+        .map_err(|_| {
+            OrderAdapterError::NetworkTimeout("get_order_status_by_client_id timed out".to_string())
+        })?
+        .map_err(|e| OrderAdapterError::NetworkTimeout(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        let text = response.text().await.map_err(|e| {
+            OrderAdapterError::Serialization(format!("failed to read response body: {e}"))
+        })?;
+
+        Self::parse_reconcile_response(status, &text)
     }
 }
 
@@ -451,5 +532,60 @@ mod tests {
     fn adapter_exchange_id_is_tabdeal() {
         let adapter = TabdealOrderAdapter::new("test-key");
         assert_eq!(adapter.exchange_id().to_string(), "tabdeal");
+    }
+
+    #[test]
+    fn reconcile_200_returns_landed_with_id_and_status() {
+        let body = r#"{"orderId":"98765","status":"FILLED","avgPrice":"58000.00"}"#;
+        let reconciled = TabdealOrderAdapter::parse_reconcile_response(200, body)
+            .unwrap()
+            .expect("a 200 with an orderId means the order landed");
+        assert_eq!(reconciled.order_id.0, "98765");
+        assert_eq!(reconciled.result.status, OrderStatus::Filled);
+        assert!(reconciled.result.fill_price.is_some());
+    }
+
+    #[test]
+    fn reconcile_404_returns_none() {
+        let result = TabdealOrderAdapter::parse_reconcile_response(404, r#"{"msg":"not found"}"#);
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "a 404 means the exchange has no record — the order never landed"
+        );
+    }
+
+    #[test]
+    fn reconcile_order_does_not_exist_code_returns_none() {
+        let body = r#"{"code":-2013,"msg":"Order does not exist."}"#;
+        let result = TabdealOrderAdapter::parse_reconcile_response(400, body);
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "Binance code -2013 means the order never landed"
+        );
+    }
+
+    #[test]
+    fn reconcile_500_is_inconclusive_error() {
+        let result = TabdealOrderAdapter::parse_reconcile_response(503, "Service Unavailable");
+        assert!(
+            matches!(
+                result,
+                Err(OrderAdapterError::ServerError { status: 503, .. })
+            ),
+            "a 5xx during reconciliation is inconclusive and must surface as an error"
+        );
+    }
+
+    #[test]
+    fn reconcile_unexpected_400_is_inconclusive_error() {
+        // A 4xx that is NOT a not-found must NOT be treated as "never landed".
+        let body = r#"{"code":-1102,"msg":"Mandatory parameter was empty."}"#;
+        let result = TabdealOrderAdapter::parse_reconcile_response(400, body);
+        assert!(
+            matches!(result, Err(OrderAdapterError::Rejected(_))),
+            "an ambiguous 4xx must be an error, not a false 'never landed'"
+        );
     }
 }

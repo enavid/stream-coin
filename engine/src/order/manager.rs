@@ -424,6 +424,59 @@ impl OrderManager {
 
         let order_id = match place_result {
             Ok(id) => id,
+            // C8: a *transient* failure (timeout / 5xx) does not prove the order
+            // never reached the exchange — the request may have been accepted and
+            // only the response lost. Marking it `failed` would exclude it from
+            // net_position and silently orphan a live position. Reconcile by
+            // client_order_id before deciding.
+            Err(e) if e.is_transient() => {
+                tracing::warn!(
+                    error = %e,
+                    client_order_id = %req.client_order_id,
+                    exchange = %req.exchange,
+                    "transient placement failure — reconciling order state before deciding its fate"
+                );
+                match adapter
+                    .get_order_status_by_client_id(&req.client_order_id)
+                    .await
+                {
+                    Ok(Some(reconciled)) => {
+                        tracing::warn!(
+                            client_order_id = %req.client_order_id,
+                            exchange = %req.exchange,
+                            exchange_order_id = %reconciled.order_id,
+                            status = %reconciled.result.status,
+                            "reconciliation found the order live at the exchange — adopting it instead of marking failed"
+                        );
+                        reconciled.order_id
+                    }
+                    Ok(None) => {
+                        tracing::error!(
+                            error = %e,
+                            client_order_id = %req.client_order_id,
+                            exchange = %req.exchange,
+                            "reconciliation confirmed the exchange has no record — order never landed, marking failed"
+                        );
+                        let _ = self
+                            .order_repository
+                            .update_status(&req.client_order_id, "failed", None, None)
+                            .await;
+                        return Err(OrderManagerError::Adapter(e));
+                    }
+                    Err(reconcile_err) => {
+                        tracing::error!(
+                            placement_error = %e,
+                            reconcile_error = %reconcile_err,
+                            client_order_id = %req.client_order_id,
+                            exchange = %req.exchange,
+                            "CRITICAL: placement failed and reconciliation failed — order left OPEN pending manual reconciliation to avoid orphaning a live position"
+                        );
+                        return Err(OrderManagerError::Adapter(e));
+                    }
+                }
+            }
+            // Permanent error (rejected, auth, unknown symbol, ...) — the order was
+            // never accepted, so there is nothing to reconcile.
             Err(e) => {
                 tracing::error!(
                     error = %e,
@@ -1389,6 +1442,146 @@ mod tests {
 
         let records = repo.all_records().await;
         assert_eq!(records[0].status, "failed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn placement_timeout_reconciles_before_marking_failed() {
+        // C8: a NetworkTimeout on placement does NOT mean the order never landed —
+        // the request may have reached the exchange and the response was lost.
+        // Marking it `failed` would silently orphan a live position. The manager
+        // must reconcile by client_order_id and, if the order is live, adopt it.
+        let cfg = live_config();
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter
+            .will_fail(OrderAdapterError::NetworkTimeout(
+                "response lost".to_string(),
+            ))
+            .await;
+        adapter
+            .will_reconcile_to_landed(
+                "exch-reconciled-1",
+                OrderStatusResult::new(OrderStatus::Open),
+            )
+            .await;
+        let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
+
+        manager
+            .place_order(order_req(OrderSide::Buy, 100))
+            .await
+            .expect("a reconciled live order must not surface as an error");
+
+        let records = repo.all_records().await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].status, "open",
+            "a reconciled-live order must be kept open, never marked failed"
+        );
+        assert_eq!(
+            records[0].exchange_order_id.as_deref(),
+            Some("exch-reconciled-1"),
+            "the exchange id discovered by reconciliation must be persisted"
+        );
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert_eq!(
+            net,
+            Decimal::new(100, 0),
+            "the reconciled position must count toward the cap, not vanish"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn placement_timeout_with_no_exchange_record_marks_failed() {
+        // C8: when reconciliation proves the exchange has no record of the order,
+        // it genuinely never landed and is safe to mark failed.
+        let cfg = live_config();
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter
+            .will_fail(OrderAdapterError::NetworkTimeout(
+                "response lost".to_string(),
+            ))
+            .await;
+        adapter.will_reconcile_not_found().await;
+        let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
+
+        let result = manager.place_order(order_req(OrderSide::Buy, 100)).await;
+        assert!(matches!(result, Err(OrderManagerError::Adapter(_))));
+
+        let records = repo.all_records().await;
+        assert_eq!(records[0].status, "failed");
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert_eq!(
+            net,
+            Decimal::ZERO,
+            "an order the exchange never received carries no exposure"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn placement_timeout_with_failed_reconciliation_leaves_order_open() {
+        // C8: if reconciliation itself fails, the true state is UNKNOWN. Marking
+        // the order failed could orphan a live position, so the manager must leave
+        // it `open` (conservatively counted in net_position) for manual follow-up.
+        let cfg = live_config();
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter
+            .will_fail(OrderAdapterError::NetworkTimeout(
+                "response lost".to_string(),
+            ))
+            .await;
+        adapter
+            .will_fail_reconciliation(OrderAdapterError::NetworkTimeout(
+                "reconcile unreachable".to_string(),
+            ))
+            .await;
+        let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
+
+        let result = manager.place_order(order_req(OrderSide::Buy, 100)).await;
+        assert!(
+            matches!(result, Err(OrderManagerError::Adapter(_))),
+            "the caller is still told placement did not confirm"
+        );
+
+        let records = repo.all_records().await;
+        assert_eq!(
+            records[0].status, "open",
+            "an unconfirmed order must stay open, never failed, to avoid orphaning"
+        );
+        let net = repo.net_position("tabdeal", "USDT/IRT").await.unwrap();
+        assert_eq!(
+            net,
+            Decimal::new(100, 0),
+            "an unconfirmed order must keep counting toward the cap (conservative)"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn permanent_rejection_skips_reconciliation_and_marks_failed() {
+        // A permanent rejection (e.g. insufficient funds) means the order was
+        // never accepted — there is nothing to reconcile, mark it failed directly.
+        let cfg = live_config();
+        let adapter = FakeOrderAdapter::new("tabdeal");
+        adapter
+            .will_fail(OrderAdapterError::Rejected("min notional".to_string()))
+            .await;
+        // Configure reconciliation to "landed" to prove it is NOT consulted for
+        // a permanent error: the order must still be marked failed.
+        adapter
+            .will_reconcile_to_landed(
+                "should-not-be-used",
+                OrderStatusResult::new(OrderStatus::Open),
+            )
+            .await;
+        let (manager, repo, _rx) = build_manager_with_repo(cfg, adapter);
+
+        let result = manager.place_order(order_req(OrderSide::Buy, 100)).await;
+        assert!(matches!(result, Err(OrderManagerError::Adapter(_))));
+
+        let records = repo.all_records().await;
+        assert_eq!(records[0].status, "failed");
+        assert!(
+            records[0].exchange_order_id.is_none(),
+            "a permanently rejected order must not adopt a reconciled exchange id"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
