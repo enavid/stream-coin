@@ -65,6 +65,10 @@ pub trait SubscriptionRepository: Send + Sync {
 
     /// Removes the subscription row. Idempotent — deleting a nonexistent id is `Ok`.
     async fn delete(&self, id: i64) -> Result<(), SubscriptionRepositoryError>;
+
+    /// Sets `active = false` for every subscription owned by `user_id`.
+    /// Returns the number of rows that were active and are now deactivated.
+    async fn halt_for_user(&self, user_id: i32) -> Result<u64, SubscriptionRepositoryError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +197,18 @@ impl SubscriptionRepository for FakeSubscriptionRepository {
     async fn delete(&self, id: i64) -> Result<(), SubscriptionRepositoryError> {
         self.inner.lock().await.retain(|s| s.record.id != id);
         Ok(())
+    }
+
+    async fn halt_for_user(&self, user_id: i32) -> Result<u64, SubscriptionRepositoryError> {
+        let mut inner = self.inner.lock().await;
+        let mut count: u64 = 0;
+        for stored in inner.iter_mut() {
+            if stored.record.user_id == user_id && stored.record.active {
+                stored.record.active = false;
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -342,5 +358,46 @@ mod tests {
             repo.delete(999).await.is_ok(),
             "deleting a missing id must not error"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn halt_for_user_deactivates_all_active_subscriptions() {
+        let repo = FakeSubscriptionRepository::new();
+        repo.create(1, "s1", None, None).await.unwrap();
+        repo.create(1, "s2", None, None).await.unwrap();
+        repo.create(2, "s1", None, None).await.unwrap();
+
+        let count = repo.halt_for_user(1).await.unwrap();
+        assert_eq!(count, 2);
+
+        let user1 = repo.list_for_user(1).await.unwrap();
+        assert!(
+            user1.iter().all(|s| !s.active),
+            "all user 1 subs must be deactivated"
+        );
+
+        let user2 = repo.list_for_user(2).await.unwrap();
+        assert!(
+            user2.iter().all(|s| s.active),
+            "user 2 sub must remain active"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn halt_for_user_skips_already_inactive_subscriptions() {
+        let repo = FakeSubscriptionRepository::new();
+        let sub = repo.create(1, "s1", None, None).await.unwrap();
+        repo.update(sub.id, false, None, None).await.unwrap();
+        repo.create(1, "s2", None, None).await.unwrap();
+
+        let count = repo.halt_for_user(1).await.unwrap();
+        assert_eq!(count, 1, "only the previously active sub should count");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn halt_for_user_returns_zero_when_no_subscriptions() {
+        let repo = FakeSubscriptionRepository::new();
+        let count = repo.halt_for_user(99).await.unwrap();
+        assert_eq!(count, 0);
     }
 }

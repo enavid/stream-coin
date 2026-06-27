@@ -1,3 +1,4 @@
+pub mod admin_handler;
 pub mod auth_handler;
 pub mod backtest_handler;
 pub mod candle_handler;

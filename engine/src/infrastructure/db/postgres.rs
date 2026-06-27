@@ -897,4 +897,16 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
         Ok(())
     }
+
+    async fn halt_for_user(&self, user_id: i32) -> Result<u64, SubscriptionRepositoryError> {
+        let result = sqlx::query(
+            "UPDATE strategy_subscriptions SET active = false
+             WHERE user_id = $1 AND active = true",
+        )
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
 }

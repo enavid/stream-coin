@@ -14,6 +14,7 @@ use crate::infrastructure::db::order_repository::{
 };
 use crate::infrastructure::db::subscription_repository::SubscriptionRepository;
 use crate::order::circuit_breaker::{CircuitBreaker, CircuitBreakerError};
+use crate::order::credential_resolver::{CredentialResolver, CredentialResolverError};
 use crate::order::entity::SafetyConfig;
 use crate::order::port::{
     OrderAdapter, OrderAdapterError, OrderId, OrderRequest, OrderSide, OrderStatus,
@@ -31,6 +32,12 @@ pub enum OrderManagerError {
     CircuitBreakerTripped,
     #[error("no order adapter registered for exchange '{0}'")]
     NoAdapterForExchange(String),
+    #[error("credential resolver not configured — set CREDENTIALS_ENCRYPTION_KEY")]
+    NoCredentialResolver,
+    #[error("user {user_id} has no credentials stored for exchange '{exchange}'")]
+    NoCredentialsForUser { user_id: i32, exchange: String },
+    #[error("credential resolution failed: {0}")]
+    CredentialResolution(#[from] CredentialResolverError),
     #[error("order adapter error: {0}")]
     Adapter(#[from] OrderAdapterError),
     #[error("order repository error: {0}")]
@@ -54,6 +61,9 @@ pub struct OrderManager {
     /// Per-user subscription registry. When `Some`, every inbound signal is also
     /// fanned out to all active subscribers via `fan_out_signal_to_subscriptions`.
     subscription_repository: Option<Arc<dyn SubscriptionRepository>>,
+    /// Resolves per-user exchange credentials into `OrderAdapter` instances.
+    /// Used by admin order placement and signal fanout.
+    credential_resolver: Option<Arc<dyn CredentialResolver>>,
 }
 
 impl OrderManager {
@@ -92,6 +102,7 @@ impl OrderManager {
             fill_poll_interval,
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
             subscription_repository: None,
+            credential_resolver: None,
         }
     }
 
@@ -99,6 +110,13 @@ impl OrderManager {
     /// out to all active subscribers after the system-level order is processed.
     pub fn with_subscription_repository(mut self, repo: Arc<dyn SubscriptionRepository>) -> Self {
         self.subscription_repository = Some(repo);
+        self
+    }
+
+    /// Attaches a credential resolver for per-user adapter construction.
+    /// Required for admin order placement and credential-aware signal fanout.
+    pub fn with_credential_resolver(mut self, resolver: Arc<dyn CredentialResolver>) -> Self {
+        self.credential_resolver = Some(resolver);
         self
     }
 
@@ -167,13 +185,47 @@ impl OrderManager {
             "signal accepted, executing order"
         );
 
-        self.execute_order(req).await
+        self.execute_order(req, None).await
     }
 
     /// Direct order placement from REST endpoint or admin.
     pub async fn place_order(&self, req: OrderRequest) -> Result<String, OrderManagerError> {
         let client_order_id = req.client_order_id.clone();
-        self.execute_order(req).await?;
+        self.execute_order(req, None).await?;
+        Ok(client_order_id)
+    }
+
+    /// Places an order on behalf of a specific user using their stored exchange credentials.
+    /// Requires `credential_resolver` to be configured; returns an error otherwise.
+    pub async fn place_order_for_user(
+        &self,
+        user_id: i32,
+        req: OrderRequest,
+    ) -> Result<String, OrderManagerError> {
+        let resolver = self
+            .credential_resolver
+            .as_ref()
+            .ok_or(OrderManagerError::NoCredentialResolver)?;
+
+        let adapter = resolver
+            .adapter_for_user(user_id, &req.exchange)
+            .await?
+            .ok_or_else(|| OrderManagerError::NoCredentialsForUser {
+                user_id,
+                exchange: req.exchange.clone(),
+            })?;
+
+        tracing::info!(
+            user_id,
+            exchange = %req.exchange,
+            pair = %req.pair,
+            side = %req.side,
+            client_order_id = %req.client_order_id,
+            "admin: placing order for user using stored credentials"
+        );
+
+        let client_order_id = req.client_order_id.clone();
+        self.execute_order(req, Some(adapter)).await?;
         Ok(client_order_id)
     }
 
@@ -242,7 +294,13 @@ impl OrderManager {
         Ok(self.order_repository.list(exchange, pair).await?)
     }
 
-    async fn execute_order(&self, req: OrderRequest) -> Result<(), OrderManagerError> {
+    /// `adapter_override`: when `Some`, bypasses the global `order_adapters` registry
+    /// and uses the supplied adapter directly (e.g. for per-user credential-based orders).
+    async fn execute_order(
+        &self,
+        req: OrderRequest,
+        adapter_override: Option<Arc<dyn OrderAdapter>>,
+    ) -> Result<(), OrderManagerError> {
         // Position limit checked first — must not count rejected orders against the circuit breaker
         let open_qty = self
             .order_repository
@@ -290,7 +348,9 @@ impl OrderManager {
             return Ok(());
         }
 
-        let adapter = {
+        let adapter = if let Some(a) = adapter_override {
+            a
+        } else {
             let adapters = self.order_adapters.read().await;
             adapters
                 .get(&req.exchange)
@@ -580,7 +640,37 @@ impl OrderManager {
                 "executing subscription order"
             );
 
-            if let Err(e) = self.execute_order(req).await {
+            let user_adapter = if let Some(resolver) = &self.credential_resolver {
+                match resolver
+                    .adapter_for_user(sub.user_id, &signal.exchange)
+                    .await
+                {
+                    Ok(Some(a)) => Some(a),
+                    Ok(None) => {
+                        tracing::warn!(
+                            user_id = sub.user_id,
+                            subscription_id = sub.id,
+                            exchange = %signal.exchange,
+                            "subscription fanout: no credentials stored for user — using global adapter"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            user_id = sub.user_id,
+                            subscription_id = sub.id,
+                            exchange = %signal.exchange,
+                            error = %e,
+                            "subscription fanout: credential resolution failed — skipping subscriber"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Err(e) = self.execute_order(req, user_adapter).await {
                 tracing::error!(
                     user_id = sub.user_id,
                     subscription_id = sub.id,
@@ -1535,6 +1625,200 @@ mod tests {
         assert!(
             order_repo.all_records().await.is_empty(),
             "inactive subscription must not produce an order"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // place_order_for_user — credential-aware admin order placement
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn place_order_for_user_without_resolver_returns_no_credential_resolver_error() {
+        let order_repo = Arc::new(FakeOrderRepository::new());
+        let (broadcaster, _rx) = broadcast::channel(32);
+        let manager = OrderManager::with_poll_interval(
+            Arc::new(RwLock::new(HashMap::new())),
+            order_repo,
+            broadcaster,
+            SafetyConfig {
+                dry_run: true,
+                ..SafetyConfig::default()
+            },
+            Duration::from_millis(10),
+        );
+
+        let req = OrderRequest {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::new(100, 0),
+            price: None,
+            client_order_id: Uuid::new_v4().to_string(),
+            strategy_id: None,
+        };
+        let err = manager.place_order_for_user(1, req).await.unwrap_err();
+        assert!(
+            matches!(err, OrderManagerError::NoCredentialResolver),
+            "expected NoCredentialResolver, got {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn place_order_for_user_with_no_credentials_stored_returns_error() {
+        use crate::order::credential_resolver::FakeCredentialResolver;
+
+        let order_repo = Arc::new(FakeOrderRepository::new());
+        let (broadcaster, _rx) = broadcast::channel(32);
+        let resolver = Arc::new(FakeCredentialResolver::none());
+        let manager = OrderManager::with_poll_interval(
+            Arc::new(RwLock::new(HashMap::new())),
+            order_repo,
+            broadcaster,
+            SafetyConfig {
+                dry_run: true,
+                ..SafetyConfig::default()
+            },
+            Duration::from_millis(10),
+        )
+        .with_credential_resolver(resolver);
+
+        let req = OrderRequest {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::new(100, 0),
+            price: None,
+            client_order_id: Uuid::new_v4().to_string(),
+            strategy_id: None,
+        };
+        let err = manager.place_order_for_user(99, req).await.unwrap_err();
+        assert!(
+            matches!(err, OrderManagerError::NoCredentialsForUser { .. }),
+            "expected NoCredentialsForUser, got {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn place_order_for_user_uses_resolver_adapter_not_global_registry() {
+        use crate::order::credential_resolver::FakeCredentialResolver;
+
+        let user_adapter = Arc::new(FakeOrderAdapter::new("tabdeal"));
+        let resolver = Arc::new(FakeCredentialResolver::returning(
+            Arc::clone(&user_adapter) as Arc<dyn OrderAdapter>
+        ));
+
+        let order_repo = Arc::new(FakeOrderRepository::new());
+        let (broadcaster, _rx) = broadcast::channel(32);
+        let manager = OrderManager::with_poll_interval(
+            Arc::new(RwLock::new(HashMap::new())),
+            order_repo.clone(),
+            broadcaster,
+            SafetyConfig {
+                dry_run: false,
+                ..live_config()
+            },
+            Duration::from_millis(10),
+        )
+        .with_credential_resolver(resolver);
+
+        let req = OrderRequest {
+            exchange: "tabdeal".to_string(),
+            pair: "USDT/IRT".to_string(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::new(100, 0),
+            price: None,
+            client_order_id: Uuid::new_v4().to_string(),
+            strategy_id: None,
+        };
+        manager.place_order_for_user(1, req).await.unwrap();
+
+        assert_eq!(
+            user_adapter.placed_count().await,
+            1,
+            "order must use the per-user adapter, not the global registry"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fan_out_uses_per_user_adapter_when_credential_resolver_is_configured() {
+        use crate::order::credential_resolver::FakeCredentialResolver;
+
+        let sub_repo = Arc::new(FakeSubscriptionRepository::new());
+        sub_repo.create(1, "spread-1", None, None).await.unwrap();
+
+        let user_adapter = Arc::new(FakeOrderAdapter::new("tabdeal"));
+        let resolver = Arc::new(FakeCredentialResolver::returning(
+            Arc::clone(&user_adapter) as Arc<dyn OrderAdapter>
+        ));
+
+        let order_repo = Arc::new(FakeOrderRepository::new());
+        let (broadcaster, _rx) = broadcast::channel(32);
+        let manager = OrderManager::with_poll_interval(
+            Arc::new(RwLock::new(HashMap::new())),
+            order_repo.clone(),
+            broadcaster,
+            SafetyConfig {
+                dry_run: false,
+                ..live_config()
+            },
+            Duration::from_millis(10),
+        )
+        .with_subscription_repository(sub_repo)
+        .with_credential_resolver(resolver);
+
+        manager
+            .fan_out_signal_to_subscriptions(&make_signal("buy", 0.9))
+            .await;
+
+        assert_eq!(
+            user_adapter.placed_count().await,
+            1,
+            "fan_out must use per-user adapter from resolver"
+        );
+        assert_eq!(order_repo.all_records().await.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fan_out_falls_back_to_global_adapter_when_resolver_returns_none() {
+        use crate::order::credential_resolver::FakeCredentialResolver;
+
+        let sub_repo = Arc::new(FakeSubscriptionRepository::new());
+        sub_repo.create(1, "spread-1", None, None).await.unwrap();
+
+        let resolver = Arc::new(FakeCredentialResolver::none());
+
+        let global_adapter = Arc::new(FakeOrderAdapter::new("tabdeal"));
+        let mut adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
+        adapters.insert(
+            "tabdeal".to_string(),
+            Arc::clone(&global_adapter) as Arc<dyn OrderAdapter>,
+        );
+
+        let order_repo = Arc::new(FakeOrderRepository::new());
+        let (broadcaster, _rx) = broadcast::channel(32);
+        let manager = OrderManager::with_poll_interval(
+            Arc::new(RwLock::new(adapters)),
+            order_repo.clone(),
+            broadcaster,
+            SafetyConfig {
+                dry_run: false,
+                ..live_config()
+            },
+            Duration::from_millis(10),
+        )
+        .with_subscription_repository(sub_repo)
+        .with_credential_resolver(resolver);
+
+        manager
+            .fan_out_signal_to_subscriptions(&make_signal("buy", 0.9))
+            .await;
+
+        assert_eq!(
+            global_adapter.placed_count().await,
+            1,
+            "when resolver returns None, must fall back to global adapter"
         );
     }
 }

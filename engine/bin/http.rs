@@ -34,6 +34,7 @@ use stream_coin::infrastructure::db::ticker_repository::TickerRepository;
 use stream_coin::infrastructure::db::user_repository::{seed_admin_if_empty, UserRepository};
 use stream_coin::kafka::port::MessagePublisher;
 use stream_coin::kafka::KafkaProducer;
+use stream_coin::order::credential_resolver::{LiveCredentialResolver, OrderAdapterFactory};
 use stream_coin::order::entity::SafetyConfig;
 use stream_coin::order::manager::{spawn_order_manager_listener, OrderManager};
 use stream_coin::order::port::OrderAdapter;
@@ -365,6 +366,37 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    // Build per-exchange adapter factories for credential-based order placement.
+    // Each factory decrypts a user's credentials JSON and constructs the adapter.
+    let mut order_adapter_factories: HashMap<String, OrderAdapterFactory> = HashMap::new();
+    order_adapter_factories.insert(
+        "tabdeal".to_string(),
+        Arc::new(|creds: &serde_json::Value| {
+            let api_key = creds["api_key"]
+                .as_str()
+                .ok_or_else(|| "tabdeal credentials must contain 'api_key'".to_string())?;
+            Ok(Arc::new(TabdealOrderAdapter::new(api_key)) as Arc<dyn OrderAdapter>)
+        }),
+    );
+
+    let credential_resolver: Option<
+        Arc<dyn stream_coin::order::credential_resolver::CredentialResolver>,
+    > = match (credential_repository.clone(), credential_cipher.clone()) {
+        (Some(repo), Some(cipher)) => {
+            let resolver = LiveCredentialResolver::new(repo, cipher, order_adapter_factories);
+            tracing::info!("credential resolver configured — per-user order adapters enabled");
+            Some(Arc::new(resolver))
+        }
+        _ => {
+            tracing::warn!(
+                "credential resolver not configured \
+                     (CREDENTIALS_ENCRYPTION_KEY unset or no DB) — \
+                     admin order-for-user endpoints return errors"
+            );
+            None
+        }
+    };
+
     let mut order_manager_builder = OrderManager::new(
         order_adapters.clone(),
         order_repository,
@@ -374,6 +406,10 @@ async fn main() -> std::io::Result<()> {
     if let Some(sub_repo) = subscription_repository.clone() {
         order_manager_builder = order_manager_builder.with_subscription_repository(sub_repo);
         tracing::info!("order manager: subscription fanout enabled");
+    }
+    if let Some(resolver) = credential_resolver {
+        order_manager_builder = order_manager_builder.with_credential_resolver(resolver);
+        tracing::info!("order manager: per-user credential resolver attached");
     }
     let order_manager = Arc::new(order_manager_builder);
     let _listener_handle =

@@ -1,6 +1,6 @@
 use actix_web::web;
 
-use crate::presentation::handlers::{order_handler, user_handler};
+use crate::presentation::handlers::{admin_handler, order_handler, user_handler};
 
 /// All `/admin/*` routes live in this single scope — actix-web only routes to the
 /// first-registered scope sharing an exact path prefix, so a second `web::scope("/admin")`
@@ -23,6 +23,14 @@ pub fn user_router(cfg: &mut web::ServiceConfig) {
             .route(
                 "/circuit-breaker/reset",
                 web::post().to(order_handler::reset_circuit_breaker),
+            )
+            .route(
+                "/orders/place",
+                web::post().to(admin_handler::admin_place_order_for_user),
+            )
+            .route(
+                "/strategies/halt",
+                web::post().to(admin_handler::admin_halt_user_strategies),
             ),
     );
 }
