@@ -35,6 +35,11 @@ pub enum OrderRepositoryError {
     Database(String),
     #[error("order not found: client_order_id={0}")]
     NotFound(String),
+    /// An order with the same `client_order_id` already exists. The column is
+    /// `UNIQUE`, so re-inserting the same idempotency key is rejected rather than
+    /// creating a duplicate order (M18).
+    #[error("duplicate client_order_id: {0}")]
+    DuplicateClientOrderId(String),
 }
 
 #[async_trait]
@@ -124,6 +129,16 @@ impl FakeOrderRepository {
 impl OrderRepository for FakeOrderRepository {
     async fn insert(&self, record: &OrderRecord) -> Result<i64, OrderRepositoryError> {
         let mut recs = self.records.lock().await;
+        // Honor the DB's UNIQUE(client_order_id) constraint so duplicate-order
+        // rejection (idempotency) behaves the same in tests as in production (M18).
+        if recs
+            .iter()
+            .any(|r| r.client_order_id == record.client_order_id)
+        {
+            return Err(OrderRepositoryError::DuplicateClientOrderId(
+                record.client_order_id.clone(),
+            ));
+        }
         let id = (recs.len() + 1) as i64;
         let mut r = record.clone();
         r.id = Some(id);
@@ -258,6 +273,34 @@ mod tests {
             .unwrap();
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_client_order_id_is_rejected() {
+        // The orders table has UNIQUE(client_order_id); the in-memory fake must
+        // reject a re-insert of the same key rather than silently storing a
+        // duplicate order (M18).
+        let repo = FakeOrderRepository::new();
+        repo.insert(&make_record("dup-key", "open", Decimal::new(100, 0)))
+            .await
+            .expect("first insert succeeds");
+
+        let result = repo
+            .insert(&make_record("dup-key", "open", Decimal::new(50, 0)))
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(OrderRepositoryError::DuplicateClientOrderId(ref id)) if id == "dup-key"
+            ),
+            "re-inserting the same client_order_id must be rejected, got {result:?}"
+        );
+        assert_eq!(
+            repo.all_records().await.len(),
+            1,
+            "the duplicate must not have been stored"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

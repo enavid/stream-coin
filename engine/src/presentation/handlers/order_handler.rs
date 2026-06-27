@@ -5,6 +5,8 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
+use crate::infrastructure::db::order_repository::OrderRepositoryError;
+use crate::order::manager::OrderManagerError;
 use crate::order::port::{OrderRequest, OrderSide, OrderType};
 use crate::presentation::dto::order::{
     CancelOrderRequest, OrderItem, OrderListResponse, OrderPlacedResponse, PlaceOrderRequest,
@@ -12,6 +14,22 @@ use crate::presentation::dto::order::{
 use crate::presentation::middlewares::jwt::require_permission;
 use crate::presentation::responses::{success_response, ApiError, FieldError};
 use crate::presentation::shared::app_state::AppState;
+
+/// Maps an order-manager error to an HTTP response (M15). Infrastructure /
+/// external failures (DB, credential resolution, exchange adapter, missing
+/// server config) become a generic 503 whose detail is logged but never leaked;
+/// domain errors (position limit, circuit breaker, confidence floor, …) keep
+/// their safe, client-actionable message as a 400.
+pub(crate) fn order_manager_error_to_api(e: &OrderManagerError) -> ApiError {
+    use OrderManagerError as E;
+    match e {
+        E::Repository(OrderRepositoryError::Database(_))
+        | E::CredentialResolution(_)
+        | E::Adapter(_)
+        | E::NoCredentialResolver => ApiError::internal_error(),
+        other => ApiError::new(&other.to_string(), vec![]),
+    }
+}
 
 /// Permission required to place, cancel, or list orders.
 const ORDERS_MANAGE: &str = "orders.manage";
@@ -155,7 +173,7 @@ pub async fn place_order(
         }
         Err(e) => {
             tracing::error!(actor_user_id = ctx.user_id, error = %e, "place_order failed");
-            ApiError::new(&e.to_string(), vec![]).to_response()
+            order_manager_error_to_api(&e).to_response()
         }
     }
 }
@@ -202,7 +220,7 @@ pub async fn cancel_order(
         }
         Err(e) => {
             tracing::error!(actor_user_id = ctx.user_id, error = %e, client_order_id = %body.client_order_id, "cancel_order failed");
-            ApiError::new(&e.to_string(), vec![]).to_response()
+            order_manager_error_to_api(&e).to_response()
         }
     }
 }
@@ -265,7 +283,7 @@ pub async fn list_orders(
         }
         Err(e) => {
             tracing::error!(error = %e, "list_orders failed");
-            ApiError::new(&e.to_string(), vec![]).to_response()
+            order_manager_error_to_api(&e).to_response()
         }
     }
 }

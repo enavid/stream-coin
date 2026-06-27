@@ -77,7 +77,7 @@ pub async fn subscribe(
                 error = %e,
                 "failed to create subscription"
             );
-            ApiError::new(&e.to_string(), vec![]).to_response()
+            ApiError::internal_error().to_response()
         }
     }
 }
@@ -105,7 +105,7 @@ pub async fn list_subscriptions(req: HttpRequest, state: web::Data<AppState>) ->
                 error = %e,
                 "failed to list subscriptions"
             );
-            ApiError::new(&e.to_string(), vec![]).to_response()
+            ApiError::internal_error().to_response()
         }
     }
 }
@@ -163,7 +163,7 @@ pub async fn update_subscription(
         }
         Err(e) => {
             tracing::error!(subscription_id = id, error = %e, "failed to update subscription");
-            ApiError::new(&e.to_string(), vec![]).to_response()
+            ApiError::internal_error().to_response()
         }
     }
 }
@@ -207,7 +207,7 @@ pub async fn delete_subscription(
         }
         Err(e) => {
             tracing::error!(subscription_id = id, error = %e, "failed to delete subscription");
-            ApiError::new(&e.to_string(), vec![]).to_response()
+            ApiError::internal_error().to_response()
         }
     }
 }
@@ -264,6 +264,110 @@ mod tests {
             credential_repository: None,
             credential_cipher: None,
         })
+    }
+
+    fn state_with_failing_repo() -> web::Data<AppState> {
+        let user_repo = Arc::new(FakeUserRepository::with_roles(vec![RoleRecord {
+            name: "trader".to_string(),
+            permissions: vec![
+                "subscriptions.write".to_string(),
+                "subscriptions.read".to_string(),
+            ],
+        }]));
+        web::Data::new(AppState {
+            redis: None,
+            exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+            exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+            adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            publisher: None,
+            broadcaster: AppState::new_broadcaster(),
+            jwt_secret: Some(Arc::new("test-secret".to_string())),
+            ticker_repository: None,
+            running_strategies: Arc::new(Mutex::new(HashMap::new())),
+            strategy_repository: None,
+            signal_repository: None,
+            order_adapters: Arc::new(RwLock::new(HashMap::new())),
+            order_manager: None,
+            python_strategy_repository: None,
+            candle_repository: None,
+            historical_sources: Arc::new(HashMap::new()),
+            candle_history: AppState::new_candle_history(),
+            exchange_repository: None,
+            asset_repository: None,
+            subscription_repository: Some(Arc::new(FailingSubscriptionRepository)),
+            user_repository: Some(user_repo),
+            credential_repository: None,
+            credential_cipher: None,
+        })
+    }
+
+    /// A subscription repository whose every call fails with a `Database` error,
+    /// used to prove an infrastructure failure maps to 503 with a generic body
+    /// rather than 400 leaking the raw error text (M15).
+    struct FailingSubscriptionRepository;
+
+    #[async_trait::async_trait]
+    impl SubscriptionRepository for FailingSubscriptionRepository {
+        async fn create(
+            &self,
+            _u: i32,
+            _s: &str,
+            _m: Option<rust_decimal::Decimal>,
+            _c: Option<f64>,
+        ) -> Result<
+            crate::infrastructure::db::subscription_repository::SubscriptionRecord,
+            SubscriptionRepositoryError,
+        > {
+            Err(SubscriptionRepositoryError::Database(
+                "connection refused: secret-host:5432".to_string(),
+            ))
+        }
+        async fn get(
+            &self,
+            _id: i64,
+        ) -> Result<
+            Option<crate::infrastructure::db::subscription_repository::SubscriptionRecord>,
+            SubscriptionRepositoryError,
+        > {
+            Err(SubscriptionRepositoryError::Database("boom".to_string()))
+        }
+        async fn list_for_user(
+            &self,
+            _u: i32,
+        ) -> Result<
+            Vec<crate::infrastructure::db::subscription_repository::SubscriptionRecord>,
+            SubscriptionRepositoryError,
+        > {
+            Err(SubscriptionRepositoryError::Database("boom".to_string()))
+        }
+        async fn list_active_for_strategy(
+            &self,
+            _s: &str,
+        ) -> Result<
+            Vec<crate::infrastructure::db::subscription_repository::SubscriptionRecord>,
+            SubscriptionRepositoryError,
+        > {
+            Err(SubscriptionRepositoryError::Database("boom".to_string()))
+        }
+        async fn update(
+            &self,
+            _id: i64,
+            _a: bool,
+            _m: Option<rust_decimal::Decimal>,
+            _c: Option<f64>,
+        ) -> Result<
+            crate::infrastructure::db::subscription_repository::SubscriptionRecord,
+            SubscriptionRepositoryError,
+        > {
+            Err(SubscriptionRepositoryError::Database("boom".to_string()))
+        }
+        async fn delete(&self, _id: i64) -> Result<(), SubscriptionRepositoryError> {
+            Err(SubscriptionRepositoryError::Database("boom".to_string()))
+        }
+        async fn halt_for_user(&self, _u: i32) -> Result<u64, SubscriptionRepositoryError> {
+            Err(SubscriptionRepositoryError::Database("boom".to_string()))
+        }
     }
 
     fn state_without_sub_repo() -> web::Data<AppState> {
@@ -366,6 +470,33 @@ mod tests {
         req.extensions_mut().insert(trader_ctx());
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 409, "duplicate subscription must return 409");
+    }
+
+    #[actix_web::test]
+    async fn db_error_returns_503_not_400() {
+        // An infrastructure failure must surface as 503 with a generic message —
+        // never 400 leaking the raw DB error text (which here embeds a host:port).
+        let state = state_with_failing_repo();
+        let app = make_app!(state);
+
+        let req = test::TestRequest::post()
+            .uri("/v1/subscriptions")
+            .set_json(serde_json::json!({"strategy_id": "spread-1"}))
+            .to_request();
+        req.extensions_mut().insert(trader_ctx());
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(
+            resp.status(),
+            503,
+            "a DB error must be 503 Service Unavailable, not 400"
+        );
+        let body: Value = test::read_body_json(resp).await;
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.contains("secret-host") && !message.contains("5432"),
+            "the response must not leak internal DB error text, got: {message}"
+        );
     }
 
     #[actix_web::test]

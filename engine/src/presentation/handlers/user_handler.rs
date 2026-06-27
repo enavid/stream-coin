@@ -1,6 +1,7 @@
 use actix_web::{web, HttpRequest, Responder};
 
 use crate::infrastructure::crypto::password::hash_password;
+use crate::infrastructure::db::user_repository::UserRepositoryError;
 use crate::presentation::dto::user::{
     AssignRolesRequest, CreateRoleRequest, CreateUserRequest, PermissionListResponse,
     RoleListResponse, RoleResponse, UserListResponse, UserResponse,
@@ -8,6 +9,18 @@ use crate::presentation::dto::user::{
 use crate::presentation::middlewares::jwt::require_permission;
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::AppState;
+
+/// Maps a user-repository error to an HTTP response (M15): the infrastructure
+/// `Database` variant becomes a generic 503 (its detail is logged at the repo
+/// layer, never leaked to the client), while domain variants
+/// (`DuplicateUsername`, `RoleNotFound`) keep their safe, client-actionable
+/// message as a 400.
+fn user_repo_error(e: UserRepositoryError) -> ApiError {
+    match e {
+        UserRepositoryError::Database(_) => ApiError::internal_error(),
+        other => ApiError::new(&other.to_string(), vec![]),
+    }
+}
 
 /// `POST /v1/admin/users` — creates a user and assigns the given roles. Gated by `users.manage`.
 pub async fn create_user(
@@ -27,12 +40,12 @@ pub async fn create_user(
         .await
     {
         Ok(u) => u,
-        Err(e) => return ApiError::new(&e.to_string(), vec![]).to_response(),
+        Err(e) => return user_repo_error(e).to_response(),
     };
 
     if !body.roles.is_empty() {
         if let Err(e) = repo.assign_roles(user.id, &body.roles).await {
-            return ApiError::new(&e.to_string(), vec![]).to_response();
+            return user_repo_error(e).to_response();
         }
     }
 
@@ -58,14 +71,14 @@ pub async fn list_users(req: HttpRequest, state: web::Data<AppState>) -> impl Re
 
     let users = match repo.list_users().await {
         Ok(u) => u,
-        Err(e) => return ApiError::new(&e.to_string(), vec![]).to_response(),
+        Err(e) => return user_repo_error(e).to_response(),
     };
 
     let mut responses = Vec::with_capacity(users.len());
     for user in users {
         let roles = match repo.roles_for_user(user.id).await {
             Ok(r) => r,
-            Err(e) => return ApiError::new(&e.to_string(), vec![]).to_response(),
+            Err(e) => return user_repo_error(e).to_response(),
         };
         responses.push(UserResponse {
             id: user.id,
@@ -94,7 +107,7 @@ pub async fn assign_user_roles(
 
     let user_id = path.into_inner();
     if let Err(e) = repo.assign_roles(user_id, &body.roles).await {
-        return ApiError::new(&e.to_string(), vec![]).to_response();
+        return user_repo_error(e).to_response();
     }
 
     success_response(
@@ -114,7 +127,7 @@ pub async fn list_roles(req: HttpRequest, state: web::Data<AppState>) -> impl Re
 
     let roles = match repo.list_roles().await {
         Ok(r) => r,
-        Err(e) => return ApiError::new(&e.to_string(), vec![]).to_response(),
+        Err(e) => return user_repo_error(e).to_response(),
     };
 
     success_response(
@@ -145,7 +158,7 @@ pub async fn create_role(
     };
 
     if let Err(e) = repo.create_role(&body.name, &body.permissions).await {
-        return ApiError::new(&e.to_string(), vec![]).to_response();
+        return user_repo_error(e).to_response();
     }
 
     success_response(
@@ -168,7 +181,7 @@ pub async fn list_permissions(req: HttpRequest, state: web::Data<AppState>) -> i
 
     let permissions = match repo.list_permissions().await {
         Ok(p) => p,
-        Err(e) => return ApiError::new(&e.to_string(), vec![]).to_response(),
+        Err(e) => return user_repo_error(e).to_response(),
     };
 
     success_response("Permissions", PermissionListResponse { permissions })

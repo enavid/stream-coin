@@ -42,6 +42,42 @@ impl HitobitWsAdapter {
         })
     }
 
+    /// See [`TabdealWsAdapter::classify_frame`] — same protocol shape (Binance
+    /// style `data.s`). Logs a malformed depth frame at `warn` (M13).
+    pub(crate) fn classify_frame(text: &str) -> Option<Price> {
+        match serde_json::from_str::<Value>(text) {
+            Ok(json) => match Self::parse_depth_message(&json) {
+                Ok(price) => Some(price),
+                Err(reason) => {
+                    if Self::is_depth_frame(&json) {
+                        tracing::warn!(
+                            exchange = "hitobit",
+                            reason = %reason,
+                            raw = %crate::exchange::truncate_for_log(text),
+                            "dropping unparseable depth frame"
+                        );
+                    } else {
+                        tracing::trace!(exchange = "hitobit", "ignoring non-depth control frame");
+                    }
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    exchange = "hitobit",
+                    error = %e,
+                    raw = %crate::exchange::truncate_for_log(text),
+                    "received non-JSON WS text frame"
+                );
+                None
+            }
+        }
+    }
+
+    fn is_depth_frame(json: &Value) -> bool {
+        json.get("data").and_then(|d| d.get("s")).is_some()
+    }
+
     pub fn parse_depth_message(msg: &Value) -> Result<Price, String> {
         let data = &msg["data"];
 
@@ -149,13 +185,9 @@ impl ExchangeAdapter for HitobitWsAdapter {
                         while let Some(msg) = ws.next().await {
                             match msg {
                                 Ok(Message::Text(text)) => {
-                                    if let Ok(json) = serde_json::from_str::<Value>(&text) {
-                                        if let Ok(price) =
-                                            HitobitWsAdapter::parse_depth_message(&json)
-                                        {
-                                            if tx.send(price).await.is_err() {
-                                                return;
-                                            }
+                                    if let Some(price) = HitobitWsAdapter::classify_frame(&text) {
+                                        if tx.send(price).await.is_err() {
+                                            return;
                                         }
                                     }
                                 }
@@ -304,6 +336,18 @@ mod tests {
         let msg = depth_message("USDTIRT", "58000", "58100");
         let price = HitobitWsAdapter::parse_depth_message(&msg).unwrap();
         assert_eq!(price.timestamp.timestamp_millis(), 1_657_530_675_579);
+    }
+
+    #[test]
+    fn unparseable_depth_message_is_logged() {
+        let broken = r#"{"data":{"s":"USDTIRT","b":[],"a":[]}}"#;
+        let logs = crate::exchange::capture_logs(|| {
+            assert!(HitobitWsAdapter::classify_frame(broken).is_none());
+        });
+        assert!(
+            logs.contains("dropping unparseable depth frame"),
+            "captured: {logs}"
+        );
     }
 
     #[test]

@@ -30,9 +30,68 @@ pub(crate) fn event_time_or_now(event_millis: Option<i64>, exchange: &str) -> Da
     }
 }
 
+/// Truncates a raw WS frame so a malformed-frame log line stays bounded (M13).
+/// Truncates on a char boundary to keep the output valid UTF-8.
+pub(crate) fn truncate_for_log(s: &str) -> String {
+    const MAX_CHARS: usize = 256;
+    if s.chars().count() <= MAX_CHARS {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(MAX_CHARS).collect();
+        format!("{truncated}…")
+    }
+}
+
+/// Runs `f` with a temporary tracing subscriber and returns everything it
+/// logged, so a test can assert that a code path actually emitted a log line.
+#[cfg(test)]
+pub(crate) fn capture_logs(f: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&self) -> BufWriter {
+            self.clone()
+        }
+    }
+
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufWriter(buf.clone()))
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = buf.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_for_log_keeps_short_strings_intact() {
+        assert_eq!(truncate_for_log("short"), "short");
+    }
+
+    #[test]
+    fn truncate_for_log_bounds_long_strings_on_char_boundary() {
+        let long = "x".repeat(1000);
+        let out = truncate_for_log(&long);
+        assert!(out.chars().count() <= 257, "256 chars + ellipsis");
+        assert!(out.ends_with('…'));
+    }
 
     #[test]
     fn event_time_uses_exchange_millis_when_present() {

@@ -44,7 +44,8 @@ pub async fn set_own_credentials(
     let envelope = cipher.encrypt(&plaintext);
 
     if let Err(e) = repo.upsert(ctx.user_id, &name, envelope).await {
-        return ApiError::new(&e.to_string(), vec![]).to_response();
+        tracing::error!(user_id = ctx.user_id, exchange = %name, error = %e, "failed to upsert credentials");
+        return ApiError::internal_error().to_response();
     }
 
     success_response("Credentials saved", serde_json::json!({"exchange": name}))
@@ -63,7 +64,10 @@ pub async fn list_own_credentials(req: HttpRequest, state: web::Data<AppState>) 
 
     let summaries = match repo.list_for_user(ctx.user_id).await {
         Ok(s) => s,
-        Err(e) => return ApiError::new(&e.to_string(), vec![]).to_response(),
+        Err(e) => {
+            tracing::error!(user_id = ctx.user_id, error = %e, "failed to list credentials");
+            return ApiError::internal_error().to_response();
+        }
     };
 
     success_response(
@@ -96,7 +100,8 @@ pub async fn delete_own_credentials(
 
     let name = path.into_inner();
     if let Err(e) = repo.delete(ctx.user_id, &name).await {
-        return ApiError::new(&e.to_string(), vec![]).to_response();
+        tracing::error!(user_id = ctx.user_id, exchange = %name, error = %e, "failed to delete credentials");
+        return ApiError::internal_error().to_response();
     }
 
     success_response("Credentials removed", serde_json::json!({"exchange": name}))

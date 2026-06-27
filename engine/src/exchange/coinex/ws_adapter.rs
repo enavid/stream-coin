@@ -42,6 +42,46 @@ impl CoinexWsAdapter {
         })
     }
 
+    /// Parses one raw WS text frame, returning a `Price` only for a valid
+    /// `depth.update`. A `depth.update` that won't parse is logged at `warn`
+    /// (M13); other frames (e.g. the subscribe response, carrying `id`/`result`)
+    /// are recognised control frames, logged at `trace` and ignored.
+    pub(crate) fn classify_frame(text: &str) -> Option<Price> {
+        match serde_json::from_str::<Value>(text) {
+            Ok(json) => match Self::parse_depth_message(&json) {
+                Ok(price) => Some(price),
+                Err(reason) => {
+                    if Self::is_depth_frame(&json) {
+                        tracing::warn!(
+                            exchange = "coinex",
+                            reason = %reason,
+                            raw = %crate::exchange::truncate_for_log(text),
+                            "dropping unparseable depth frame"
+                        );
+                    } else {
+                        tracing::trace!(exchange = "coinex", "ignoring non-depth control frame");
+                    }
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    exchange = "coinex",
+                    error = %e,
+                    raw = %crate::exchange::truncate_for_log(text),
+                    "received non-JSON WS text frame"
+                );
+                None
+            }
+        }
+    }
+
+    /// CoinEx depth pushes are `method == "depth.update"`; everything else
+    /// (subscribe ack, pong) is a control frame.
+    fn is_depth_frame(json: &Value) -> bool {
+        json.get("method").and_then(|m| m.as_str()) == Some("depth.update")
+    }
+
     pub fn parse_depth_message(msg: &Value) -> Result<Price, String> {
         let data = &msg["data"];
 
@@ -146,13 +186,9 @@ impl ExchangeAdapter for CoinexWsAdapter {
                         while let Some(msg) = ws.next().await {
                             match msg {
                                 Ok(Message::Text(text)) => {
-                                    if let Ok(json) = serde_json::from_str::<Value>(&text) {
-                                        if let Ok(price) =
-                                            CoinexWsAdapter::parse_depth_message(&json)
-                                        {
-                                            if tx.send(price).await.is_err() {
-                                                return;
-                                            }
+                                    if let Some(price) = CoinexWsAdapter::classify_frame(&text) {
+                                        if tx.send(price).await.is_err() {
+                                            return;
                                         }
                                     }
                                 }
@@ -243,6 +279,31 @@ mod tests {
         let msg = depth_update("BTCUSDT", "30000.00", "30001.00");
         let price = CoinexWsAdapter::parse_depth_message(&msg).unwrap();
         assert_eq!(price.timestamp.timestamp_millis(), 1_657_530_675_579);
+    }
+
+    #[test]
+    fn unparseable_depth_message_is_logged() {
+        // A depth.update with empty bids/asks is malformed and must be logged (M13).
+        let broken = r#"{"method":"depth.update","data":{"market":"BTCUSDT","depth":{"bids":[],"asks":[]}}}"#;
+        let logs = crate::exchange::capture_logs(|| {
+            assert!(CoinexWsAdapter::classify_frame(broken).is_none());
+        });
+        assert!(
+            logs.contains("dropping unparseable depth frame"),
+            "captured: {logs}"
+        );
+    }
+
+    #[test]
+    fn subscribe_ack_is_not_warn_logged() {
+        let ack = r#"{"id":1,"result":{"status":"success"}}"#;
+        let logs = crate::exchange::capture_logs(|| {
+            assert!(CoinexWsAdapter::classify_frame(ack).is_none());
+        });
+        assert!(
+            !logs.contains("dropping unparseable depth frame"),
+            "captured: {logs}"
+        );
     }
 
     #[test]

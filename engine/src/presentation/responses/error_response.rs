@@ -67,6 +67,18 @@ impl ApiError {
         }
     }
 
+    /// 503 — an internal/database failure. The detailed cause is logged
+    /// server-side; the client only ever receives this generic message so raw
+    /// DB/internal error text is never leaked across the API boundary (M15).
+    pub fn internal_error() -> Self {
+        ApiError {
+            success: false,
+            message: "An internal error occurred. Please try again later.".to_string(),
+            errors: vec![],
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
     pub fn to_response(&self) -> HttpResponse {
         HttpResponse::build(self.status).json(self)
     }

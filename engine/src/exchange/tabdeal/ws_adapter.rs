@@ -50,6 +50,48 @@ impl TabdealWsAdapter {
         })
     }
 
+    /// Parses one raw WS text frame, returning a `Price` only for a valid depth
+    /// update. A frame that *should* be a depth update but won't parse is logged
+    /// at `warn` (M13) — so a silent exchange schema change that drops 100% of
+    /// ticks is visible instead of looking healthy; recognised non-depth control
+    /// frames (e.g. the subscribe ack) are logged at `trace` and ignored.
+    pub(crate) fn classify_frame(text: &str) -> Option<Price> {
+        match serde_json::from_str::<Value>(text) {
+            Ok(json) => match Self::parse_depth_message(&json) {
+                Ok(price) => Some(price),
+                Err(reason) => {
+                    if Self::is_depth_frame(&json) {
+                        tracing::warn!(
+                            exchange = "tabdeal",
+                            reason = %reason,
+                            raw = %crate::exchange::truncate_for_log(text),
+                            "dropping unparseable depth frame"
+                        );
+                    } else {
+                        tracing::trace!(exchange = "tabdeal", "ignoring non-depth control frame");
+                    }
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    exchange = "tabdeal",
+                    error = %e,
+                    raw = %crate::exchange::truncate_for_log(text),
+                    "received non-JSON WS text frame"
+                );
+                None
+            }
+        }
+    }
+
+    /// Whether `json` is shaped like a depth update (carries `data.s`), as
+    /// opposed to a control frame (subscribe ack, etc.). Used to decide whether
+    /// a parse failure is alarming (a real depth frame we couldn't read).
+    fn is_depth_frame(json: &Value) -> bool {
+        json.get("data").and_then(|d| d.get("s")).is_some()
+    }
+
     pub fn parse_depth_message(msg: &Value) -> Result<Price, String> {
         let data = &msg["data"];
 
@@ -147,13 +189,9 @@ impl ExchangeAdapter for TabdealWsAdapter {
                         while let Some(msg) = ws.next().await {
                             match msg {
                                 Ok(Message::Text(text)) => {
-                                    if let Ok(json) = serde_json::from_str::<Value>(&text) {
-                                        if let Ok(price) =
-                                            TabdealWsAdapter::parse_depth_message(&json)
-                                        {
-                                            if tx.send(price).await.is_err() {
-                                                return;
-                                            }
+                                    if let Some(price) = TabdealWsAdapter::classify_frame(&text) {
+                                        if tx.send(price).await.is_err() {
+                                            return;
                                         }
                                     }
                                 }
@@ -208,6 +246,54 @@ mod tests {
         let msg = depth_message("USDTIRT", "58000", "58100");
         let price = TabdealWsAdapter::parse_depth_message(&msg).unwrap();
         assert_eq!(price.bid, 58000);
+    }
+
+    #[test]
+    fn classify_frame_returns_price_for_valid_depth() {
+        let text = depth_message("USDTIRT", "58000", "58100").to_string();
+        let price =
+            TabdealWsAdapter::classify_frame(&text).expect("valid depth must yield a price");
+        assert_eq!(price.bid, 58000);
+    }
+
+    #[test]
+    fn unparseable_depth_message_is_logged() {
+        // A frame shaped like a depth update (has data.s) but with a broken body
+        // must be dropped AND logged at warn — otherwise a schema change silently
+        // drops 100% of ticks while the engine looks healthy (M13).
+        let broken = r#"{"data":{"s":"USDTIRT","b":[],"a":[]}}"#;
+        let logs = crate::exchange::capture_logs(|| {
+            let out = TabdealWsAdapter::classify_frame(broken);
+            assert!(
+                out.is_none(),
+                "a malformed depth frame must not yield a price"
+            );
+        });
+        assert!(
+            logs.contains("dropping unparseable depth frame"),
+            "the dropped depth frame must be logged; captured: {logs}"
+        );
+    }
+
+    #[test]
+    fn non_json_frame_is_logged() {
+        let logs = crate::exchange::capture_logs(|| {
+            assert!(TabdealWsAdapter::classify_frame("not json at all").is_none());
+        });
+        assert!(logs.contains("non-JSON WS text frame"), "captured: {logs}");
+    }
+
+    #[test]
+    fn control_frame_is_not_warn_logged() {
+        // A subscribe ack has no data.s — it must be ignored quietly, not warned.
+        let ack = r#"{"id":1,"result":null}"#;
+        let logs = crate::exchange::capture_logs(|| {
+            assert!(TabdealWsAdapter::classify_frame(ack).is_none());
+        });
+        assert!(
+            !logs.contains("dropping unparseable depth frame"),
+            "a control frame must not be logged as a dropped depth frame; captured: {logs}"
+        );
     }
 
     #[test]

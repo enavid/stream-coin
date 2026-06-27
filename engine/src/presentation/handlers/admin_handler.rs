@@ -187,7 +187,8 @@ pub async fn admin_place_order_for_user(
                     );
                 }
             }
-            ApiError::new(&e.to_string(), vec![]).to_response()
+            crate::presentation::handlers::order_handler::order_manager_error_to_api(&e)
+                .to_response()
         }
     }
 }
@@ -241,7 +242,7 @@ pub async fn admin_halt_user_strategies(
         }
         Err(e) => {
             tracing::error!(error = %e, target_user_id = user_id, "admin halt_for_user failed");
-            ApiError::new(&e.to_string(), vec![]).to_response()
+            ApiError::internal_error().to_response()
         }
     }
 }

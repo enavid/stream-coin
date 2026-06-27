@@ -53,7 +53,7 @@ impl AssetRepository for PostgresAssetRepository {
             sqlx::query("SELECT id, symbol, display_name, decimals, icon_url, active FROM assets")
                 .fetch_all(&self.pool)
                 .await
-                .map_err(|e| AssetRepositoryError::Database(e.to_string()))?;
+                .map_err(|e| db_error("asset", e, AssetRepositoryError::Database))?;
 
         Ok(rows
             .into_iter()
@@ -78,7 +78,7 @@ impl AssetRepository for PostgresAssetRepository {
         .bind(symbol)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| AssetRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("asset", e, AssetRepositoryError::Database))?;
 
         Ok(row.map(|r| AssetRecord {
             id: r.get("id"),
@@ -127,7 +127,7 @@ impl CandleRepository for PostgresCandleRepository {
         .bind(to)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| CandleRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("candle", e, CandleRepositoryError::Database))?;
 
         Ok(rows
             .into_iter()
@@ -154,7 +154,7 @@ impl CandleRepository for PostgresCandleRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| CandleRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("candle", e, CandleRepositoryError::Database))?;
 
         for candle in candles {
             sqlx::query(
@@ -189,7 +189,7 @@ impl CandleRepository for PostgresCandleRepository {
 
         tx.commit()
             .await
-            .map_err(|e| CandleRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("candle", e, CandleRepositoryError::Database))?;
 
         tracing::debug!(candle_count = candles.len(), "upserted candles to db");
         Ok(())
@@ -217,7 +217,7 @@ impl TickerRepository for PostgresTickerRepository {
         .bind(symbol)
         .execute(&self.pool)
         .await
-        .map_err(|e| RepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("ticker", e, RepositoryError::Database))?;
         Ok(())
     }
 
@@ -227,7 +227,7 @@ impl TickerRepository for PostgresTickerRepository {
             .bind(symbol)
             .execute(&self.pool)
             .await
-            .map_err(|e| RepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("ticker", e, RepositoryError::Database))?;
         Ok(())
     }
 
@@ -236,7 +236,7 @@ impl TickerRepository for PostgresTickerRepository {
             sqlx::query("SELECT exchange, symbol FROM ticker_subscriptions ORDER BY started_at")
                 .fetch_all(&self.pool)
                 .await
-                .map_err(|e| RepositoryError::Database(e.to_string()))?;
+                .map_err(|e| db_error("ticker", e, RepositoryError::Database))?;
 
         Ok(rows
             .into_iter()
@@ -275,7 +275,7 @@ impl ExchangeRepository for PostgresExchangeRepository {
             sqlx::query("SELECT name, display_name, ws_url, enabled FROM exchanges")
                 .fetch_all(&self.pool)
                 .await
-                .map_err(|e| ExchangeRepositoryError::Database(e.to_string()))?;
+                .map_err(|e| db_error("exchange", e, ExchangeRepositoryError::Database))?;
 
         let exchanges: Vec<ExchangeRecord> = exchange_rows
             .into_iter()
@@ -297,7 +297,7 @@ impl ExchangeRepository for PostgresExchangeRepository {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ExchangeRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("exchange", e, ExchangeRepositoryError::Database))?;
 
         let pairs: Vec<TradingPairRecord> = pair_rows
             .into_iter()
@@ -319,7 +319,7 @@ impl ExchangeRepository for PostgresExchangeRepository {
             .bind(name)
             .execute(&self.pool)
             .await
-            .map_err(|e| ExchangeRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("exchange", e, ExchangeRepositoryError::Database))?;
         Ok(())
     }
 
@@ -340,7 +340,7 @@ impl ExchangeRepository for PostgresExchangeRepository {
         .bind(record.active)
         .execute(&self.pool)
         .await
-        .map_err(|e| ExchangeRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("exchange", e, ExchangeRepositoryError::Database))?;
         Ok(())
     }
 }
@@ -354,7 +354,7 @@ impl PostgresExchangeRepository {
             .bind(symbol)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| ExchangeRepositoryError::Database(e.to_string()))?
+            .map_err(|e| db_error("exchange", e, ExchangeRepositoryError::Database))?
             .ok_or_else(|| ExchangeRepositoryError::UnknownAsset(symbol.to_string()))
     }
 }
@@ -370,10 +370,25 @@ impl PostgresUserRepository {
 }
 
 fn is_unique_violation(e: &sqlx::Error) -> bool {
-    e.as_database_error()
-        .and_then(|db| db.code())
-        .map(|code| code == "23505")
-        .unwrap_or(false)
+    is_unique_violation_code(e.as_database_error().and_then(|db| db.code()).as_deref())
+}
+
+/// Pure SQLSTATE check, split out so unique-violation classification is unit
+/// testable without a live database (M16). `23505` is Postgres's
+/// `unique_violation` class — matching on it is robust to error-message wording,
+/// unlike substring checks for "unique"/"duplicate".
+fn is_unique_violation_code(code: Option<&str>) -> bool {
+    code == Some("23505")
+}
+
+/// Logs a database error with structured context and wraps it into the repo's
+/// error type (M14). Centralizes the "log once, at the repo layer" policy so a
+/// failure in a background task (order manager, restore loops) is never silently
+/// dropped — previously only `upsert_candles` logged. `op` is a short
+/// `"repo.method"` label for the structured log.
+fn db_error<E>(op: &str, e: sqlx::Error, wrap: impl FnOnce(String) -> E) -> E {
+    tracing::error!(op, error = %e, "database operation failed");
+    wrap(e.to_string())
 }
 
 #[async_trait]
@@ -395,7 +410,7 @@ impl UserRepository for PostgresUserRepository {
             if is_unique_violation(&e) {
                 UserRepositoryError::DuplicateUsername(username.to_string())
             } else {
-                UserRepositoryError::Database(e.to_string())
+                db_error("user.create_user", e, UserRepositoryError::Database)
             }
         })?;
 
@@ -417,7 +432,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(username)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         Ok(row.map(|r| UserRecord {
             id: r.get("id"),
@@ -432,7 +447,7 @@ impl UserRepository for PostgresUserRepository {
             sqlx::query("SELECT id, username, password_hash, created_at FROM users ORDER BY id")
                 .fetch_all(&self.pool)
                 .await
-                .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+                .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         Ok(rows
             .into_iter()
@@ -454,7 +469,7 @@ impl UserRepository for PostgresUserRepository {
             .bind(role_names)
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| UserRepositoryError::Database(e.to_string()))?
+            .map_err(|e| db_error("user", e, UserRepositoryError::Database))?
             .into_iter()
             .map(|r| r.get::<String, _>("name"))
             .collect();
@@ -467,13 +482,13 @@ impl UserRepository for PostgresUserRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
             .bind(user_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         sqlx::query(
             "INSERT INTO user_roles (user_id, role_id)
@@ -483,11 +498,11 @@ impl UserRepository for PostgresUserRepository {
         .bind(role_names)
         .execute(&mut *tx)
         .await
-        .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         tx.commit()
             .await
-            .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
         Ok(())
     }
 
@@ -500,7 +515,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(user_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         Ok(rows.into_iter().map(|r| r.get("name")).collect())
     }
@@ -515,7 +530,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(user_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         Ok(rows.into_iter().map(|r| r.get("name")).collect())
     }
@@ -532,7 +547,7 @@ impl UserRepository for PostgresUserRepository {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         Ok(rows
             .into_iter()
@@ -552,13 +567,13 @@ impl UserRepository for PostgresUserRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         let role_id: i32 = sqlx::query("INSERT INTO roles (name) VALUES ($1) RETURNING id")
             .bind(name)
             .fetch_one(&mut *tx)
             .await
-            .map_err(|e| UserRepositoryError::Database(e.to_string()))?
+            .map_err(|e| db_error("user", e, UserRepositoryError::Database))?
             .get("id");
 
         sqlx::query(
@@ -569,11 +584,11 @@ impl UserRepository for PostgresUserRepository {
         .bind(permissions)
         .execute(&mut *tx)
         .await
-        .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         tx.commit()
             .await
-            .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
         Ok(())
     }
 
@@ -581,7 +596,7 @@ impl UserRepository for PostgresUserRepository {
         let rows = sqlx::query("SELECT name FROM permissions ORDER BY name")
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
 
         Ok(rows.into_iter().map(|r| r.get("name")).collect())
     }
@@ -590,7 +605,7 @@ impl UserRepository for PostgresUserRepository {
         let row = sqlx::query("SELECT COUNT(*) AS count FROM users")
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| UserRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("user", e, UserRepositoryError::Database))?;
         Ok(row.get("count"))
     }
 }
@@ -609,7 +624,7 @@ impl PostgresCredentialRepository {
             .bind(exchange_name)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| CredentialRepositoryError::Database(e.to_string()))?
+            .map_err(|e| db_error("credential", e, CredentialRepositoryError::Database))?
             .map(|r| r.get("id"))
             .ok_or_else(|| CredentialRepositoryError::ExchangeNotFound(exchange_name.to_string()))
     }
@@ -634,7 +649,7 @@ impl CredentialRepository for PostgresCredentialRepository {
         .bind(sqlx::types::Json(&envelope))
         .execute(&self.pool)
         .await
-        .map_err(|e| CredentialRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("credential", e, CredentialRepositoryError::Database))?;
         Ok(())
     }
 
@@ -652,7 +667,7 @@ impl CredentialRepository for PostgresCredentialRepository {
         .bind(exchange_name)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| CredentialRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("credential", e, CredentialRepositoryError::Database))?;
 
         Ok(row.map(|r| {
             r.get::<sqlx::types::Json<EncryptedEnvelope>, _>("credentials_enc")
@@ -673,7 +688,7 @@ impl CredentialRepository for PostgresCredentialRepository {
         .bind(user_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| CredentialRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("credential", e, CredentialRepositoryError::Database))?;
 
         Ok(rows
             .into_iter()
@@ -698,7 +713,7 @@ impl CredentialRepository for PostgresCredentialRepository {
         .bind(exchange_name)
         .execute(&self.pool)
         .await
-        .map_err(|e| CredentialRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("credential", e, CredentialRepositoryError::Database))?;
         Ok(())
     }
 }
@@ -778,14 +793,19 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .fetch_one(&self.pool)
         .await
         .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("unique") || msg.contains("duplicate") {
+            // Detect the duplicate via SQLSTATE 23505, not a brittle substring of
+            // the error message (M16): the unique index name/wording can change.
+            if is_unique_violation(&e) {
                 SubscriptionRepositoryError::AlreadySubscribed {
                     user_id,
                     strategy_id: strategy_id.to_string(),
                 }
             } else {
-                SubscriptionRepositoryError::Database(msg)
+                db_error(
+                    "subscription.create",
+                    e,
+                    SubscriptionRepositoryError::Database,
+                )
             }
         })?;
 
@@ -806,7 +826,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("subscription", e, SubscriptionRepositoryError::Database))?;
 
         row.map(|r| subscription_from_row(&r)).transpose()
     }
@@ -826,7 +846,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .bind(user_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("subscription", e, SubscriptionRepositoryError::Database))?;
 
         rows.iter()
             .map(subscription_from_row)
@@ -849,7 +869,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .bind(strategy_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("subscription", e, SubscriptionRepositoryError::Database))?;
 
         rows.iter()
             .map(subscription_from_row)
@@ -878,7 +898,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .bind(confidence_threshold)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?
+        .map_err(|e| db_error("subscription", e, SubscriptionRepositoryError::Database))?
         .ok_or(SubscriptionRepositoryError::NotFound(id))?;
 
         subscription_from_row(&row)
@@ -889,7 +909,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             .bind(id)
             .execute(&self.pool)
             .await
-            .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("subscription", e, SubscriptionRepositoryError::Database))?;
         Ok(())
     }
 
@@ -901,7 +921,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         .bind(user_id)
         .execute(&self.pool)
         .await
-        .map_err(|e| SubscriptionRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("subscription", e, SubscriptionRepositoryError::Database))?;
         Ok(result.rows_affected())
     }
 }
@@ -981,7 +1001,13 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(record.updated_at)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| OrderRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                OrderRepositoryError::DuplicateClientOrderId(record.client_order_id.clone())
+            } else {
+                db_error("order.insert", e, OrderRepositoryError::Database)
+            }
+        })?;
         Ok(row.get::<i64, _>("id"))
     }
 
@@ -1010,7 +1036,7 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(filled_quantity.map(|q| q.to_string()))
         .execute(&self.pool)
         .await
-        .map_err(|e| OrderRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("order", e, OrderRepositoryError::Database))?;
 
         if result.rows_affected() == 0 {
             return Err(OrderRepositoryError::NotFound(client_order_id.to_string()));
@@ -1047,7 +1073,7 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(pair)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| OrderRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| db_error("order", e, OrderRepositoryError::Database))?;
 
         row.get::<String, _>("net")
             .parse()
@@ -1066,7 +1092,7 @@ impl OrderRepository for PostgresOrderRepository {
             .bind(client_order_id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| OrderRepositoryError::Database(e.to_string()))?
+            .map_err(|e| db_error("order", e, OrderRepositoryError::Database))?
             .ok_or_else(|| OrderRepositoryError::NotFound(client_order_id.to_string()))?;
         Self::row_to_record(&row)
     }
@@ -1087,7 +1113,7 @@ impl OrderRepository for PostgresOrderRepository {
             .bind(pair)
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| OrderRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| db_error("order", e, OrderRepositoryError::Database))?;
         rows.iter().map(Self::row_to_record).collect()
     }
 }
@@ -1143,7 +1169,13 @@ impl PythonStrategyRepository for PostgresPythonStrategyRepository {
         .bind(record.created_at)
         .execute(&self.pool)
         .await
-        .map_err(|e| PythonStrategyRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| {
+            db_error(
+                "python_strategy",
+                e,
+                PythonStrategyRepositoryError::Database,
+            )
+        })?;
         Ok(())
     }
 
@@ -1159,7 +1191,13 @@ impl PythonStrategyRepository for PostgresPythonStrategyRepository {
         .bind(strategy_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| PythonStrategyRepositoryError::Database(e.to_string()))?
+        .map_err(|e| {
+            db_error(
+                "python_strategy",
+                e,
+                PythonStrategyRepositoryError::Database,
+            )
+        })?
         .ok_or_else(|| PythonStrategyRepositoryError::NotFound(strategy_id.to_string()))?;
 
         Self::row_to_record(&row)
@@ -1175,7 +1213,13 @@ impl PythonStrategyRepository for PostgresPythonStrategyRepository {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PythonStrategyRepositoryError::Database(e.to_string()))?;
+        .map_err(|e| {
+            db_error(
+                "python_strategy",
+                e,
+                PythonStrategyRepositoryError::Database,
+            )
+        })?;
 
         rows.iter().map(Self::row_to_record).collect()
     }
@@ -1185,7 +1229,13 @@ impl PythonStrategyRepository for PostgresPythonStrategyRepository {
             .bind(strategy_id)
             .execute(&self.pool)
             .await
-            .map_err(|e| PythonStrategyRepositoryError::Database(e.to_string()))?;
+            .map_err(|e| {
+                db_error(
+                    "python_strategy",
+                    e,
+                    PythonStrategyRepositoryError::Database,
+                )
+            })?;
         Ok(())
     }
 }
@@ -1210,7 +1260,7 @@ impl CircuitBreakerStore for PostgresCircuitBreakerStore {
         let row = sqlx::query("SELECT tripped FROM circuit_breaker_state WHERE id = 1")
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| CircuitBreakerStoreError::Database(e.to_string()))?;
+            .map_err(|e| db_error("circuit_breaker", e, CircuitBreakerStoreError::Database))?;
         Ok(row.map(|r| r.get::<bool, _>("tripped")).unwrap_or(false))
     }
 
@@ -1224,15 +1274,33 @@ impl CircuitBreakerStore for PostgresCircuitBreakerStore {
         .bind(tripped)
         .execute(&self.pool)
         .await
-        .map_err(|e| CircuitBreakerStoreError::Database(e.to_string()))?;
+        .map_err(|e| db_error("circuit_breaker", e, CircuitBreakerStoreError::Database))?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_decimal;
+    use super::{is_unique_violation_code, parse_decimal};
     use rust_decimal::Decimal;
+
+    #[test]
+    fn unique_violation_recognizes_sqlstate_23505() {
+        assert!(
+            is_unique_violation_code(Some("23505")),
+            "23505 is the Postgres unique_violation code"
+        );
+    }
+
+    #[test]
+    fn unique_violation_rejects_other_sqlstates_and_none() {
+        assert!(
+            !is_unique_violation_code(Some("23503")),
+            "foreign_key_violation must not be treated as a duplicate"
+        );
+        assert!(!is_unique_violation_code(Some("42P01"))); // undefined_table
+        assert!(!is_unique_violation_code(None));
+    }
 
     #[test]
     fn parse_decimal_null_is_none() {
