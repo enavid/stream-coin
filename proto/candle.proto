@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package stream_coin.v1;
+
+// Wire contract for the Kafka `candles` topic (ROADMAP Loop 4c).
+//
+// Mirrors `engine/src/candle/entity.rs::CandlePayload` field-for-field. This
+// file is the single source of truth: the Rust producer generates its types
+// from it at build time (prost + protox), and the Python SDK generates its
+// consumer types from the same file. Changing a field here forces both sides
+// to regenerate, which is the whole point of moving off JSON.
+message Candle {
+  string exchange = 1;
+  string pair = 2;
+  // Interval as the canonical short string: "1m" | "5m" | "15m" | "1h".
+  string interval = 3;
+  // Candle open time as Unix milliseconds (UTC).
+  int64 time = 4;
+  // Prices and volume are minor-unit integers, never floats (financial
+  // precision rule): rials for IRT quotes, exchange minor units otherwise.
+  uint64 open = 5;
+  uint64 high = 6;
+  uint64 low = 7;
+  uint64 close = 8;
+  uint64 volume = 9;
+}

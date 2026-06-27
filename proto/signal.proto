@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package stream_coin.v1;
+
+// Wire contract for the Kafka `signals` topic (ROADMAP Loop 4c).
+//
+// Mirrors `engine/src/wire_message.rs::SignalPayload` field-for-field. Shared
+// source of truth between the Rust producer and the Python SDK consumer.
+message Signal {
+  string signal_id = 1;
+  string strategy_id = 2;
+  string exchange = 3;
+  string pair = 4;
+  // "buy" | "sell" | "hold".
+  string action = 5;
+  double confidence = 6;
+  // Signal emission time as Unix milliseconds (UTC).
+  int64 timestamp = 7;
+  // `optional` so an unset stop/target round-trips as absent, matching the
+  // JSON path's `Option<u64>` (a strategy with no RiskRewardConfig sets neither).
+  optional uint64 stop_loss = 8;
+  optional uint64 take_profit = 9;
+}
