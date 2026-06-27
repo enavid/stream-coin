@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
@@ -9,8 +9,14 @@ use crate::order::port::{OrderRequest, OrderSide, OrderType};
 use crate::presentation::dto::order::{
     CancelOrderRequest, OrderItem, OrderListResponse, OrderPlacedResponse, PlaceOrderRequest,
 };
+use crate::presentation::middlewares::jwt::require_permission;
 use crate::presentation::responses::{success_response, ApiError, FieldError};
 use crate::presentation::shared::app_state::AppState;
+
+/// Permission required to place, cancel, or list orders.
+const ORDERS_MANAGE: &str = "orders.manage";
+/// Permission required for the circuit-breaker safety control.
+const ORDERS_ADMIN: &str = "orders.admin";
 
 #[utoipa::path(
     post,
@@ -24,9 +30,15 @@ use crate::presentation::shared::app_state::AppState;
     )
 )]
 pub async fn place_order(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<PlaceOrderRequest>,
 ) -> HttpResponse {
+    let ctx = match require_permission(&req, ORDERS_MANAGE) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
     let manager = match &state.order_manager {
         Some(m) => m.clone(),
         None => {
@@ -123,12 +135,25 @@ pub async fn place_order(
         strategy_id: req.strategy_id,
     };
 
+    tracing::info!(
+        actor_user_id = ctx.user_id,
+        exchange = %order_req.exchange,
+        pair = %order_req.pair,
+        side = ?order_req.side,
+        "order placement requested"
+    );
+
     match manager.place_order(order_req).await {
         Ok(client_order_id) => {
+            tracing::info!(
+                actor_user_id = ctx.user_id,
+                client_order_id = %client_order_id,
+                "order placed"
+            );
             success_response("order placed", OrderPlacedResponse { client_order_id })
         }
         Err(e) => {
-            tracing::error!(error = %e, "place_order failed");
+            tracing::error!(actor_user_id = ctx.user_id, error = %e, "place_order failed");
             ApiError::new(&e.to_string(), vec![]).to_response()
         }
     }
@@ -146,9 +171,15 @@ pub async fn place_order(
     )
 )]
 pub async fn cancel_order(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<CancelOrderRequest>,
 ) -> HttpResponse {
+    let ctx = match require_permission(&req, ORDERS_MANAGE) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
     let manager = match &state.order_manager {
         Some(m) => m.clone(),
         None => {
@@ -160,9 +191,16 @@ pub async fn cancel_order(
     };
 
     match manager.cancel_order(&body.client_order_id).await {
-        Ok(()) => success_response("order cancelled", serde_json::json!({ "cancelled": true })),
+        Ok(()) => {
+            tracing::info!(
+                actor_user_id = ctx.user_id,
+                client_order_id = %body.client_order_id,
+                "order cancelled"
+            );
+            success_response("order cancelled", serde_json::json!({ "cancelled": true }))
+        }
         Err(e) => {
-            tracing::error!(error = %e, client_order_id = %body.client_order_id, "cancel_order failed");
+            tracing::error!(actor_user_id = ctx.user_id, error = %e, client_order_id = %body.client_order_id, "cancel_order failed");
             ApiError::new(&e.to_string(), vec![]).to_response()
         }
     }
@@ -182,9 +220,14 @@ pub async fn cancel_order(
     )
 )]
 pub async fn list_orders(
+    req: HttpRequest,
     state: web::Data<AppState>,
     query: web::Query<HashMap<String, String>>,
 ) -> HttpResponse {
+    if let Err(resp) = require_permission(&req, ORDERS_MANAGE) {
+        return resp;
+    }
+
     let manager = match &state.order_manager {
         Some(m) => m.clone(),
         None => {
@@ -235,7 +278,12 @@ pub async fn list_orders(
         (status = 503, description = "Order manager not available")
     )
 )]
-pub async fn reset_circuit_breaker(state: web::Data<AppState>) -> HttpResponse {
+pub async fn reset_circuit_breaker(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let ctx = match require_permission(&req, ORDERS_ADMIN) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
     let manager = match &state.order_manager {
         Some(m) => m.clone(),
         None => {
@@ -247,7 +295,10 @@ pub async fn reset_circuit_breaker(state: web::Data<AppState>) -> HttpResponse {
     };
 
     manager.reset_circuit_breaker().await;
-    tracing::info!("circuit breaker reset via admin endpoint");
+    tracing::warn!(
+        actor_user_id = ctx.user_id,
+        "circuit breaker reset via admin endpoint"
+    );
     success_response(
         "circuit breaker reset",
         serde_json::json!({ "reset": true }),

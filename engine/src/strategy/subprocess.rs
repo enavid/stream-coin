@@ -91,6 +91,38 @@ del _sc_setup
 #[cfg(not(target_os = "linux"))]
 const SECCOMP_PREAMBLE: &str = "";
 
+/// Returns `true` when `id` is safe to use as a filesystem path component:
+/// non-empty, not overlong, and limited to `[A-Za-z0-9_-]` (no `/`, `\`, `.`, or NUL).
+/// Server-generated UUIDs always pass; user-supplied ids must be validated at the API
+/// boundary. Guards the temp-script path against traversal/injection.
+pub(crate) fn is_safe_strategy_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Builds an unpredictable, collision-free temp path for a strategy script.
+/// The random component prevents two runs of the same strategy from clobbering
+/// each other's file and defeats symlink/TOCTOU attacks on a predictable name.
+/// Caller must have validated `strategy_id` with [`is_safe_strategy_id`] first.
+fn temp_script_path(prefix: &str, strategy_id: &str) -> std::path::PathBuf {
+    let unique = uuid::Uuid::new_v4();
+    std::env::temp_dir().join(format!("{prefix}_{strategy_id}_{unique}.py"))
+}
+
+/// Strips the inherited environment and re-adds only the minimum a strategy needs.
+/// User-supplied Python must never see engine secrets (`CREDENTIALS_ENCRYPTION_KEY`,
+/// `JWT_SECRET`, `DATABASE_URL`, exchange API keys, ...). `PATH` is preserved so
+/// `python3` can locate its runtime.
+pub(crate) fn apply_sandboxed_env(cmd: &mut Command, strategy_id: &str) {
+    cmd.env_clear().env("STRATEGY_ID", strategy_id);
+    if let Ok(path) = std::env::var("PATH") {
+        cmd.env("PATH", path);
+    }
+}
+
 pub(crate) fn build_launcher_script(strategy_id: &str, user_code: &str) -> String {
     // strategy_id is a UUID — safe to embed in a Python single-quoted string literal
     format!(
@@ -106,7 +138,15 @@ async fn run_subprocess(
     broadcaster: broadcast::Sender<String>,
     signal_repository: Option<Arc<dyn SignalRepository>>,
 ) {
-    let script_path = std::env::temp_dir().join(format!("strategy_{}.py", config.strategy_id));
+    if !is_safe_strategy_id(&config.strategy_id) {
+        tracing::error!(
+            strategy_id = %config.strategy_id,
+            "refusing to run strategy: id is not a safe filesystem component"
+        );
+        return;
+    }
+
+    let script_path = temp_script_path("strategy", &config.strategy_id);
     let full_script = build_launcher_script(&config.strategy_id, &config.code);
 
     if let Err(e) = tokio::fs::write(&script_path, full_script.as_bytes()).await {
@@ -119,11 +159,11 @@ async fn run_subprocess(
     }
 
     let mut cmd = Command::new("python3");
+    apply_sandboxed_env(&mut cmd, &config.strategy_id);
     cmd.arg(&script_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("STRATEGY_ID", &config.strategy_id)
         .kill_on_drop(true);
 
     let mut child = match cmd.spawn() {
@@ -401,6 +441,88 @@ for line in sys.stdin:
         assert_eq!(result.pair, "USDT/IRT");
         assert!(!result.signal_id.is_empty());
 
+        handle.abort();
+    }
+
+    #[test]
+    fn is_safe_strategy_id_accepts_uuid_and_rejects_unsafe() {
+        assert!(is_safe_strategy_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_safe_strategy_id("my_strategy-1"));
+
+        assert!(!is_safe_strategy_id(""), "empty id");
+        assert!(!is_safe_strategy_id("../etc/passwd"), "path traversal");
+        assert!(!is_safe_strategy_id("a/b"), "forward slash");
+        assert!(!is_safe_strategy_id("a\\b"), "backslash");
+        assert!(!is_safe_strategy_id("a.b"), "dot");
+        assert!(!is_safe_strategy_id("with space"), "space");
+        assert!(!is_safe_strategy_id("a\0b"), "NUL byte");
+        assert!(!is_safe_strategy_id(&"x".repeat(129)), "overlong");
+    }
+
+    /// C2: user Python must not be able to read the engine's environment (secrets).
+    /// Sets a uniquely-named probe var in the parent and asserts the child can't see it,
+    /// proving `env_clear()` strips the inherited environment.
+    #[tokio::test(flavor = "current_thread")]
+    async fn subprocess_cannot_read_engine_secret_env() {
+        const PROBE_VAR: &str = "STREAM_COIN_SECRET_PROBE_SUBPROCESS";
+        std::env::set_var(PROBE_VAR, "top-secret-value");
+
+        let code = format!(
+            r#"
+import os, sys, json, uuid
+from datetime import datetime, timezone
+action = "leaked" if os.environ.get("{PROBE_VAR}") else "safe"
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    candle = json.loads(line)
+    print(json.dumps({{
+        "signal_id": str(uuid.uuid4()),
+        "strategy_id": "test-env",
+        "exchange": candle["exchange"],
+        "pair": candle["pair"],
+        "action": action,
+        "confidence": 0.9,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }}), flush=True)
+    break
+"#
+        );
+
+        let (tx, mut rx) = broadcast::channel(16);
+        let handle = spawn_subprocess_runner(
+            SubprocessConfig {
+                strategy_id: "test-env-isolation".to_string(),
+                code,
+            },
+            tx.clone(),
+            None,
+        );
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        tx.send(make_candle_msg()).unwrap();
+
+        let action = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await {
+                    Ok(text) => {
+                        if let Ok(WsMessage::Signal(sig)) = serde_json::from_str::<WsMessage>(&text)
+                        {
+                            return sig.action;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return "closed".to_string(),
+                }
+            }
+        })
+        .await
+        .expect("subprocess must emit a signal within the deadline");
+
+        assert_eq!(
+            action, "safe",
+            "user strategy must NOT be able to read engine secrets from the environment"
+        );
         handle.abort();
     }
 

@@ -29,9 +29,39 @@ pub struct AuthContext {
     pub permissions: HashSet<String>,
 }
 
+/// Wildcard permission granted only in the dev-only "auth disabled" mode
+/// (see [`jwt_middleware`]). `AuthContext::has` treats it as "all permissions".
+/// Production never runs in this mode — [`resolve_jwt_secret`] refuses to boot
+/// without a configured `JWT_SECRET`.
+pub const WILDCARD_PERMISSION: &str = "*";
+
 impl AuthContext {
     pub fn has(&self, permission: &str) -> bool {
-        self.permissions.contains(permission)
+        self.permissions.contains(WILDCARD_PERMISSION) || self.permissions.contains(permission)
+    }
+}
+
+/// Resolves the JWT secret at startup, failing closed by default.
+///
+/// - A non-empty secret enables authentication.
+/// - An absent or empty secret is a hard error **unless** `allow_insecure` is set
+///   (the `ALLOW_INSECURE_NO_AUTH` escape hatch, for local development only).
+///
+/// This closes the fail-open gap where a missing `JWT_SECRET` silently served the
+/// entire API unauthenticated. Pure and unit-tested; the binary maps `Err` to a
+/// refused boot.
+pub fn resolve_jwt_secret(
+    secret: Option<&str>,
+    allow_insecure: bool,
+) -> Result<Option<String>, String> {
+    match secret {
+        Some(s) if !s.is_empty() => Ok(Some(s.to_string())),
+        _ if allow_insecure => Ok(None),
+        _ => Err(
+            "JWT_SECRET is not set — refusing to start with authentication disabled. \
+             Set JWT_SECRET, or set ALLOW_INSECURE_NO_AUTH=1 for local development only."
+                .to_string(),
+        ),
     }
 }
 
@@ -154,9 +184,17 @@ pub async fn jwt_middleware<B: actix_web::body::MessageBody + 'static>(
         .app_data::<web::Data<AppState>>()
         .and_then(|s| s.jwt_secret.as_ref().map(|arc| arc.as_str().to_string()));
 
-    // Auth disabled (jwt_secret = None) — pass through.
+    // Auth disabled (jwt_secret = None) — dev/test only; the binary refuses to boot
+    // in this mode (see `resolve_jwt_secret`). Insert a wildcard superuser context so
+    // single-tenant local runs and the legacy no-auth test harness keep working.
     let secret = match secret {
-        None => return next.call(req).await.map(|r| r.map_into_left_body()),
+        None => {
+            req.extensions_mut().insert(AuthContext {
+                user_id: 0,
+                permissions: HashSet::from([WILDCARD_PERMISSION.to_string()]),
+            });
+            return next.call(req).await.map(|r| r.map_into_left_body());
+        }
         Some(s) => s,
     };
 
@@ -388,5 +426,58 @@ mod tests {
         };
         assert!(ctx.has("users.manage"));
         assert!(!ctx.has("roles.manage"));
+    }
+
+    // --- C3: fail-closed JWT secret resolution + wildcard dev context ---
+
+    #[test]
+    fn auth_context_wildcard_grants_any_permission() {
+        let ctx = AuthContext {
+            user_id: 0,
+            permissions: HashSet::from([WILDCARD_PERMISSION.to_string()]),
+        };
+        assert!(ctx.has("orders.manage"));
+        assert!(ctx.has("anything.at.all"));
+    }
+
+    #[test]
+    fn resolve_jwt_secret_returns_secret_when_present() {
+        assert_eq!(
+            resolve_jwt_secret(Some("s3cr3t"), false).unwrap(),
+            Some("s3cr3t".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_jwt_secret_refuses_boot_when_absent_and_not_insecure() {
+        assert!(
+            resolve_jwt_secret(None, false).is_err(),
+            "missing secret must fail closed (refuse to boot)"
+        );
+    }
+
+    #[test]
+    fn resolve_jwt_secret_treats_empty_as_absent() {
+        assert!(
+            resolve_jwt_secret(Some(""), false).is_err(),
+            "empty secret must be treated as not configured"
+        );
+    }
+
+    #[test]
+    fn resolve_jwt_secret_allows_none_when_insecure_opt_in() {
+        assert_eq!(
+            resolve_jwt_secret(None, true).unwrap(),
+            None,
+            "explicit insecure opt-in disables auth (dev only)"
+        );
+    }
+
+    #[test]
+    fn resolve_jwt_secret_prefers_real_secret_even_with_insecure_flag() {
+        assert_eq!(
+            resolve_jwt_secret(Some("real"), true).unwrap(),
+            Some("real".to_string())
+        );
     }
 }

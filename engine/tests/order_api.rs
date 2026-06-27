@@ -427,3 +427,169 @@ async fn place_order_malformed_pair_returns_400() {
         "pair without '/' must be rejected with 400"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Authorization (C1/C4) — end-to-end through the real JWT middleware.
+
+fn build_authed_state(
+    safety_config: SafetyConfig,
+    adapter: FakeOrderAdapter,
+    jwt_secret: &str,
+) -> actix_web::web::Data<AppState> {
+    let broadcaster = AppState::new_broadcaster();
+    let repo = Arc::new(FakeOrderRepository::new());
+
+    let mut order_adapters: HashMap<String, Arc<dyn OrderAdapter>> = HashMap::new();
+    order_adapters.insert("tabdeal".to_string(), Arc::new(adapter));
+    let order_adapters = Arc::new(RwLock::new(order_adapters));
+
+    let manager = Arc::new(OrderManager::with_poll_interval(
+        order_adapters.clone(),
+        repo.clone(),
+        broadcaster.clone(),
+        safety_config,
+        Duration::from_millis(20),
+    ));
+
+    actix_web::web::Data::new(AppState {
+        redis: None,
+        exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher: None,
+        broadcaster,
+        jwt_secret: Some(Arc::new(jwt_secret.to_string())),
+        ticker_repository: None,
+        running_strategies: Arc::new(Mutex::new(HashMap::new())),
+        strategy_repository: None,
+        signal_repository: None,
+        order_adapters,
+        order_manager: Some(manager),
+        python_strategy_repository: None,
+        candle_repository: None,
+        historical_sources: Arc::new(HashMap::new()),
+        candle_history: AppState::new_candle_history(),
+        exchange_repository: None,
+        asset_repository: None,
+        subscription_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
+    })
+}
+
+const TEST_SECRET: &str = "order-api-test-secret";
+
+fn token(perms: &[&str]) -> String {
+    use stream_coin::presentation::middlewares::jwt::mint_token_with_permissions;
+    let perms: Vec<String> = perms.iter().map(|s| s.to_string()).collect();
+    mint_token_with_permissions("7", TEST_SECRET, 3600, &perms)
+}
+
+#[actix_web::test]
+async fn place_order_without_token_is_unauthorized_401() {
+    let state = build_authed_state(live_config(), FakeOrderAdapter::new("tabdeal"), TEST_SECRET);
+    let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let resp = app
+        .post("/v1/orders/place")
+        .send_json(&json!({
+            "exchange": "tabdeal", "pair": "USDT/IRT",
+            "side": "buy", "type": "market", "quantity": "100"
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        401,
+        "no token must be rejected before any order logic"
+    );
+}
+
+#[actix_web::test]
+async fn place_order_without_orders_manage_is_forbidden_403() {
+    let state = build_authed_state(live_config(), FakeOrderAdapter::new("tabdeal"), TEST_SECRET);
+    let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let resp = app
+        .post("/v1/orders/place")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token(&["subscriptions.read"])),
+        ))
+        .send_json(&json!({
+            "exchange": "tabdeal", "pair": "USDT/IRT",
+            "side": "buy", "type": "market", "quantity": "100"
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        403,
+        "a token lacking orders.manage must be forbidden"
+    );
+}
+
+#[actix_web::test]
+async fn place_order_with_orders_manage_is_authorized() {
+    let adapter = FakeOrderAdapter::new("tabdeal");
+    adapter.will_succeed_with("exch-auth-1").await;
+    let state = build_authed_state(live_config(), adapter, TEST_SECRET);
+    let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let resp = app
+        .post("/v1/orders/place")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token(&["orders.manage"])),
+        ))
+        .send_json(&json!({
+            "exchange": "tabdeal", "pair": "USDT/IRT",
+            "side": "buy", "type": "market", "quantity": "100"
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "orders.manage must authorize placement");
+}
+
+#[actix_web::test]
+async fn reset_circuit_breaker_requires_orders_admin_not_just_manage() {
+    let state = build_authed_state(live_config(), FakeOrderAdapter::new("tabdeal"), TEST_SECRET);
+    let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    // orders.manage is NOT enough for the safety control.
+    let forbidden = app
+        .post("/v1/admin/circuit-breaker/reset")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token(&["orders.manage"])),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        forbidden.status(),
+        403,
+        "circuit-breaker reset must require orders.admin"
+    );
+
+    // orders.admin succeeds.
+    let allowed = app
+        .post("/v1/admin/circuit-breaker/reset")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token(&["orders.admin"])),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed.status(),
+        200,
+        "orders.admin must authorize the reset"
+    );
+}

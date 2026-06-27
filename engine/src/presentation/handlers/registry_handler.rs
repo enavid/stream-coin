@@ -1,4 +1,4 @@
-use actix_web::{web, Responder};
+use actix_web::{web, HttpRequest, Responder};
 
 use crate::exchange::registry::TradingPairRecord;
 use crate::infrastructure::db::asset_repository::AssetRecord;
@@ -6,9 +6,13 @@ use crate::presentation::dto::exchange::{
     ExchangeListResponse, ExchangeNameRequest, ExchangeResponse, PairListQuery, PairListResponse,
     PairResponse, SeedPairsQuery, SeedPairsResponse,
 };
+use crate::presentation::middlewares::jwt::require_permission;
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::AppState;
 use crate::price::entity::MarketType;
+
+/// Permission required to mutate the exchange registry (enable/disable/seed pairs).
+const EXCHANGES_MANAGE: &str = "exchanges.manage";
 
 /// `GET /v1/exchanges` — returns all currently enabled exchanges.
 pub async fn list_exchanges(state: web::Data<AppState>) -> impl Responder {
@@ -52,9 +56,14 @@ pub async fn list_exchange_pairs(
 /// `POST /v1/admin/exchanges/enable` — enables an exchange and inserts its adapter
 /// into the live adapter map using the registered factory.
 pub async fn enable_exchange(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<ExchangeNameRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_permission(&req, EXCHANGES_MANAGE) {
+        return resp;
+    }
+
     let name = body.exchange.as_str();
 
     let ws_url = {
@@ -94,9 +103,14 @@ pub async fn enable_exchange(
 /// `POST /v1/admin/exchanges/disable` — disables an exchange, removes its adapter,
 /// and aborts all running ticker subscriptions for that exchange.
 pub async fn disable_exchange(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<ExchangeNameRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_permission(&req, EXCHANGES_MANAGE) {
+        return resp;
+    }
+
     let name = body.exchange.as_str();
 
     {
@@ -163,10 +177,15 @@ pub fn build_pairs_from_assets(
 /// recurring job — re-running it with the same quotes is idempotent
 /// (`ExchangeRegistry::upsert_pair` / `ExchangeRepository::upsert_pair`).
 pub async fn seed_pairs_from_assets(
+    req: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     query: web::Query<SeedPairsQuery>,
 ) -> impl Responder {
+    if let Err(resp) = require_permission(&req, EXCHANGES_MANAGE) {
+        return resp;
+    }
+
     let exchange = path.into_inner();
     let quotes = query.resolved_quotes();
 
@@ -224,7 +243,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use actix_web::{test, web, App};
+    use actix_web::{test, web, App, HttpMessage};
     use tokio::sync::{Mutex, RwLock};
 
     use super::*;
@@ -232,8 +251,18 @@ mod tests {
     use crate::infrastructure::db::exchange_repository::{
         ExchangeRepository, FakeExchangeRepository,
     };
+    use crate::presentation::middlewares::jwt::AuthContext;
     use crate::presentation::shared::app_state::{AdapterFactory, AppState};
     use crate::price::entity::MarketType;
+
+    /// Auth context carrying `exchanges.manage`, injected directly into request
+    /// extensions to stand in for the JWT middleware in these handler unit tests.
+    fn manage_ctx() -> AuthContext {
+        AuthContext {
+            user_id: 1,
+            permissions: std::collections::HashSet::from(["exchanges.manage".to_string()]),
+        }
+    }
 
     fn registry_with_exchanges() -> ExchangeRegistry {
         let mut r = ExchangeRegistry::new();
@@ -305,6 +334,50 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn enable_exchange_without_permission_is_forbidden() {
+        let app = test::init_service(
+            App::new()
+                .app_data(state_with_registry(registry_with_exchanges()))
+                .route("/admin/exchanges/enable", web::post().to(enable_exchange)),
+        )
+        .await;
+
+        // A context lacking exchanges.manage must be rejected with 403.
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/enable")
+            .set_json(serde_json::json!({"exchange": "hitobit"}))
+            .to_request();
+        req.extensions_mut().insert(AuthContext {
+            user_id: 9,
+            permissions: std::collections::HashSet::from(["subscriptions.read".to_string()]),
+        });
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            403,
+            "missing exchanges.manage must be forbidden"
+        );
+    }
+
+    #[actix_web::test]
+    async fn enable_exchange_without_auth_is_unauthorized() {
+        let app = test::init_service(
+            App::new()
+                .app_data(state_with_registry(registry_with_exchanges()))
+                .route("/admin/exchanges/enable", web::post().to(enable_exchange)),
+        )
+        .await;
+
+        // No AuthContext at all (middleware bypassed) must be 401.
+        let req = test::TestRequest::post()
+            .uri("/admin/exchanges/enable")
+            .set_json(serde_json::json!({"exchange": "hitobit"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401, "no auth context must be unauthorized");
+    }
+
+    #[actix_web::test]
     async fn disable_then_enable_exchange_changes_list() {
         let registry = registry_with_exchanges();
         let state = state_with_registry(registry);
@@ -322,6 +395,7 @@ mod tests {
             .uri("/admin/exchanges/disable")
             .set_json(serde_json::json!({"exchange": "tabdeal"}))
             .to_request();
+        disable_req.extensions_mut().insert(manage_ctx());
         let disable_resp = test::call_service(&app, disable_req).await;
         assert_eq!(disable_resp.status(), 200);
 
@@ -391,6 +465,7 @@ mod tests {
             .uri("/admin/exchanges/disable")
             .set_json(serde_json::json!({"exchange": "tabdeal"}))
             .to_request();
+        req.extensions_mut().insert(manage_ctx());
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
 
@@ -428,6 +503,7 @@ mod tests {
             .uri("/admin/exchanges/enable")
             .set_json(serde_json::json!({"exchange": "hitobit"}))
             .to_request();
+        req.extensions_mut().insert(manage_ctx());
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
 
@@ -558,6 +634,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/admin/exchanges/coinex/seed-from-assets")
             .to_request();
+        req.extensions_mut().insert(manage_ctx());
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 503);
     }
@@ -575,6 +652,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/admin/exchanges/definitely-not-real/seed-from-assets")
             .to_request();
+        req.extensions_mut().insert(manage_ctx());
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
     }
@@ -598,6 +676,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/admin/exchanges/coinex/seed-from-assets")
             .to_request();
+        req.extensions_mut().insert(manage_ctx());
         let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
         assert_eq!(
             body["data"]["pairs_seeded"], 2,
@@ -652,6 +731,7 @@ mod tests {
             let req = test::TestRequest::post()
                 .uri("/admin/exchanges/coinex/seed-from-assets")
                 .to_request();
+            req.extensions_mut().insert(manage_ctx());
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), 200);
         }

@@ -43,6 +43,7 @@ use stream_coin::presentation::handlers::exchange_handler::restore_tickers;
 use stream_coin::presentation::handlers::strategy_handler::restore_python_strategies;
 use stream_coin::presentation::middlewares::cors::configure_cors;
 use stream_coin::presentation::middlewares::json_error_handler::json_error_handler_config;
+use stream_coin::presentation::middlewares::jwt::resolve_jwt_secret;
 use stream_coin::presentation::routers::init_routes;
 use stream_coin::presentation::shared::app_state::{AdapterFactory, AppState};
 use stream_coin::presentation::swagger::ApiDoc;
@@ -275,16 +276,26 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
-    let jwt_secret = match env::var("JWT_SECRET") {
-        Ok(s) if !s.is_empty() => {
-            tracing::info!("JWT auth enabled");
-            Some(Arc::new(s))
-        }
-        _ => {
-            tracing::warn!("JWT_SECRET not set — running without authentication");
-            None
-        }
-    };
+    let allow_insecure = env::var("ALLOW_INSECURE_NO_AUTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let jwt_secret =
+        match resolve_jwt_secret(env::var("JWT_SECRET").ok().as_deref(), allow_insecure) {
+            Ok(Some(s)) => {
+                tracing::info!("JWT auth enabled");
+                Some(Arc::new(s))
+            }
+            Ok(None) => {
+                tracing::warn!(
+                "ALLOW_INSECURE_NO_AUTH set — running WITHOUT authentication (development only)"
+            );
+                None
+            }
+            Err(e) => {
+                tracing::error!("{e}");
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e));
+            }
+        };
 
     let broadcaster = AppState::new_broadcaster();
 

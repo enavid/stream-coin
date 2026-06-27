@@ -10,7 +10,9 @@ use crate::backtest::entity::{
 };
 use crate::backtest::venue::{FillModel, PendingOrder, SimulatedVenue};
 use crate::candle::entity::CandlePayload;
-use crate::strategy::subprocess::build_launcher_script;
+use crate::strategy::subprocess::{
+    apply_sandboxed_env, build_launcher_script, is_safe_strategy_id,
+};
 use crate::wire_message::SignalPayload;
 
 /// Quantity of base currency used for every simulated order.
@@ -23,8 +25,19 @@ const SIGNAL_READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// Baseline capital for equity-curve calculations (in the quote currency).
 const INITIAL_CAPITAL: i64 = 1_000_000;
 
+/// Unpredictable, collision-free temp path for a backtest script. The random
+/// suffix defeats symlink/TOCTOU attacks on a predictable name and prevents two
+/// concurrent backtests of the same strategy from clobbering each other's file.
+/// Caller must validate `strategy_id` with `is_safe_strategy_id` first.
+fn secure_backtest_script_path(strategy_id: &str) -> std::path::PathBuf {
+    let unique = uuid::Uuid::new_v4();
+    std::env::temp_dir().join(format!("backtest_{strategy_id}_{unique}.py"))
+}
+
 #[derive(Debug, Error)]
 pub enum BacktestError {
+    #[error("strategy id is not a safe filesystem component")]
+    InvalidStrategyId,
     #[error("failed to write strategy script: {0}")]
     ScriptWrite(std::io::Error),
     #[error("failed to spawn python3 subprocess: {0}")]
@@ -80,22 +93,25 @@ impl BacktestEngine {
             });
         }
 
-        let script_path = std::env::temp_dir().join(format!("backtest_{}.py", self.strategy_id));
+        if !is_safe_strategy_id(&self.strategy_id) {
+            return Err(BacktestError::InvalidStrategyId);
+        }
+
+        let script_path = secure_backtest_script_path(&self.strategy_id);
         let script = build_launcher_script(&self.strategy_id, &self.code);
 
         tokio::fs::write(&script_path, script.as_bytes())
             .await
             .map_err(BacktestError::ScriptWrite)?;
 
-        let mut child = Command::new("python3")
-            .arg(&script_path)
+        let mut cmd = Command::new("python3");
+        apply_sandboxed_env(&mut cmd, &self.strategy_id);
+        cmd.arg(&script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env("STRATEGY_ID", &self.strategy_id)
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(BacktestError::SubprocessSpawn)?;
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().map_err(BacktestError::SubprocessSpawn)?;
 
         let mut stdin = child.stdin.take().expect("stdin must be piped");
         let stdout = child.stdout.take().expect("stdout must be piped");
@@ -437,6 +453,61 @@ for line in sys.stdin:
             "take_profit": 120000,
         }), flush=True)
 "#;
+
+    /// C2: backtest Python must not be able to read the engine's environment.
+    #[tokio::test(flavor = "current_thread")]
+    async fn backtest_subprocess_cannot_read_engine_secret_env() {
+        const PROBE_VAR: &str = "STREAM_COIN_SECRET_PROBE_BACKTEST";
+        std::env::set_var(PROBE_VAR, "top-secret-value");
+
+        let code = format!(
+            r#"
+import os, sys, json, uuid
+from datetime import datetime, timezone
+action = "leaked" if os.environ.get("{PROBE_VAR}") else "safe"
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    candle = json.loads(line)
+    print(json.dumps({{
+        "signal_id": str(uuid.uuid4()),
+        "strategy_id": _STRATEGY_ID,
+        "exchange": candle["exchange"],
+        "pair": candle["pair"],
+        "action": action,
+        "confidence": 1.0,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }}), flush=True)
+"#
+        );
+
+        let candles = make_candles(&[(100_000, 100_000), (100_000, 100_000)]);
+        let engine = BacktestEngine::new("env-probe".to_string(), code, FillModel::LastClose);
+        let result = engine.run(&candles).await.unwrap();
+
+        assert!(
+            result.signal_count >= 1,
+            "strategy must emit at least one signal"
+        );
+        assert!(
+            result.signal_log.iter().all(|s| s.action == "safe"),
+            "backtest strategy must NOT read engine secrets from the environment"
+        );
+    }
+
+    /// C11: an unsafe strategy id (path traversal) must be rejected before any file I/O.
+    #[tokio::test(flavor = "current_thread")]
+    async fn backtest_rejects_unsafe_strategy_id() {
+        let candles = make_candles(&[(100_000, 100_000)]);
+        let engine = BacktestEngine::new(
+            "../evil".to_string(),
+            BUY_ON_EVERY_CANDLE.to_string(),
+            FillModel::LastClose,
+        );
+        let err = engine.run(&candles).await.unwrap_err();
+        assert!(matches!(err, BacktestError::InvalidStrategyId));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn backtest_closed_trade_rr_is_populated_when_strategy_sets_sl_tp() {

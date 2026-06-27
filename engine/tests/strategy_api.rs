@@ -671,3 +671,105 @@ for line in sys.stdin:
         "deployed python strategy must produce an order (via WS or DB)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Authorization (C1) — strategy endpoints execute/affect user code and must be gated.
+
+fn build_authed_state(jwt_secret: &str) -> actix_web::web::Data<AppState> {
+    actix_web::web::Data::new(AppState {
+        redis: None,
+        exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher: None,
+        broadcaster: AppState::new_broadcaster(),
+        jwt_secret: Some(Arc::new(jwt_secret.to_string())),
+        ticker_repository: None,
+        running_strategies: Arc::new(Mutex::new(HashMap::new())),
+        strategy_repository: None,
+        signal_repository: None,
+        order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        order_manager: None,
+        python_strategy_repository: None,
+        candle_repository: None,
+        historical_sources: Arc::new(HashMap::new()),
+        candle_history: AppState::new_candle_history(),
+        exchange_repository: None,
+        asset_repository: None,
+        subscription_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
+    })
+}
+
+const STRAT_TEST_SECRET: &str = "strategy-api-test-secret";
+
+fn strat_token(perms: &[&str]) -> String {
+    use stream_coin::presentation::middlewares::jwt::mint_token_with_permissions;
+    let perms: Vec<String> = perms.iter().map(|s| s.to_string()).collect();
+    mint_token_with_permissions("3", STRAT_TEST_SECRET, 3600, &perms)
+}
+
+#[actix_web::test]
+async fn deploy_strategy_without_token_is_unauthorized_401() {
+    let state = build_authed_state(STRAT_TEST_SECRET);
+    let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let resp = app
+        .post("/v1/strategies/deploy")
+        .send_json(&serde_json::json!({"name": "x", "code": "print(1)", "params": {}}))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        401,
+        "deploying code without a token must be rejected"
+    );
+}
+
+#[actix_web::test]
+async fn deploy_strategy_without_strategies_manage_is_forbidden_403() {
+    let state = build_authed_state(STRAT_TEST_SECRET);
+    let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let resp = app
+        .post("/v1/strategies/deploy")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", strat_token(&["orders.manage"])),
+        ))
+        .send_json(&serde_json::json!({"name": "x", "code": "print(1)", "params": {}}))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        403,
+        "arbitrary-code deployment must require strategies.manage"
+    );
+}
+
+#[actix_web::test]
+async fn list_strategies_with_strategies_manage_is_authorized() {
+    let state = build_authed_state(STRAT_TEST_SECRET);
+    let app = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let resp = app
+        .get("/v1/strategies")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", strat_token(&["strategies.manage"])),
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "strategies.manage must authorize listing"
+    );
+}

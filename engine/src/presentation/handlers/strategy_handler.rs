@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::Utc;
 
 use crate::infrastructure::db::python_strategy_repository::PythonStrategyRecord;
@@ -7,16 +7,27 @@ use crate::presentation::dto::strategy::{
     ActiveStrategy, DeployStrategyRequest, RegisterStrategyRequest, StartStrategyRequest,
     StopStrategyRequest, StrategyList,
 };
+use crate::presentation::middlewares::jwt::require_permission;
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::{AppState, StrategyHandle};
 use crate::strategy::factory::build_strategy;
 use crate::strategy::runner::spawn_strategy_runner;
 use crate::strategy::subprocess::{spawn_subprocess_runner, SubprocessConfig};
 
+/// Permission required to manage strategies (start/stop/register/deploy/list) and
+/// to run backtests. Deploying and backtesting execute user-supplied Python, so
+/// this is a high-trust capability granted to admin and trader roles.
+const STRATEGIES_MANAGE: &str = "strategies.manage";
+
 pub async fn start_strategy(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<StartStrategyRequest>,
 ) -> HttpResponse {
+    if let Err(resp) = require_permission(&req, STRATEGIES_MANAGE) {
+        return resp;
+    }
+
     let req = body.into_inner();
 
     // Fast duplicate check before any async work
@@ -113,9 +124,14 @@ pub async fn start_strategy(
 }
 
 pub async fn stop_strategy(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<StopStrategyRequest>,
 ) -> HttpResponse {
+    if let Err(resp) = require_permission(&req, STRATEGIES_MANAGE) {
+        return resp;
+    }
+
     let req = body.into_inner();
 
     let mut running = state.running_strategies.lock().await;
@@ -145,7 +161,11 @@ pub async fn stop_strategy(
     }
 }
 
-pub async fn list_strategies(state: web::Data<AppState>) -> HttpResponse {
+pub async fn list_strategies(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_permission(&req, STRATEGIES_MANAGE) {
+        return resp;
+    }
+
     let running = state.running_strategies.lock().await;
     let strategies: Vec<ActiveStrategy> = running
         .iter()
@@ -160,9 +180,14 @@ pub async fn list_strategies(state: web::Data<AppState>) -> HttpResponse {
 }
 
 pub async fn register_strategy(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<RegisterStrategyRequest>,
 ) -> HttpResponse {
+    if let Err(resp) = require_permission(&req, STRATEGIES_MANAGE) {
+        return resp;
+    }
+
     let req = body.into_inner();
 
     if req.strategy_type != "builtin" && req.strategy_type != "external" {
@@ -207,9 +232,15 @@ pub async fn register_strategy(
 /// before executing the user's code. The subprocess reads candle JSON lines from
 /// stdin and writes signal JSON lines to stdout.
 pub async fn deploy_strategy(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<DeployStrategyRequest>,
 ) -> HttpResponse {
+    let ctx = match require_permission(&req, STRATEGIES_MANAGE) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
     let req = body.into_inner();
 
     if req.name.is_empty() {
@@ -271,6 +302,7 @@ pub async fn deploy_strategy(
     drop(running);
 
     tracing::info!(
+        actor_user_id = ctx.user_id,
         strategy_id = %strategy_id,
         name = %req.name,
         "python strategy deployed and subprocess started"

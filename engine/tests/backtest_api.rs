@@ -326,3 +326,124 @@ async fn backtest_invalid_date_range_returns_4xx() {
         resp.status()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Authorization (C1) + strategy-id hardening (C11) at the HTTP boundary.
+
+fn build_authed_state(
+    candles: Vec<CandlePayload>,
+    strategy_id: &str,
+    code: &str,
+    jwt_secret: &str,
+) -> actix_web::web::Data<AppState> {
+    let record = PythonStrategyRecord {
+        strategy_id: strategy_id.to_string(),
+        name: "Test Strategy".to_string(),
+        code: code.to_string(),
+        params_json: serde_json::json!({}),
+        created_at: Utc::now(),
+    };
+    let python_repo = Arc::new(FakePythonStrategyRepository::with_records(vec![record]));
+    let candle_repo = Arc::new(FakeCandleRepository::new(candles));
+
+    actix_web::web::Data::new(AppState {
+        redis: None,
+        exchange_adapters: Arc::new(RwLock::new(HashMap::new())),
+        exchange_registry: Arc::new(Mutex::new(ExchangeRegistry::new())),
+        adapter_factories: Arc::new(HashMap::<String, AdapterFactory>::new()),
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        publisher: None,
+        broadcaster: AppState::new_broadcaster(),
+        jwt_secret: Some(Arc::new(jwt_secret.to_string())),
+        ticker_repository: None,
+        running_strategies: Arc::new(Mutex::new(HashMap::new())),
+        strategy_repository: None,
+        signal_repository: None,
+        order_adapters: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        order_manager: None,
+        python_strategy_repository: Some(python_repo),
+        candle_repository: Some(candle_repo),
+        historical_sources: Arc::new(HashMap::new()),
+        candle_history: AppState::new_candle_history(),
+        exchange_repository: None,
+        asset_repository: None,
+        subscription_repository: None,
+        user_repository: None,
+        credential_repository: None,
+        credential_cipher: None,
+    })
+}
+
+const BT_TEST_SECRET: &str = "backtest-api-test-secret";
+
+fn bt_token(perms: &[&str]) -> String {
+    use stream_coin::presentation::middlewares::jwt::mint_token_with_permissions;
+    let perms: Vec<String> = perms.iter().map(|s| s.to_string()).collect();
+    mint_token_with_permissions("5", BT_TEST_SECRET, 3600, &perms)
+}
+
+#[actix_web::test]
+async fn run_backtest_without_strategies_manage_is_forbidden_403() {
+    let candles = make_candles(&[100_000, 90_000, 110_000]);
+    let state = build_authed_state(
+        candles,
+        "backtest-strat-1",
+        BUY_THEN_SELL_CODE,
+        BT_TEST_SECRET,
+    );
+    let srv = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let from = Utc.timestamp_opt(999_990, 0).unwrap();
+    let to = Utc.timestamp_opt(1_000_200, 0).unwrap();
+    let resp = srv
+        .post("/v1/backtest/run")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", bt_token(&["orders.manage"])),
+        ))
+        .send_json(&json!({
+            "strategy_id": "backtest-strat-1", "exchange": "tabdeal", "pair": "USDT/IRT",
+            "interval": "1m", "from": from.to_rfc3339(), "to": to.to_rfc3339()
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        403,
+        "backtest runs user code — must require strategies.manage"
+    );
+}
+
+#[actix_web::test]
+async fn run_backtest_rejects_path_traversal_strategy_id_400() {
+    let candles = make_candles(&[100_000, 90_000, 110_000]);
+    let state = build_authed_state(
+        candles,
+        "backtest-strat-1",
+        BUY_THEN_SELL_CODE,
+        BT_TEST_SECRET,
+    );
+    let srv = actix_test::start(move || App::new().app_data(state.clone()).configure(init_routes));
+
+    let from = Utc.timestamp_opt(999_990, 0).unwrap();
+    let to = Utc.timestamp_opt(1_000_200, 0).unwrap();
+    let resp = srv
+        .post("/v1/backtest/run")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", bt_token(&["strategies.manage"])),
+        ))
+        .send_json(&json!({
+            "strategy_id": "../../etc/passwd", "exchange": "tabdeal", "pair": "USDT/IRT",
+            "interval": "1m", "from": from.to_rfc3339(), "to": to.to_rfc3339()
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "an unsafe strategy_id must be rejected before any file I/O"
+    );
+}

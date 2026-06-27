@@ -1,10 +1,16 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 
 use crate::backtest::engine::{BacktestEngine, BacktestError};
 use crate::backtest::venue::FillModel;
 use crate::presentation::dto::backtest::BacktestRunRequest;
+use crate::presentation::middlewares::jwt::require_permission;
 use crate::presentation::responses::{success_response, ApiError};
 use crate::presentation::shared::app_state::AppState;
+use crate::strategy::subprocess::is_safe_strategy_id;
+
+/// Backtests execute user-supplied Python, so they require the same high-trust
+/// permission as strategy deployment.
+const STRATEGIES_MANAGE: &str = "strategies.manage";
 
 /// `POST /v1/backtest/run` — replay historical candles through a deployed Python
 /// strategy and return total return, max drawdown, trade log, and signal log.
@@ -13,13 +19,27 @@ use crate::presentation::shared::app_state::AppState;
 /// preamble on Linux) as the live deployment path, so backtest and live behaviour
 /// are guaranteed to be identical.
 pub async fn run_backtest(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<BacktestRunRequest>,
 ) -> HttpResponse {
+    if let Err(resp) = require_permission(&req, STRATEGIES_MANAGE) {
+        return resp;
+    }
+
     let req = body.into_inner();
 
     if req.strategy_id.is_empty() {
         return ApiError::new("strategy_id must not be empty", vec![]).to_response();
+    }
+    // Reject ids that are unsafe as a temp-file component (path traversal / NUL)
+    // before they ever reach the filesystem.
+    if !is_safe_strategy_id(&req.strategy_id) {
+        return ApiError::new(
+            "strategy_id contains illegal characters (allowed: A-Z a-z 0-9 - _)",
+            vec![],
+        )
+        .to_response();
     }
     if req.from >= req.to {
         return ApiError::new("'from' must be before 'to'", vec![]).to_response();
@@ -96,6 +116,13 @@ pub async fn run_backtest(
     let engine = BacktestEngine::new(req.strategy_id.clone(), code, FillModel::LastClose);
     let result = match engine.run(&candles).await {
         Ok(r) => r,
+        Err(BacktestError::InvalidStrategyId) => {
+            return ApiError::new(
+                "strategy_id contains illegal characters (allowed: A-Z a-z 0-9 - _)",
+                vec![],
+            )
+            .to_response();
+        }
         Err(BacktestError::ScriptWrite(e)) => {
             tracing::error!(error = %e, strategy_id = %req.strategy_id, "backtest script write failed");
             return ApiError::new("failed to write strategy script to disk", vec![]).to_response();
